@@ -9,6 +9,8 @@ rem ---------------------------------------------------------------------------
 set "HERE=%~dp0"
 set "VENV=%HERE%.venv"
 set "PY=%VENV%\Scripts\python.exe"
+rem  Installed with "Install Photographic Studio.bat": use its private Python.
+if exist "%HERE%python\python.exe" set "PY=%HERE%python\python.exe"
 set "PIP_NO_CACHE_DIR=1"
 set "PIP_DISABLE_PIP_VERSION_CHECK=1"
 set "PYTHONDONTWRITEBYTECODE=1"

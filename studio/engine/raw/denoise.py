@@ -59,6 +59,33 @@ class DenoiseParams:
     chroma_method: str | None = None
     impulses: bool = False      # isolated-outlier filter; off: on real texture it cost 2 dB (RESULTS.md).
                                 # Hot pixels will come from the calibration map (section 8.3) instead.
+    safeguard: float = 0.0      # "restore" step (plan 23.12): no photosite may move by more than this many times
+                                # its own noise; beyond that the original is kept. 0 = off. The Studio uses 4.5.
+
+
+# What each method is good and bad at (rule 23.1), shown beside the method picker.
+METHOD_INFO = {
+    "hybrid": dict(name="Hybrid (recommended)", best="Most photos: keeps fine texture, removes colour blotches.",
+                   weak="Leaves some slow luminance mottling at extreme ISO.", speed="Medium."),
+    "starlet": dict(name="Starlet (astronomy wavelets)", best="Smooth areas, skies, very high ISO blotches.",
+                    weak="Softens fine low-contrast texture more than hybrid.", speed="Fast."),
+    "nlm": dict(name="Non-local means", best="Repeating texture (fabric, foliage).",
+                weak="Colour blotches survive more than with hybrid.", speed="Medium."),
+    "mppca": dict(name="MP-PCA (from MRI)", best="Structured detail; a principled signal / noise cut.",
+                  weak="Slow; can leave faint patch patterns in flat areas.", speed="Slow."),
+}
+
+
+def safeguard(den: np.ndarray, orig: np.ndarray, k: float) -> tuple[np.ndarray, int]:
+    """The "restore" step (idea: the train / denoise / restore of solar Self2Self, arXiv 2502.16807). Both arrays
+    are variance-stabilised, so the noise is 1 everywhere. A photosite the denoiser moved by more than k sigma was
+    not noise (a star, a catchlight, a candle spark): from k to 1.5 k the original is blended back, beyond that it
+    is kept whole. Pure noise exceeds 4.5 sigma about 7 times in a million, so nothing visible is let back in.
+    Returns (result, number of photosites protected)."""
+    d = orig - den
+    w = np.clip((np.abs(d) - np.float32(k)) / np.float32(0.5 * k), 0.0, 1.0)
+    w = w * w * (3.0 - 2.0 * w)
+    return den + w * d, int(np.count_nonzero(w > 0.5))
 
 
 # ------------------------------------------------------------------------------------------ Y/C rotation
@@ -267,8 +294,9 @@ def remove_impulses(d: np.ndarray, k: float = 5.0) -> tuple[np.ndarray, int]:
 
 # ------------------------------------------------------------------------------------------ driver
 def denoise_mosaic(mos: np.ndarray, pattern, model: NoiseModel, params: DenoiseParams | None = None,
-                   clip_start: float = 0.85) -> np.ndarray:
-    """Denoise a normalised mosaic (black-subtracted, 1.0 = clip, BEFORE white balance). Returns a new array."""
+                   clip_start: float = 0.85, stats: dict | None = None) -> np.ndarray:
+    """Denoise a normalised mosaic (black-subtracted, 1.0 = clip, BEFORE white balance). Returns a new array.
+    ``stats`` (optional) receives {"protected": photosites kept by the safeguard, "sites": photosites seen}."""
     p = params or DenoiseParams()
     lm, cm = p.luma_method, p.chroma_method
     if p.method == "hybrid":                      # detail-keeping NLM on luminance, starlet on colour blotches
@@ -300,6 +328,16 @@ def denoise_mosaic(mos: np.ndarray, pattern, model: NoiseModel, params: DenoiseP
         if p.grain > 0:
             Yd = Yd + float(p.grain) * (Y - Yd)
     R, G1, G2, B = from_yc(Yd, C1d, C2d, C3d)
+    if p.safeguard > 0:
+        kept = 0
+        with slog.stage("denoise.safeguard", log, k=p.safeguard):
+            R, n = safeguard(R, planes["R"], p.safeguard); kept += n
+            G1, n = safeguard(G1, planes["G1"], p.safeguard); kept += n
+            G2, n = safeguard(G2, planes["G2"], p.safeguard); kept += n
+            B, n = safeguard(B, planes["B"], p.safeguard); kept += n
+        if stats is not None:
+            stats["protected"], stats["sites"] = kept, int(h * w)
+        log.debug("denoise safeguard: %d photosites kept (%.1f per MP)", kept, kept / max(h * w / 1e6, 1e-9))
     out = mos.astype(np.float32, copy=True)
     with slog.stage("denoise.inverse_vst", log):
         for name, plane in (("R", R), ("G1", G1), ("G2", G2), ("B", B)):

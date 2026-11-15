@@ -1,0 +1,36 @@
+# Photographic Studio By Bill - the recipe for the MSI installer.
+# GitHub builds the MSI from this with Briefcase (BeeWare, BSD licence) whenever Release.bat sends a new
+# version (.github/workflows/release.yml). Nobody needs to run Briefcase by hand.
+# The version below is set by Release.bat (tools/set_version.py), together with studio/__init__.py.
+
+[tool.briefcase]
+project_name = "Photographic Studio"
+bundle = "io.github.photogbill"
+version = "0.1.0"
+url = "https://github.com/photogbill/Photographic_Studio_By_Bill"
+license.file = "LICENSE"
+author = "Bill"
+
+[tool.briefcase.app.photographic_studio]
+formal_name = "Photographic Studio"
+description = "A free raw studio: develop, denoise and retouch raw photos on your own PC."
+long_description = """Photographic Studio By Bill: a free, open-source raw developer (GPL-3.0).
+Your photos never leave your PC."""
+# The start-up package, the Studio itself, and the files it ships with (face and people models, shared profiles).
+sources = ["photographic_studio", "studio", "models", "profiles"]
+# The same packages as requirements.txt, without the test runner.
+requires = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "rawpy>=0.21",
+    "tifffile>=2023.7.10",
+    "Pillow>=10.0",
+    "exifread>=3.0",
+    "PySide6-Essentials>=6.6",
+]
+
+[tool.briefcase.app.photographic_studio.windows]
+# For this Windows account only: no admin rights needed. (The Studio keeps your settings and calibrations in
+# Documents\Photographic Studio, so updates and uninstalls never touch them.)
+system_installer = false
+installer_completion_launch_app = true

@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
 
 from .. import __version__, log as slog, paths
 from . import theme as T
-from .widgets import (CurveEditor, FilmicPlot, GradeWheel, GroupDialog, HueRing, SwatchRow, oklch_colour,
+from .widgets import (CurveEditor, DetailMeter, FilmicPlot, GradeWheel, GroupDialog, HueRing, SwatchRow, oklch_colour,
                       srgb8_hue)
 
 log = slog.get("app")
@@ -75,6 +75,12 @@ def to_qimage(a: np.ndarray) -> QImage:
 def display8(arr_pp: np.ndarray) -> np.ndarray:
     from ..engine.io.export import ExportSpec, to_output
     return to_output(arr_pp, ExportSpec(format="jpeg", space="srgb", bits=8))
+
+
+def bw8(a8: np.ndarray) -> np.ndarray:
+    """A display image as black and white (view only: "Judge in black and white" in Detail by scale)."""
+    y = (a8[..., 0].astype(np.float32) * 0.2126 + a8[..., 1] * 0.7152 + a8[..., 2] * 0.0722 + 0.5).astype(np.uint8)
+    return np.ascontiguousarray(np.repeat(y[..., None], 3, axis=2))
 
 
 def load_thumb(path: str, size: int = 260) -> np.ndarray:
@@ -129,6 +135,13 @@ def chip(text, colour=T.DIM):
     lb.setObjectName("chip")
     lb.setStyleSheet(f"color:{colour}; border-color:{T.alpha(colour, 0.33)};")
     return lb
+
+
+def qalpha(colour: str, a: float) -> QColor:
+    """'#rrggbb' with opacity as a QColor (QColor does not read the style-sheet 'rgba(...)' form)."""
+    c = QColor(colour)
+    c.setAlphaF(a)
+    return c
 
 
 def card():
@@ -333,15 +346,25 @@ class Viewer(QWidget):
     shape_drawn = Signal(float, float, float, float)   # portrait: a new shape from one end to the other
     shape_picked = Signal(int)                   # portrait: shape selected (-1 = none)
     shape_moved = Signal(int, float, float)      # portrait: shape index, moved by (du, dv)
+    busy_changed = Signal(bool)                  # work started (True) or finished (False): the panel's chip follows
+
+    BUSY_SHOW_S = 0.15                           # quick renders finish before the indicator appears (no flicker)
 
     def __init__(self):
         super().__init__()
         self.after = self.before = self.loupe = self.loupe_before = None
         self.split = None
-        self.busy = False
+        self._busy = False
+        self.busy_since = 0.0                      # perf_counter() when the current work started
+        self.busy_took = 0.0                       # how long the last piece of work took, seconds
+        self._spin = QTimer(self, interval=40, timeout=self.update)   # animates the indicator only while busy
         self.message = "Open a photo from the Library (double-click it)."
         self._drag = False
         self.crop_mode = False
+        self.comp = "thirds"                       # composition overlay (local/composition.py) or "off"
+        self.comp_orient = 0                       # Shift+O: mirrored left-right / top-bottom
+        self.comp_outside = False                  # also on the whole photo, outside the crop tool (after O)
+        self.comp_flash = 0.0                      # when the overlay last changed (its name shows for a moment)
         self.crop = (0.0, 0.0, 1.0, 1.0)          # fractions of the displayed (uncropped) frame
         self.crop_ratio = None                     # width / height in pixels, None = free
         self._cdrag = None
@@ -367,6 +390,74 @@ class Viewer(QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
 
+    # A friend's first test (2026-11-15): "the filters aren't working on the right-hand side" - they were, just
+    # slowly, and the only sign was a small label in the far corner. Work now shows as a moving bar along the top of
+    # the photo and a "Working... 1.4 s" pill, and the Controls chip on the right says the same.
+    @property
+    def busy(self) -> bool:
+        return self._busy
+
+    @busy.setter
+    def busy(self, on: bool):
+        on = bool(on)
+        if on == self._busy:
+            return
+        self._busy = on
+        if on:
+            self.busy_since = time.perf_counter()
+            self._spin.start()
+        else:
+            self.busy_took = time.perf_counter() - self.busy_since
+            self._spin.stop()
+        self.update()
+        self.busy_changed.emit(on)
+
+    def busy_for(self) -> float:
+        """Seconds the current work has been running (0 when idle)."""
+        return time.perf_counter() - self.busy_since if self._busy else 0.0
+
+    def _paint_busy(self, p, r):
+        """Indeterminate progress: a cyan segment sweeping along the top edge of the photo, and a pill with a
+        turning arc and the seconds so far. Nothing for the first 0.15 s, so quick renders don't flicker."""
+        t = self.busy_for()
+        if t < self.BUSY_SHOW_S:
+            return
+        p.save()
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        bar = QRectF(r.left(), max(2.0, r.top() - 7), r.width(), 4)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(255, 255, 255, 28))
+        p.drawRoundedRect(bar, 2, 2)
+        seg = bar.width() * 0.28
+        x = bar.left() - seg + ((t * 0.75) % 1.0) * (bar.width() + seg)
+        g = QLinearGradient(x, 0, x + seg, 0)
+        g.setColorAt(0.0, qalpha(T.CYAN, 0.0))
+        g.setColorAt(0.5, QColor(T.CYAN))
+        g.setColorAt(1.0, qalpha(T.CYAN, 0.0))
+        p.setBrush(g)
+        p.setClipRect(bar)
+        p.drawRoundedRect(QRectF(x, bar.top(), seg, bar.height()), 2, 2)
+        p.setClipping(False)
+        text = f"Working...  {t:.1f} s"
+        p.setFont(QFont("Segoe UI", 11, QFont.Weight.DemiBold))
+        fm = p.fontMetrics()
+        h = fm.height() + 12
+        w = fm.horizontalAdvance(text) + h + 18
+        box = QRectF(self.width() / 2 - w / 2, r.top() + 10, w, h)
+        p.setBrush(QColor(0, 0, 0, 190))
+        p.setPen(QPen(qalpha(T.AMBER, 0.55), 1))
+        p.drawRoundedRect(box, h / 2, h / 2)
+        d = h - 12
+        arc = QRectF(box.left() + 9, box.top() + 6, d, d)
+        p.setPen(QPen(QColor(255, 255, 255, 40), 2.5))
+        p.drawEllipse(arc)
+        p.setPen(QPen(QColor(T.AMBER), 2.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawArc(arc, int(-t * 360 * 16) % (360 * 16), 100 * 16)
+        p.setPen(QColor(T.AMBER))
+        p.drawText(QRectF(arc.right() + 8, box.top(), w - d - 22, h),
+                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
+        p.restore()
+
     def _fit(self, img: QImage) -> QRectF:
         r = QRectF(self.rect()).adjusted(18, 18, -18, -18)
         if img is None or img.width() == 0:
@@ -386,6 +477,8 @@ class Viewer(QWidget):
             p.setPen(QColor(T.DIM))
             p.setFont(QFont("Segoe UI", 12))
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.message)
+            if self.busy:                                    # opening a photo: the slowest render of all
+                self._paint_busy(p, self._fit(None))
             return
         r = self._fit(self.after)
         if self._pan is not None:                            # dragging the 100% view: show it moving
@@ -434,8 +527,10 @@ class Viewer(QWidget):
                       "photo)", right=True)
         if self.crop_mode:
             self._paint_crop(p, r)
+        elif self.comp_outside and self.win is None:
+            self._paint_comp(p, r)
         if self.busy:
-            self._tag(p, QPointF(30, self.height() - 34), "Rendering...", colour=T.AMBER)
+            self._paint_busy(p, r)
 
     show_overlay = False
 
@@ -810,10 +905,7 @@ class Viewer(QWidget):
             if q.width() > 0 and q.height() > 0:
                 p.drawRect(q)
         p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(QColor(255, 255, 255, 70), 1))
-        for k in (1, 2):                                     # rule of thirds
-            p.drawLine(QPointF(c.left() + c.width() * k / 3, c.top()), QPointF(c.left() + c.width() * k / 3, c.bottom()))
-            p.drawLine(QPointF(c.left(), c.top() + c.height() * k / 3), QPointF(c.right(), c.top() + c.height() * k / 3))
+        self._paint_comp(p, c)
         p.setPen(QPen(QColor(T.CYAN), 2))
         p.drawRect(c)
         p.setBrush(QColor(T.CYAN))
@@ -821,6 +913,35 @@ class Viewer(QWidget):
             p.drawRect(QRectF(pt.x() - 5, pt.y() - 5, 10, 10))
         self._tag(p, QPointF(r.left() + 12, r.top() + 12), "Crop: drag the frame or its corners; press Enter or "
                   "the Crop button when done")
+
+    def _paint_comp(self, p, c):
+        """The composition overlay in the rectangle c: thin white lines with a dark edge (seen on any photo) and the
+        method's strong points as small rings; its name for a moment after it changes."""
+        from ..engine.local import composition as cp
+        if self.comp not in cp.NAMES or c.width() < 8 or c.height() < 8:
+            return
+        p.save()
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        aspect = c.width() / c.height()
+        paths = []
+        for pl in cp.lines(self.comp, aspect, self.comp_orient):
+            path = QPainterPath(QPointF(c.left() + pl[0][0] * c.width(), c.top() + pl[0][1] * c.height()))
+            for x, y in pl[1:]:
+                path.lineTo(QPointF(c.left() + x * c.width(), c.top() + y * c.height()))
+            paths.append(path)
+        for pen in (QPen(QColor(0, 0, 0, 90), 3), QPen(QColor(255, 255, 255, 150), 1)):
+            p.setPen(pen)
+            for path in paths:
+                p.drawPath(path)
+        p.setPen(QPen(QColor(T.CYAN), 1.5))
+        for x, y in cp.points(self.comp, aspect, self.comp_orient):
+            p.drawEllipse(QPointF(c.left() + x * c.width(), c.top() + y * c.height()), 5, 5)
+        p.restore()
+        if time.perf_counter() - self.comp_flash < 2.5:
+            turn = "  ·  Shift+O turns it" if cp.ORIENTATIONS.get(self.comp, 1) > 1 else ""
+            self._tag(p, QPointF(c.center().x() - 150, c.bottom() - 34), f"{cp.NAMES[self.comp]}  ·  O: next{turn}",
+                      colour=T.CYAN)
 
     def _crop_press(self, pos):
         r = self._fit(self.after)
@@ -1285,6 +1406,10 @@ class DevelopPage(QWidget):
         self._ranges: list = []
         self._rsel = -1
         self.token = 0
+        self.judge_bw = False                               # view only: "Judge in black and white"
+        self._render_live = False              # a preview render is running (only one at a time)
+        self._render_again = False             # the controls changed while it ran: render once more when it ends
+        self._render_img = None                # the photo that render belongs to
         self.before_img = None
         self.loupe_pt = None
         root = QHBoxLayout(self)
@@ -1380,11 +1505,14 @@ class DevelopPage(QWidget):
         root.addWidget(self._build_panel())
         self.timer = QTimer(self, singleShot=True, interval=140, timeout=self.render_now)
         self.save_timer = QTimer(self, singleShot=True, interval=900, timeout=self.save_sidecar)
+        self.ds_ratio_timer = QTimer(self, singleShot=True, interval=1200, timeout=self._ds_measure_balance)
         QShortcut(QKeySequence("B"), self, activated=self.ba.toggle)
         QShortcut(QKeySequence("Ctrl+Z"), self, activated=self.do_undo)
         QShortcut(QKeySequence("Ctrl+Y"), self, activated=self.do_redo)
         QShortcut(QKeySequence("Esc"), self, activated=self.close_loupe)
         QShortcut(QKeySequence("C"), self, activated=self.crop_b.toggle)
+        QShortcut(QKeySequence("O"), self, activated=self.cycle_overlay)
+        QShortcut(QKeySequence("Shift+O"), self, activated=self.turn_overlay)
         QShortcut(QKeySequence(Qt.Key.Key_Return), self, activated=lambda: self.crop_b.setChecked(False))
         QShortcut(QKeySequence(Qt.Key.Key_Enter), self, activated=lambda: self.crop_b.setChecked(False))
         QShortcut(QKeySequence("Ctrl+Shift+C"), self, activated=self.copy_settings)
@@ -1405,6 +1533,12 @@ class DevelopPage(QWidget):
         lv = QHBoxLayout()
         lv.addWidget(label("Controls", "h2"))
         lv.addStretch(1)
+        self.work_chip = chip("Ready", T.DIM)          # right beside the sliders: is it still working?
+        self.work_chip.setToolTip("Amber while the photo is being worked on (it can take a few seconds on big raws "
+                                  "or slower PCs); afterwards it shows how long the last update took.")
+        lv.addWidget(self.work_chip)
+        self._work_tick = QTimer(self, interval=200, timeout=self._show_work)
+        self.viewer.busy_changed.connect(self._busy_changed)
         self.level = QComboBox()
         self.level.addItems(["Simple", "Full"])
         self.level.setCurrentIndex(1 if self.settings.get("level") == "Full" else 0)
@@ -1446,11 +1580,20 @@ class DevelopPage(QWidget):
                                       "Puts back a fine, film-like fraction of the luminance noise."))
         self.dn_m = g.add(QComboBox())
         self.dn_m.addItems(["hybrid", "starlet", "nlm", "mppca"])
-        self.dn_m.setToolTip("Method (for testing): hybrid = NLM luminance + starlet colour (default)")
+        self.dn_m.setToolTip("Method: hybrid = NLM luminance + starlet colour (recommended)")
+        self.dn_info = g.add(label("", "dim", wrap=True))
+        self.dn_m.currentIndexChanged.connect(lambda *_: self._dn_method_text())
+        self._dn_method_text()
+        self.dn_safe = g.add(QCheckBox("Protect stars, catchlights and sparks"))
+        self.dn_safe.setChecked(True)
+        self.dn_safe.setToolTip("After cleaning, anything that moved by more than 4.5 times its measured noise was "
+                                "not noise: the original is kept there. Pure noise almost never does that, so "
+                                "nothing visible is let back in.")
+        self.dn_safe_chip = g.add(chip("Protected: -"))
         self.band = g.add(QCheckBox("Remove row banding (measured, never added)"))
         self.band.setChecked(True)
         self.noise_chip = g.add(chip("Noise model: -"))
-        self.full_only = [self.dn_l, self.dn_c, self.dn_g, self.dn_m]
+        self.full_only = [self.dn_l, self.dn_c, self.dn_g, self.dn_m, self.dn_info]
         bl.addWidget(g)
         # Lens
         g = Group("Lens", "Works without a lens profile, including contactless vintage glass.")
@@ -1518,6 +1661,38 @@ class DevelopPage(QWidget):
         self.aspect.addItems(["Original ratio", "Free", "3:2", "4:3", "5:4", "4:5", "1:1", "16:9", "2:1"])
         self.aspect.setToolTip("Shape of the crop frame")
         self.aspect.activated.connect(self._aspect_picked)
+        # composition: an overlay for each method, and crops suggested by method
+        from ..engine.local import composition as cp
+        self.comp_combo = QComboBox()
+        self.comp_combo.addItem("Overlay: off")
+        for _, name in cp.OVERLAYS:
+            self.comp_combo.addItem(name)
+        self.comp_combo.setToolTip("Composition overlay on the crop frame (O: next one; also shows on the whole "
+                                   "photo once you press O outside the crop tool)")
+        self.comp_combo.activated.connect(self._comp_picked)
+        self.comp_turn = QPushButton("Turn")
+        self.comp_turn.setToolTip("Mirror the overlay (golden spiral and triangles): Shift+O")
+        self.comp_turn.clicked.connect(self.turn_overlay)
+        g.add(hbox(self.comp_combo, self.comp_turn))
+        self.suggest_b = QPushButton("Suggest crops")
+        self.suggest_b.setObjectName("primary")
+        self.suggest_b.setToolTip("Crops that put the eyes (or the subject) on the chosen overlay's strong points, "
+                                  "keep heads whole with room above, leave space in front of a turned face and "
+                                  "never cut at a joint. With the overlay off, any method. Uses the crop shape above.")
+        self.suggest_b.clicked.connect(self.suggest_crops)
+        g.add(hbox(self.suggest_b))
+        self.suggest_list = QListWidget()
+        self.suggest_list.setWordWrap(True)
+        self.suggest_list.setMaximumHeight(118)
+        self.suggest_list.setToolTip("Click one to try it (then adjust the frame, Enter when done)")
+        self.suggest_list.itemClicked.connect(self._suggestion_picked)
+        self.suggest_list.hide()
+        g.add(self.suggest_list)
+        self._suggestions = []
+        last = self.settings.get("comp_overlay", "thirds")
+        self.viewer.comp = last if (last in cp.NAMES or last == "off") else "thirds"
+        self.viewer.comp_orient = int(self.settings.get("comp_orient", 0) or 0)
+        self._sync_comp_combo()
         self.vert = g.add(ValueSlider("Vertical perspective", -100, 100, 0, 1, "{:+.0f}",
                                       "+ widens the top: straightens buildings that lean back."))
         self.horiz = g.add(ValueSlider("Horizontal perspective", -100, 100, 0, 1, "{:+.0f}",
@@ -1550,6 +1725,28 @@ class DevelopPage(QWidget):
         self.l_smart = g.add(ValueSlider("Smart lighting", 0, 100, 0, 1, "{:.0f}",
                                          "Opens up deep shadow areas region by region (like DxO Smart Lighting), "
                                          "keeping their texture and leaving lit areas alone. 0 = off."))
+        from ..engine.color import hdr as HD
+        self.hdr_on = g.add(QCheckBox("Auto HDR  (opens shadows, holds highlights)"))
+        self.hdr_on.setToolTip("Measures how much range this photo has and makes room for it without flattening "
+                               "local contrast or making halos. It changes brightness, so it is never on unless "
+                               "you turn it on.")
+        self.hdr_strength = QComboBox()
+        for key, st in HD.STRENGTHS.items():
+            self.hdr_strength.addItem(st["name"], key)
+        self.hdr_strength.setCurrentIndex(list(HD.STRENGTHS).index("medium"))
+        g.add(self.hdr_strength)
+        self.hdr_text = g.add(label("", "dim", wrap=True))
+        self.hdr_amt = g.add(ValueSlider("  amount", 0, 150, 100, 1, "{:.0f}%",
+                                         "How much of that strength: 100% is what the photo was measured to need."))
+        self.hdr_engine = QComboBox()
+        for key, en in HD.ENGINES.items():
+            self.hdr_engine.addItem(en["name"], key)
+        g.add(self.hdr_engine)
+        self.hdr_engine_text = g.add(label("", "dim", wrap=True))
+        self.hdr_chip = g.add(chip("Auto HDR: off"))
+        self.hdr_strength.currentIndexChanged.connect(lambda *_: self._hdr_texts())
+        self.hdr_engine.currentIndexChanged.connect(lambda *_: self._hdr_texts())
+        self._hdr_texts()
         self.l_haze = g.add(ValueSlider("Dehaze", -100, 100, 0, 1, "{:+.0f}",
                                         "+ cuts through haze and mist (more contrast and colour far away), - adds a "
                                         "soft haze. Makes hazy photos darker overall: adjust exposure after."))
@@ -1618,8 +1815,22 @@ class DevelopPage(QWidget):
         self.auto_wb_b = QPushButton("Auto")
         self.auto_wb_b.setToolTip("Estimates the colour of the light from the photo's edges (grey-edge). It "
                                   "neutralises candle warmth: for candle-lit portraits As shot usually looks truer.")
-        self.auto_wb_b.clicked.connect(self.auto_wb)
+        self.auto_wb_b.clicked.connect(lambda: self.auto_wb())
         g.add(hbox(self.pick_wb, self.auto_wb_b))
+        from ..engine.color import autowb as AW
+        self.wb_method = QComboBox()
+        for key, info in AW.METHODS.items():
+            self.wb_method.addItem(f"Auto uses: {info['name']}", key)
+        self.wb_method.setToolTip("\n".join(f"{i['name']}. Best for: {i['best']} Weak at: {i['weak']}"
+                                             for i in AW.METHODS.values()))
+        g.add(self.wb_method)
+        self.wb_mood = g.add(ValueSlider("Auto: keep the mood", 0, 100, 100, 5, "{:.0f}% neutral",
+                                         "How far Auto corrects the light. 100% = fully neutral; less keeps part "
+                                         "of the light's own colour. Auto picks 60% for warm low-light photos (a "
+                                         "candle should stay warm) and 90% otherwise; move it and Auto runs again."))
+        self.wb_mood.changed.connect(lambda v: self.auto_wb(mood=v / 100.0) if self._wb_auto_used else None)
+        self.wb_chip = g.add(chip("Auto white balance: not used"))
+        self._wb_auto_used = False
         self.temp = g.add(ValueSlider("Temperature", 2000, 12000, 5500, 50, "{:.0f} K"))
         self.tint = g.add(ValueSlider("Tint", -100, 100, 0, 1, "{:+.0f}"))
         self.temp.changed.connect(self._wb_slider_moved)          # runs before controls_changed (connected later)
@@ -1742,19 +1953,76 @@ class DevelopPage(QWidget):
         self.grade_group = g
         bl.addWidget(g)
         # Detail
-        g = Group("Detail", "Microcontrast: more shades of shadow, not edge sharpening.")
-        self.mc = g.add(ValueSlider("Microcontrast", 0.0, 1.0, 0.0, 0.01, "{:.0%}",
-                                    "Separates small tonal differences (the variations of shadow) at medium "
-                                    "scales. Big edges are left alone, so no halos; noise is not amplified."))
+        g = Group("Detail", "Detail by scale: microcontrast in every sense of the word. Pick an Amount and a "
+                            "Balance, or (Full) dial in each method and combine them.")
+        from ..engine.detail import scales as DS
+        self.ds_preset = QComboBox()
+        self.ds_preset.addItems(["Preset..."] + list(DS.PRESETS))
+        self.ds_preset.setToolTip("Tonal: shades and modelling (Bill's microcontrast). Crisp: fine bite. Both: sharp "
+                                  "and tonal together. Soft glow: a gentle haze, softened fine detail.")
+        self.ds_preset.activated.connect(self._ds_preset_picked)
+        self.ds_bw = QCheckBox("Judge in black and white")
+        self.ds_bw.setToolTip("Shows the photo in black and white while you adjust (it does not change the edit).\n"
+                              "Microcontrast shows best once the colour is out of the way.")
+        self.ds_bw.toggled.connect(self._ds_bw_toggled)
+        g.add(hbox(self.ds_preset, self.ds_bw))
+        self.ds_amount = g.add(ValueSlider("Amount", 0, 100, 0, 1, "{:.0f}",
+                                           "How much microcontrast. 60-80 is plain to see at screen size; big edges "
+                                           "are left alone (no halos) and noise is not lifted as if it were detail."))
+        self.ds_balance = g.add(ValueSlider("Balance  (tonal - crisp)", -100, 100, -50, 1, "{:+.0f}",
+                                            "Left = Tonal: medium scales up, the finest scale relaxed (modelled, "
+                                            "more shades). Middle = both. Right = Crisp: the finest scale up "
+                                            "(etched). Starts on the Tonal side."))
+        self.ds_meter = g.add(DetailMeter())
+        self.ds_ratio = g.add(chip("Balance (medium : fine): -"))
+        self.ds_ratio.setToolTip("The balance number: medium-scale tonal variation over pixel-level contrast, before "
+                                 "and after, measured at 100% in the middle of the photo. Higher reads as modelled, "
+                                 "lower as etched. (On the same leaf: Heliar 1.35, Canon 180 macro 1.21, Sigma Art "
+                                 "1.06.)")
+        self.ds_note = g.add(chip(""))
+        self.ds_note.setVisible(False)
+        self.ds_diff = QPushButton("Recover diffraction loss")
+        self.ds_diff.setToolTip("Turns on Recover lens sharpness, which undoes the blur measured in this photo.")
+        self.ds_diff.clicked.connect(self._ds_recover_diffraction)
+        self.ds_diff.setVisible(False)
+        g.add(self.ds_diff)
+        # every method: its own switch, its own amount, and what it is good and bad at (rule 23.1)
+        self.ds_rows = {}
+        self.ds_methods_box = QWidget()
+        mb = QVBoxLayout(self.ds_methods_box)
+        mb.setContentsMargins(0, 4, 0, 0)
+        mb.setSpacing(4)
+        mb.addWidget(label("Methods (each has its own amount; any number can be on):", "dim", wrap=True))
+        for key in ("tonal", "local", "crisp", "separation", "veil", "broad"):
+            info = DS.METHODS[key]
+            on = QCheckBox(info["name"])
+            on.setChecked(True)
+            on.setStyleSheet(f"QCheckBox {{ color: {DetailMeter.COLOURS[key]}; font-weight: 600; }}")
+            sl = ValueSlider("  amount", info["lo"], info["hi"], 0, 1, "{:+.0f}" if info["lo"] < 0 else "{:.0f}",
+                             f"{info['does']}\nBest for: {info['best']}\nWeak at: {info['weak']}")
+            txt = label(f"{info['does']}  Best for: {info['best'].rstrip('.').lower()}.  Weak at: "
+                        f"{info['weak'].rstrip('.').lower()}.", "dim", wrap=True)
+            mb.addWidget(on)
+            mb.addWidget(sl)
+            mb.addWidget(txt)
+            self.ds_rows[key] = (on, sl)
+            on.toggled.connect(self.controls_changed)
+            sl.changed.connect(lambda _v, k=key: self._ds_method_moved(k))
+        g.add(self.ds_methods_box)
+        self.mc = self.ds_rows["local"][1]                  # "Local contrast" is the first engine (microcontrast)
+        g.add(label("Where it works (all methods):", "dim"))
         self.mc_sh = g.add(ValueSlider("  in shadows", 0.0, 1.0, 1.0, 0.05, "{:.0%}"))
         self.mc_mid = g.add(ValueSlider("  in midtones", 0.0, 1.0, 0.7, 0.05, "{:.0%}"))
         self.mc_hi = g.add(ValueSlider("  in highlights", 0.0, 1.0, 0.3, 0.05, "{:.0%}"))
-        self.mc_sc = g.add(ValueSlider("  scale (fine - broad)", -1.0, 1.0, 0.0, 0.05, "{:+.2f}",
-                                       "Which size of tonal detail is lifted: leaf veins (fine) to whole leaves "
-                                       "(broad)."))
-        self.f_tex = g.add(ValueSlider("Texture", -100, 100, 0, 1, "{:+.0f}",
-                                       "Fine detail (bark, fabric, skin pores): + brings it out, - smooths it. Big "
-                                       "edges are never touched. Judge it at 100% (click the photo)."))
+        self.mc_sc = g.add(ValueSlider("  local contrast scale (fine - broad)", -1.0, 1.0, 0.0, 0.05, "{:+.2f}",
+                                       "Local contrast only: which size of tonal detail is lifted, leaf veins "
+                                       "(fine) to whole leaves (broad)."))
+        self.f_tex = g.add(ValueSlider("Texture (earlier tool)", -100, 100, 0, 1, "{:+.0f}",
+                                       "The earlier Texture slider, kept so older edits can still be changed. Crisp "
+                                       "replaces it: set this to 0 and use Crisp instead."))
+        self.f_tex.setVisible(False)
+        self.ds_amount.changed.connect(self._ds_simple_moved)
+        self.ds_balance.changed.connect(self._ds_simple_moved)
         self.sh_on = g.add(QCheckBox("Recover lens sharpness"))
         self.sh_on.setToolTip("Undoes part of the blur measured in this photo by deconvolution. Off for "
                               "character lenses unless you turn it on. Judge it at 100% (click the photo).")
@@ -1950,7 +2218,8 @@ class DevelopPage(QWidget):
         self.snap_list.itemDoubleClicked.connect(lambda _: self.restore_snapshot())
         bl.addWidget(g)
         self.full_only += [self.dist_m, self.vig_s, self.vert, self.horiz, self.constrain, self.mc_sh, self.mc_mid,
-                           self.mc_hi, self.mc_sc, self.dem, self.dfr_s, self.tone, self.mcb, self.lut_combo,
+                           self.mc_hi, self.mc_sc, self.ds_methods_box, self.hdr_engine, self.hdr_engine_text,
+                           self.dem, self.dfr_s, self.tone, self.mcb, self.lut_combo,
                            self.lut_amt, self.curve_group, self.wheel_group, self.hsl_group, self.grade_group,
                            self.hl_mode, self.prof_combo, self.f_gsize, self.f_grough, self.f_gcol, self.glow_combo]
         bl.addStretch(1)
@@ -1972,15 +2241,18 @@ class DevelopPage(QWidget):
         reset.clicked.connect(self.reset)
         outer.addWidget(reset)
         for w in (self.dn_s, self.dn_l, self.dn_c, self.dn_g, self.ev, self.con, self.temp, self.tint, self.dfr_s,
-                  self.dist_m, self.vig_s, self.rot, self.vert, self.horiz, self.mc, self.mc_sh, self.mc_mid,
+                  self.dist_m, self.vig_s, self.rot, self.vert, self.horiz, self.mc_sh, self.mc_mid,
                   self.mc_hi, self.mc_sc, self.sh_s, self.l_hl, self.l_sh, self.l_wh, self.l_bk, self.l_smart,
                   self.c_sat, self.c_vib, self.lut_amt, self.g_bal, self.g_blend, *self.bw_sl, self.l_haze,
                   self.p_hi, self.p_li, self.p_da, self.p_sh, self.t_toe, self.t_shoulder, self.f_tex, self.f_grain,
                   self.f_gsize, self.f_grough):
             w.changed.connect(self.controls_changed)
         for w in (self.dn_on, self.band, self.mcb, self.ca, self.dfr, self.dist, self.vig, self.constrain, self.sh_on,
-                  self.c_bw, self.f_gcol):
+                  self.c_bw, self.f_gcol, self.dn_safe, self.hdr_on):
             w.toggled.connect(self.controls_changed)
+        self.hdr_amt.changed.connect(self.controls_changed)
+        for w in (self.hdr_strength, self.hdr_engine):
+            w.currentIndexChanged.connect(self.controls_changed)
         for w in (self.t_toe, self.t_shoulder, self.con, self.l_wh):
             w.changed.connect(lambda *_: self._update_filmic())
         self.c_bw.toggled.connect(lambda _: self._bw_visibility())
@@ -2027,6 +2299,7 @@ class DevelopPage(QWidget):
         e.denoise.luma = round(self.dn_l.value() * s, 3)
         e.denoise.chroma = round(self.dn_c.value() * s, 3)
         e.denoise.grain = round(self.dn_g.value(), 3)
+        e.denoise.safeguard = self.dn_safe.isChecked()
         e.banding = self.band.isChecked()
         e.exposure_ev = round(self.ev.value(), 3)
         e.tone.contrast = round(self.con.value(), 3)
@@ -2052,9 +2325,13 @@ class DevelopPage(QWidget):
         g.horizontal = round(self.horiz.value(), 1)
         g.constrain = self.constrain.isChecked()
         m = e.microcontrast
-        m.amount = round(self.mc.value(), 3)
+        m.amount = round(self.ds_rows["local"][1].value() / 100.0, 3)
         m.shadows, m.midtones, m.highlights = (round(w.value(), 3) for w in (self.mc_sh, self.mc_mid, self.mc_hi))
         m.scale = round(self.mc_sc.value(), 3)
+        for k in ("tonal", "crisp", "separation", "veil", "broad"):
+            setattr(e.detail, k, round(self.ds_rows[k][1].value(), 1))
+        off = [k for k, (on, _) in self.ds_rows.items() if not on.isChecked()]
+        e.detail.off = off or None
         e.sharpen.enabled = self.sh_on.isChecked()
         e.sharpen.amount = round(self.sh_s.value(), 3)
         from ..engine.color import grade as G
@@ -2063,6 +2340,10 @@ class DevelopPage(QWidget):
             self.l_hl, self.l_sh, self.l_wh, self.l_bk, self.l_smart))
         L.curve = self.curve.value()
         L.dehaze = round(self.l_haze.value(), 1)
+        e.hdr.enabled = self.hdr_on.isChecked()
+        e.hdr.strength = self.hdr_strength.currentData() or "medium"
+        e.hdr.amount = round(self.hdr_amt.value(), 1)
+        e.hdr.engine = self.hdr_engine.currentData() or "fusion"
         prm = {k: round(w.value(), 1) for k, w in (("highlights", self.p_hi), ("lights", self.p_li),
                                                    ("darks", self.p_da), ("shadows", self.p_sh)) if w.value()}
         L.param = prm or None
@@ -2129,6 +2410,10 @@ class DevelopPage(QWidget):
         self.dn_c.set_value(e.denoise.chroma, emit=False)
         self.dn_g.set_value(e.denoise.grain, emit=False)
         self.dn_m.setCurrentText(e.denoise.method)
+        self.dn_safe.blockSignals(True)
+        self.dn_safe.setChecked(bool(e.denoise.safeguard))
+        self.dn_safe.blockSignals(False)
+        self._dn_method_text()
         self.band.setChecked(e.banding)
         self.ev.set_value(e.exposure_ev, emit=False)
         self.con.set_value(e.tone.contrast, emit=False)
@@ -2156,7 +2441,14 @@ class DevelopPage(QWidget):
         self.aspect.setCurrentIndex(max(0, self.aspect.findText(
             {"original": "Original ratio", "free": "Free"}.get(g.aspect, g.aspect))))
         m = e.microcontrast
-        self.mc.set_value(m.amount, emit=False)
+        off = set(e.detail.off or ())
+        for k, (on, sl) in self.ds_rows.items():
+            on.blockSignals(True)
+            on.setChecked(k not in off)
+            on.blockSignals(False)
+            sl.set_value(m.amount * 100.0 if k == "local" else getattr(e.detail, k), emit=False)
+        self._ds_sync_simple()
+        self._ds_refresh(e)
         self.mc_sh.set_value(m.shadows, emit=False)
         self.mc_mid.set_value(m.midtones, emit=False)
         self.mc_hi.set_value(m.highlights, emit=False)
@@ -2171,6 +2463,15 @@ class DevelopPage(QWidget):
             w.set_value(v, emit=False)
         self.curve.set_curves(L.curve)
         self.l_haze.set_value(L.dehaze, emit=False)
+        for w in (self.hdr_on, self.hdr_strength, self.hdr_engine):
+            w.blockSignals(True)
+        self.hdr_on.setChecked(bool(e.hdr.enabled))
+        self.hdr_strength.setCurrentIndex(max(0, self.hdr_strength.findData(e.hdr.strength)))
+        self.hdr_engine.setCurrentIndex(max(0, self.hdr_engine.findData(e.hdr.engine)))
+        for w in (self.hdr_on, self.hdr_strength, self.hdr_engine):
+            w.blockSignals(False)
+        self.hdr_amt.set_value(e.hdr.amount, emit=False)
+        self._hdr_texts()
         prm = L.param or {}
         for w, k in ((self.p_hi, "highlights"), (self.p_li, "lights"), (self.p_da, "darks"), (self.p_sh, "shadows")):
             w.set_value(float(prm.get(k, 0)), emit=False)
@@ -2182,6 +2483,7 @@ class DevelopPage(QWidget):
         self._fill_profiles(e.profile)
         fi = e.finish
         self.f_tex.set_value(fi.texture, emit=False)
+        self.f_tex.setVisible(bool(fi.texture))             # only for edits made with the earlier Texture slider
         self.f_grain.set_value(fi.grain, emit=False)
         self.f_gsize.set_value(fi.grain_size, emit=False)
         self.f_grough.set_value(fi.grain_roughness, emit=False)
@@ -2227,7 +2529,148 @@ class DevelopPage(QWidget):
         if self.image is None:
             return
         if self._push(self.edit_from_controls()):
+            self._ds_refresh(self.edit)
             self.schedule()
+
+    def _hdr_texts(self):
+        from ..engine.color import hdr as HD
+        st = HD.STRENGTHS.get(self.hdr_strength.currentData() or "medium")
+        en = HD.ENGINES.get(self.hdr_engine.currentData() or "fusion")
+        self.hdr_text.setText(st["does"] if st else "")
+        self.hdr_engine_text.setText(f"Best for: {en['best']} Weak at: {en['weak']}" if en else "")
+
+    def _hdr_refresh(self):
+        """The Light panel's Auto HDR report: what the photo was measured to need and what was done."""
+        if self.image is None or not self.edit.hdr.enabled:
+            self.hdr_chip.setText("Auto HDR: off")
+            return
+        from .. import engine as E
+        try:
+            r = E.hdr_report(self.image, self.shown_edit())
+        except Exception:                                   # a report must never stop the editor
+            slog.log_exception("auto hdr report failed", log)
+            r = None
+        if not r:
+            self.hdr_chip.setText("Auto HDR: -")
+            return
+        txt = (f"Scene range {r['range']:.1f} stops. Shadows opened up to {r['lifted']:.1f}, highlights held "
+               f"up to {r['pulled']:.1f}.")
+        if r.get("fits"):
+            txt = f"Scene range {r['range']:.1f} stops: it already fits, so only a little was done."
+        if r.get("noise_limited", 0) > 0.15:
+            txt += f" Lift held back {r['noise_limited'] * 100:.0f}% where the shadows are mostly noise" + (
+                "." if self.edit.denoise.enabled else " (Clean up noise first to open them further).")
+        self.hdr_chip.setText(txt)
+
+    def _dn_method_text(self):
+        from ..engine.raw.denoise import METHOD_INFO
+        i = METHOD_INFO.get(self.dn_m.currentText())
+        self.dn_info.setText(f"{i['name']}. Best for: {i['best']} Weak at: {i['weak']} Speed: {i['speed']}" if i
+                             else "")
+
+    def _dn_safe_refresh(self):
+        r = getattr(self.image, "denoise_report", None) if self.image is not None else None
+        on = self.image is not None and self.edit.denoise.enabled and self.edit.denoise.safeguard
+        if not on or not r:
+            self.dn_safe_chip.setText("Protected: -")
+            return
+        self.dn_safe_chip.setText(f"Protected: {r['protected']:,} photosites kept as shot "
+                                  f"({r['protected'] / max(r['sites'], 1) * 1e6:.0f} per million)")
+
+    # ------------------------------------------------------------------------------------ detail by scale
+    def _ds_sync_simple(self):
+        """Show the Amount and Balance that the Tonal and Crisp method sliders add up to."""
+        from ..engine.detail import scales as DS
+        a, t = DS.to_simple(self.ds_rows["tonal"][1].value() / 100.0, self.ds_rows["crisp"][1].value() / 100.0)
+        self.ds_amount.set_value(a * 100.0, emit=False)
+        if a > 1e-6:
+            self.ds_balance.set_value(t * 100.0, emit=False)
+
+    def _ds_simple_moved(self, *_):
+        """Amount / Balance are a saved combination of the Tonal and Crisp sliders (plan 23.11)."""
+        from ..engine.detail import scales as DS
+        m = DS.from_simple(self.ds_amount.value() / 100.0, self.ds_balance.value() / 100.0)
+        self.ds_rows["tonal"][1].set_value(m["tonal"] * 100.0, emit=False)
+        self.ds_rows["crisp"][1].set_value(m["crisp"] * 100.0, emit=False)
+        self.ds_preset.setCurrentIndex(0)
+        self.controls_changed()
+
+    def _ds_method_moved(self, key):
+        if key in ("tonal", "crisp"):
+            self._ds_sync_simple()
+        self.ds_preset.setCurrentIndex(0)
+        self.controls_changed()
+
+    def _ds_preset_picked(self, index):
+        from ..engine.detail import scales as DS
+        name = self.ds_preset.itemText(index)
+        if name not in DS.PRESETS:
+            return
+        vals = DS.PRESETS[name]
+        for k, (on, sl) in self.ds_rows.items():
+            on.blockSignals(True)
+            on.setChecked(True)
+            on.blockSignals(False)
+            sl.set_value(float(vals.get(k, 0.0)), emit=False)
+        self._ds_sync_simple()
+        self.controls_changed()
+        self.ds_preset.setCurrentIndex(index)
+
+    def _ds_bw_toggled(self, on):
+        self.judge_bw = bool(on)
+        if self.image is not None:
+            self.render_now()
+
+    def _ds_recover_diffraction(self):
+        self.sh_on.setChecked(True)
+        self.status.emit("Recover lens sharpness is on: it undoes the blur measured in this photo, diffraction "
+                         "included. Judge it at 100%.")
+
+    def _ds_refresh(self, e):
+        """The meter, the diffraction note and (in the background) the balance number for edit ``e``."""
+        from ..engine.detail import scales as DS
+        from ..engine.pipeline import pipeline as PL
+        sp = PL._mc_params(e)
+        self.ds_meter.set_data(DS.meter(sp))
+        limited = [n for n, b in DS.meter(sp).items() if b["limited"]]
+        note = ""
+        if limited:
+            note = f"Limited in the {' and '.join(limited)} band to protect edges and noise."
+        fnum = getattr(self.image.meta, "fnumber", None) if self.image is not None else None
+        show_diff = False
+        if fnum and fnum >= 8 and (sp.crisp > 0 or sp.tonal > 0):
+            if fnum >= 16:
+                note += (" " if note else "") + (f"At f/{fnum:g} diffraction removed the finest detail before the "
+                                                  "sensor saw it: Crisp cannot bring back what was never recorded.")
+            else:
+                note += (" " if note else "") + (f"At f/{fnum:g} diffraction has softened every scale a little. "
+                                                  "Recover it first, then add detail.")
+            show_diff = not e.sharpen.enabled
+        self.ds_note.setText(note)
+        self.ds_note.setVisible(bool(note))
+        self.ds_diff.setVisible(show_diff)
+        if not sp.active or self.image is None:
+            self.ds_ratio.setText("Balance (medium : fine): -")
+            return
+        self.ds_ratio_timer.start()
+
+    def _ds_measure_balance(self):
+        if self.image is None or not self.isVisible():      # nobody is looking: no background render
+            return
+        from .. import engine as E
+        img, edit = self.image, self.shown_edit()
+        self._ds_tok = getattr(self, "_ds_tok", 0) + 1
+        run_bg(lambda: E.detail_balance(img, edit), self._ds_tok, self._ds_balance_ready, lambda *_: None)
+
+    def _ds_balance_ready(self, tok, res):
+        if tok != getattr(self, "_ds_tok", 0) or res is None:
+            return
+        before, after = res
+        if before <= 0:
+            self.ds_ratio.setText("Balance (medium : fine): -")
+            return
+        word = "more modelled" if after > before * 1.02 else ("more etched" if after < before * 0.98 else "unchanged")
+        self.ds_ratio.setText(f"Balance (medium : fine): {before:.2f} -> {after:.2f}  ({word})")
 
     def schedule(self):
         self.timer.start()
@@ -2401,17 +2844,51 @@ class DevelopPage(QWidget):
         run_bg(work, path, lambda p, r: self._wb_found(p, r, "Pick white", "the spot you clicked"),
                lambda _, err: self.status.emit(f"Pick white problem: {err}"))
 
-    def auto_wb(self):
+    def auto_wb(self, mood=None):
+        """Auto white balance. mood None = the default for this photo; else 0..1 (1 = fully neutral)."""
         if self.image is None:
             return
         img, path = self.image, self.path
 
+        method = self.wb_method.currentData() or "grey_edge"
+
         def work():
             from ..engine.pipeline.pipeline import auto_white_balance, wb_temp_tint
-            m, how = auto_white_balance(img)
-            return m, (wb_temp_tint(img, m) if m is not None else None), how
-        run_bg(work, path, lambda p, r: self._wb_found(p, r[:2], "Auto white balance", r[2]),
+            m, how, info = auto_white_balance(img, method, mood)
+            return m, (wb_temp_tint(img, m) if m is not None else None), how, info
+        run_bg(work, path, lambda p, r: self._auto_wb_found(p, r),
                lambda _, err: self.status.emit(f"Auto white balance problem: {err}"))
+
+    def _auto_wb_found(self, path, r):
+        if path != self.path:
+            return
+        m, tt, how, info = r
+        if m is not None and info:
+            self._wb_auto_used = True
+            self.wb_mood.set_value(round(info["mood"] * 100.0), emit=False)
+            self.wb_chip.setText(self.wb_report_text(info))
+        self._wb_found(path, (m, tt), "Auto white balance", how)
+
+    @staticmethod
+    def wb_report_text(info: dict) -> str:
+        """Both estimates, how well they agree, and how far the light was corrected (plan 23.9)."""
+        parts = []
+        if "grey_edge_k" in info:
+            parts.append(f"grey edge {info['grey_edge_k']} K")
+        if "grayness_k" in info:
+            parts.append(f"grayness index {info['grayness_k']} K")
+        txt = "Light: " + ", ".join(parts) if parts else "Light: one estimate only"
+        if info.get("agreement_deg") is not None:
+            word = {"high": "they agree: confident", "medium": "they roughly agree",
+                    "low": "they disagree: check by eye"}[info["confidence"]]
+            txt += f" ({word})."
+        if info.get("lights", 1) > 1:
+            txt += " Two light sources found (about " + " and ".join(f"{k} K" for k in info["lights_k"]) + ")."
+        if not info.get("in_band", True):
+            txt += " The estimate was far from any real light and was pulled back."
+        txt += f" Corrected {info['mood'] * 100:.0f}% of the way" + (" to keep the mood." if info["mood"] < 0.99
+                                                                    else ".")
+        return txt
 
     def _wb_found(self, path, res, what, how):
         if path != self.path:
@@ -3377,6 +3854,105 @@ class DevelopPage(QWidget):
         self.viewer.crop = (0.0, 0.0, 1.0, 1.0)
         self.commit(e)
 
+    # ------------------------------------------------------------------------------------ composition
+    def _sync_comp_combo(self):
+        from ..engine.local import composition as cp
+        keys = ["off"] + [k for k, _ in cp.OVERLAYS]
+        self.comp_combo.setCurrentIndex(keys.index(self.viewer.comp) if self.viewer.comp in keys else 0)
+        self.comp_turn.setEnabled(cp.ORIENTATIONS.get(self.viewer.comp, 1) > 1)
+
+    def _set_overlay(self, name, orient=None):
+        v = self.viewer
+        v.comp = name
+        if orient is not None:
+            v.comp_orient = orient
+        v.comp_flash = time.perf_counter()
+        self.settings.set("comp_overlay", name)
+        self.settings.set("comp_orient", v.comp_orient)
+        self._sync_comp_combo()
+        v.update()
+        QTimer.singleShot(2600, v.update)                 # the name tag fades after a moment
+
+    def _comp_picked(self, idx):
+        from ..engine.local import composition as cp
+        keys = ["off"] + [k for k, _ in cp.OVERLAYS]
+        self._set_overlay(keys[idx])
+
+    def cycle_overlay(self):
+        """O: the next composition overlay (off is one of them). Outside the crop tool the first press shows the
+        current one on the whole photo; cycling to off hides it again."""
+        from ..engine.local import composition as cp
+        v = self.viewer
+        if not v.crop_mode and not v.comp_outside:
+            v.comp_outside = True
+            self._set_overlay(v.comp if v.comp != "off" else "thirds")
+            return
+        keys = [k for k, _ in cp.OVERLAYS] + ["off"]
+        nxt = keys[(keys.index(v.comp) + 1) % len(keys)] if v.comp in keys else keys[0]
+        if nxt == "off" and not v.crop_mode:
+            v.comp_outside = False
+        self._set_overlay(nxt)
+
+    def turn_overlay(self):
+        """Shift+O: mirror the overlay (the golden spiral has four ways round, the golden triangles two)."""
+        from ..engine.local import composition as cp
+        n = cp.ORIENTATIONS.get(self.viewer.comp, 1)
+        if n > 1:
+            self._set_overlay(self.viewer.comp, (self.viewer.comp_orient + 1) % n)
+
+    def suggest_crops(self):
+        if self.image is None:
+            return
+        from .. import engine as E
+        from ..engine.local import composition as cp
+        e = self.edit_from_controls()
+        ratio = self._aspect_ratio()
+        method = self.viewer.comp if self.viewer.comp in cp.METHODS else None
+        img = self.image
+        self.suggest_b.setEnabled(False)
+        self.viewer.busy = True
+        self.status.emit("Looking at the photo for crops (faces, people, what stands out)...")
+
+        def done(_, res):
+            self.suggest_b.setEnabled(True)
+            if img is not self.image:
+                return
+            self._suggestions = res
+            self.suggest_list.clear()
+            for i, sgn in enumerate(res, 1):
+                self.suggest_list.addItem(f"{i}. {sgn['text']}")
+            self.suggest_list.setVisible(bool(res))
+            if not self._render_live:
+                self.viewer.busy = False
+            self.status.emit(f"{len(res)} suggested crop{'s' if len(res) != 1 else ''}: click one to try it."
+                             if res else "No crop suggestions for this photo.")
+            if res:
+                self._apply_suggestion(res[0])
+
+        def fail(_, err):
+            self.suggest_b.setEnabled(True)
+            if not self._render_live:
+                self.viewer.busy = False
+            self.status.emit(f"Crop suggestions problem: {err}")
+        run_bg(lambda: E.suggest_crops(img, e, ratio, method), "suggest", done, fail)
+
+    def _suggestion_picked(self, item):
+        i = self.suggest_list.row(item)
+        if 0 <= i < len(self._suggestions):
+            self._apply_suggestion(self._suggestions[i])
+
+    def _apply_suggestion(self, sgn):
+        """Try a suggested crop: the crop tool opens on it, with the overlay that explains it."""
+        self._set_overlay(sgn["method"], int(sgn.get("orient", 0)))
+        e = self.edit_from_controls()
+        e.geometry.crop = [float(v) for v in sgn["crop"]]
+        if not self.crop_b.isChecked():
+            self.crop_b.setChecked(True)
+        self.viewer.crop = tuple(e.geometry.crop)
+        self.viewer.update()
+        self._push(e, "Suggested crop")
+        self.save_timer.start()
+
     # ------------------------------------------------------------------------------------ actions
     def set_strip(self, files: list, thumbs: dict):
         self.strip.clear()
@@ -3395,6 +3971,8 @@ class DevelopPage(QWidget):
             return
         self.save_sidecar()
         self.path, self.image, self.before_img = path, None, None
+        self._wb_auto_used = False                          # Auto white balance belongs to the photo it ran on
+        self.wb_chip.setText("Auto white balance: not used")
         self.before_key = None
         if self.crop_b.isChecked():
             self.crop_b.setChecked(False)
@@ -3486,15 +4064,40 @@ class DevelopPage(QWidget):
         target = max(self.viewer.width(), self.viewer.height()) * self.devicePixelRatioF() * 1.1
         return min(1.0, max(0.08, target / max(w, h)))
 
+    def _busy_changed(self, on: bool):
+        if on:
+            self._work_tick.start()
+        else:
+            self._work_tick.stop()
+        self._show_work()
+
+    def _show_work(self):
+        v = self.viewer
+        if v.busy:
+            t = v.busy_for()
+            text, colour = (f"● Working... {t:.0f} s" if t >= 1.0 else "● Working..."), T.AMBER
+        else:
+            text, colour = (f"Ready  ({v.busy_took:.1f} s)" if v.busy_took else "Ready"), T.DIM
+        self.work_chip.setText(text)
+        self.work_chip.setStyleSheet(f"color:{colour}; border-color:{T.alpha(colour, 0.45 if v.busy else 0.33)};")
+
     def render_now(self):
         if self.image is None:
+            return
+        if self._render_live:
+            # One preview render at a time. Dragging a slider used to start a new render on every pause, and they
+            # all ran at once, fighting over the CPU, so the last one (the one you wanted) came back slowest.
+            # Now the newest settings wait for the running render and go next; anything in between is skipped.
+            self._render_again = True
+            self.viewer.busy = True
             return
         from .. import engine as E
         self.token += 1
         edit = self.shown_edit()
         tok, img, sc = self.token, self.image, self.preview_scale(edit)
+        self._render_live, self._render_img = True, img
         # "before" = as shot, but with the same straighten / perspective / crop, so the wipe lines up
-        bkey = (json.dumps(edit.geometry.__dict__, sort_keys=True, default=str), round(sc, 4))
+        bkey = (json.dumps(edit.geometry.__dict__, sort_keys=True, default=str), round(sc, 4), self.judge_bw)
         need_before = self.before_img is None or bkey != self.before_key
         self.viewer.busy = True
         self.viewer.update()
@@ -3504,17 +4107,38 @@ class DevelopPage(QWidget):
             self._render_zoom(tok, img, edit, t0)
             return
 
+        bw = self.judge_bw
+
         def work():
             a8 = display8(E.render(img, edit, scale=sc))
+            if bw:
+                a8 = bw8(a8)
             b8 = None
             if need_before:
                 b = E.Edit()
                 b.geometry = edit.geometry
                 b8 = display8(E.render(img, b, scale=sc))
+                if bw:
+                    b8 = bw8(b8)
             return a8, b8, bkey, time.perf_counter() - t0
-        run_bg(work, tok, self._rendered, lambda _, err: self.status.emit(f"Render problem: {err}"))
+        run_bg(work, tok, self._rendered, self._render_failed)
         if self.loupe_pt is not None:
             self.open_loupe(*self.loupe_pt)
+
+    def _render_finished(self) -> bool:
+        """Bookkeeping when a preview render ends. True = newer settings were waiting and have been started (keep
+        the indicator on); False = nothing waiting."""
+        self._render_live = False
+        if self._render_again:
+            self._render_again = False
+            self.render_now()
+            return self._render_live
+        return False
+
+    def _render_failed(self, tok, err):
+        self.status.emit(f"Render problem: {err}")
+        if not self._render_finished():
+            self.viewer.busy = False
 
     # ------------------------------------------------------------------------------------ 100% view
     def _render_zoom(self, tok, img, edit, t0):
@@ -3528,18 +4152,26 @@ class DevelopPage(QWidget):
         win = (x / ow, y / oh, (x + w) / ow, (y + h) / oh)
         self.zoom_c = ((x + w / 2.0) / ow, (y + h / 2.0) / oh)       # clamped at the edges, as the window is
 
+        bw = self.judge_bw
+
         def work():
-            return display8(E.render_view(img, edit, u, v, W, H)), win, time.perf_counter() - t0
-        run_bg(work, tok, self._zoom_rendered, lambda _, err: self.status.emit(f"Render problem: {err}"))
+            a8 = display8(E.render_view(img, edit, u, v, W, H))
+            return (bw8(a8) if bw else a8), win, time.perf_counter() - t0
+        run_bg(work, tok, self._zoom_rendered, self._render_failed)
 
     def _zoom_rendered(self, tok, res):
-        if tok != self.token or self.zoom_c is None:
+        current = tok == self.token and self._render_img is self.image
+        more = self._render_finished()
+        if not current or self.zoom_c is None:
+            if not more and not self._render_live:
+                self.viewer.busy = False
             return
         a8, win, dt = res
         self.viewer.after = to_qimage(a8)
         self.viewer.win = win
         self._refresh_spot_view()
-        self.viewer.busy = False
+        if not more:
+            self.viewer.busy = False
         self.viewer.update()
         self.status.emit(f"100% view rendered in {dt:.1f} s")
 
@@ -3659,6 +4291,9 @@ class DevelopPage(QWidget):
                    "part way, so the face keeps its shape"),
                   ("even_skin", "Even skin", "Evens blotches and uneven colour on the face (pores stay)"),
                   ("jawline", "Jawline", "Firms the jaw below the cheeks a little (a small warp of the jowls)"),
+                  ("double_chin", "Double chin", "Lifts the soft area under the jaw towards it, softens the crease "
+                   "and deepens the jaw's own shadow a little. Skin only: a collar or a beard under the chin stays "
+                   "put. Not part of Younger."),
                   ("eyes", "Eyes", "Brighter whites, fewer red veins, a crisper iris"),
                   ("teeth", "Teeth", "Whiter teeth, towards the colour of the eye whites (so a warm candle-lit "
                                      "photo stays warm), and a touch brighter"))
@@ -3697,13 +4332,18 @@ class DevelopPage(QWidget):
         self.pt_blem.setToolTip("Find spots and red blemishes on the faces and heal them (Retouch spots, amber). "
                                 "Very dark, well-defined marks are left alone: usually moles or beauty marks.")
         self.pt_blem.clicked.connect(self.remove_blemishes)
+        self.pt_chin = QPushButton("Remove double chin")
+        self.pt_chin.setObjectName("primary")
+        self.pt_chin.setToolTip("One press: sets Double chin to 60 (the slider below fine-tunes it, 0 takes it off)")
+        self.pt_chin.clicked.connect(self.remove_double_chin)
         self.pt_forget = QPushButton("Forget faces")
         self.pt_forget.setToolTip("Remove the mapped faces (the face sliders then do nothing until faces are found "
                                   "again)")
         self.pt_forget.clicked.connect(self.forget_faces)
-        for b in (self.pt_blem, self.pt_forget):
+        for b in (self.pt_blem, self.pt_chin, self.pt_forget):
             b.setStyleSheet("padding: 5px 8px;")
-        g.add(hbox(self.pt_blem, self.pt_forget))
+        g.add(hbox(self.pt_blem, self.pt_chin))
+        g.add(hbox(self.pt_forget))
         self.pt_sl = {}
         for key, name, tip in self.PT_SLIDERS:
             sl = g.add(ValueSlider(name, 0, 100, 0, 1, "{:.0f}", tip))
@@ -3813,7 +4453,7 @@ class DevelopPage(QWidget):
             col = T.AMBER if found else T.CYAN
             self.pt_info.setStyleSheet(f"color:{col}; border-color:{T.alpha(col, 0.4)};")
         has = bool(faces)
-        for w in [self.pt_blem, self.pt_forget] + list(self.pt_sl.values()):
+        for w in [self.pt_blem, self.pt_chin, self.pt_forget] + list(self.pt_sl.values()):
             w.setEnabled(has)
         self.pt_sl["jawline"].setEnabled(has)
         sc = self._portrait.get("sculpt") or []
@@ -3988,6 +4628,16 @@ class DevelopPage(QWidget):
             return
         self._portrait.pop("faces", None)
         self._portrait_changed("Portrait: faces forgotten")
+
+    DOUBLE_CHIN_PRESS = 60
+
+    def remove_double_chin(self):
+        """One press for the Double chin slider (a friend's request): 60 is clearly there but still subtle. Pressed
+        again it leaves a value you have set yourself alone."""
+        sl = self.pt_sl["double_chin"]
+        if sl.value() < self.DOUBLE_CHIN_PRESS:
+            sl.set_value(self.DOUBLE_CHIN_PRESS)                  # emits: the edit and the history follow
+        self.status.emit("Double chin: lifted and softened (fine-tune with the Double chin slider; 0 takes it off).")
 
     def remove_blemishes(self):
         from .. import engine as E
@@ -4365,7 +5015,11 @@ class DevelopPage(QWidget):
                lambda _, err: (setattr(self.viewer, "busy", False), self.status.emit(f"Dust map problem: {err}")))
 
     def _rendered(self, tok, res):
-        if tok != self.token:
+        current = tok == self.token and self._render_img is self.image
+        more = self._render_finished()           # newer settings start now; this result is still shown meanwhile
+        if not current:
+            if not more and not self._render_live:
+                self.viewer.busy = False
             return
         a8, b8, bkey, dt = res
         self.viewer.after = to_qimage(a8)
@@ -4373,11 +5027,14 @@ class DevelopPage(QWidget):
         self._refresh_spot_view()
         self._refresh_portrait_view()
         self._glow_refresh()
+        self._dn_safe_refresh()
+        self._hdr_refresh()
         if b8 is not None:
             self.before_img = to_qimage(b8)
             self.before_key = bkey
         self.viewer.before = self.before_img
-        self.viewer.busy = False
+        if not more:
+            self.viewer.busy = False
         self.viewer.update()
         self.histo.set_image(a8)
         self.last_a8 = a8
@@ -4400,7 +5057,9 @@ class DevelopPage(QWidget):
         img, edit = self.image, self.edit
         self.viewer.busy = True
         self.viewer.update()
-        run_bg(lambda: display8(E.render_view(img, edit, u, v, lw, lh)), (u, v), self._loupe_ready)
+        bw = self.judge_bw
+        run_bg(lambda: (bw8 if bw else (lambda a: a))(display8(E.render_view(img, edit, u, v, lw, lh))), (u, v),
+               self._loupe_ready)
 
     def _loupe_ready(self, pt, a8):
         if pt != self.loupe_pt:
@@ -4446,7 +5105,9 @@ class DevelopPage(QWidget):
         character = is_character(lens)
         if not character:
             e.sharpen.enabled = True
-            e.sharpen.amount = 0.4
+            # when Crisp has already raised the finest scale, sharpen less: noise is not sharpened twice (23.11)
+            crisp = 0.0 if "crisp" in (e.detail.off or ()) else max(0.0, e.detail.crisp) / 100.0
+            e.sharpen.amount = round(0.4 * (1.0 - 0.5 * crisp), 2)
         self.commit(e, label="Make it good")
         note = "character lens: sharpening left off" if character else "gentle capture sharpening"
         self.status.emit(f"Make it good: noise set for {self.image.meta.iso_label}, {note}, fixing the lens...; "
@@ -4775,6 +5436,12 @@ class LensesPage(InfoPage):
 
 
 class HelpPage(InfoPage):
+    update_mode = Signal(str)                     # "off" | "notify" | "auto"
+    update_check = Signal()
+
+    UPDATE_MODES = (("off", "Off: never check"), ("notify", "Tell me when there is a new version"),
+                    ("auto", "Update automatically"))
+
     def __init__(self):
         super().__init__("Help", f"Photographic Studio By Bill {__version__}. Free forever, GPL-3.0. Your photos "
                          "never leave this PC.", None, [
@@ -4788,6 +5455,10 @@ class HelpPage(InfoPage):
                                               "brightness."),
                              ("Shape and detail", "C draws a crop, Enter finishes it. Microcontrast lifts the "
                                                   "shades of shadow; judge sharpening at 100% (click the photo)."),
+                             ("Composition", "O cycles the overlays (thirds, golden ratio, golden spiral, triangles, "
+                                             "diagonals, dynamic symmetry, armature, rabatment, centre, radial, "
+                                             "grid); Shift+O turns the spiral or triangles. Suggest crops (in the "
+                                             "Crop group) puts the eyes or subject on the overlay's strong points."),
                              ("Light and colour", "Auto in Light never touches exposure. Pick white: press it, "
                                                   "then click something neutral. The colour wheel moves one range "
                                                   "of colours; HSL and grading are in Full."),
@@ -4805,7 +5476,8 @@ class HelpPage(InfoPage):
                                          "photo; Learn dust map (Library) learns your sensor's dust from several."),
                              ("Portrait", "Find faces maps each face on this PC (or Click the eyes for a face in "
                                           "deep shadow). Remove blemishes heals spots as Retouch spots (moles stay). "
-                                          "Younger moves every face slider at once; each slider is subtle at 100."),
+                                          "Younger moves every face slider at once; each slider is subtle at 100. Remove double "
+                                          "chin lifts the soft area under the jaw (skin only)."),
                              ("Person mask", "Masks > Person selects the people in the photo (found on this PC); "
                                              "then pick a part: skin, face, hair, clothes, arms, legs, torso or the "
                                              "background. Edges snap to the photo."),
@@ -4816,6 +5488,9 @@ class HelpPage(InfoPage):
                                            "middle-drag moves it while a tool is on."),
                              ("Sidecars", "Edits live in NAME.CR3.psb.json beside each raw. The raw is never "
                                           "touched."),
+                             ("Working...", "While the photo is being worked on, a bar moves along its top edge and "
+                                            "the chip beside Controls turns amber; big raws on slower PCs can take a "
+                                            "few seconds per change."),
                              ("Problems?", "Copy the diagnostic report below and attach it. It holds no photos, "
                                            "serial numbers or locations.")])
         b = QPushButton("Copy diagnostic report")
@@ -4825,6 +5500,38 @@ class HelpPage(InfoPage):
         row.addStretch(1)
         self.body.addSpacing(10)
         self.body.addLayout(row)
+        # Updates (off until turned on: the only thing it sends is a question to GitHub for the newest version)
+        self.body.addSpacing(16)
+        self.body.addWidget(label("Check for updates", "h2"))
+        self.body.addWidget(label("Asks GitHub for the newest version number, at most once a day. Nothing else is "
+                                  "sent: never a photo, a file name or anything about you. Updates keep your "
+                                  "settings, calibrations and photos.", "dim", wrap=True))
+        self.upd_combo = QComboBox()
+        for _, text in self.UPDATE_MODES:
+            self.upd_combo.addItem(text)
+        self.upd_combo.activated.connect(lambda i: self.update_mode.emit(self.UPDATE_MODES[i][0]))
+        self.upd_now = QPushButton("Check now")
+        self.upd_now.clicked.connect(self.update_check.emit)
+        row = QHBoxLayout()
+        row.addWidget(self.upd_combo)
+        row.addWidget(self.upd_now)
+        row.addStretch(1)
+        self.body.addLayout(row)
+        self.upd_info = label("", "dim", wrap=True)
+        self.body.addWidget(self.upd_info)
+
+    def set_update_state(self, mode: str, kind: str):
+        keys = [k for k, _ in self.UPDATE_MODES]
+        self.upd_combo.setCurrentIndex(keys.index(mode) if mode in keys else 0)
+        how = {"git": "This is a git copy (a developer's own): you will be told about new versions, and update it "
+                      "with git yourself.",
+               "msi": "Installed with the MSI: an update downloads the new MSI and Windows Installer puts it in.",
+               "bat": "Installed with Install Photographic Studio.bat: updates go in when the Studio restarts.",
+               "folder": "Updates go in when the Studio restarts."}.get(kind, "")
+        self.upd_info.setText(how)
+
+    def set_update_info(self, text: str):
+        self.upd_info.setText(text)
 
     def copy_diag(self):
         QApplication.clipboard().setText(slog.diagnostic_report())
@@ -4859,6 +5566,25 @@ class MainWindow(QMainWindow):
         for icon, name in NAV:
             QListWidgetItem(f"{icon}    {name}", self.nav)
         sv.addWidget(self.nav, 1)
+        self.upd_card = QFrame()                       # updates: asked once, then shown only when there is news
+        self.upd_card.setObjectName("card")
+        self.upd_card.setStyleSheet(f"QFrame#card {{ border: 1px solid {T.alpha(T.AMBER, 0.5)}; }}")
+        uv = QVBoxLayout(self.upd_card)
+        uv.setContentsMargins(12, 10, 12, 10)
+        uv.setSpacing(6)
+        self.upd_text = label("", None, wrap=True)
+        self.upd_text.setStyleSheet(f"color:{T.AMBER};")
+        uv.addWidget(self.upd_text)
+        self.upd_btns = QVBoxLayout()
+        self.upd_btns.setSpacing(4)
+        uv.addLayout(self.upd_btns)
+        wrap = QWidget()
+        wl = QVBoxLayout(wrap)
+        wl.setContentsMargins(12, 0, 12, 8)
+        wl.addWidget(self.upd_card)
+        sv.addWidget(wrap)
+        self.upd_card.hide()
+        self.upd_kind, self.upd_rel, self.upd_msi = "folder", None, None
         self.jobs = label("", "dim")
         self.jobs.setContentsMargins(18, 0, 18, 0)
         sv.addWidget(self.jobs)
@@ -4868,6 +5594,9 @@ class MainWindow(QMainWindow):
         self.develop = DevelopPage(self.settings)
         self.cameras = CamerasPage()
         self.lenses = LensesPage(self.settings)
+        self.help = HelpPage()
+        self.help.update_mode.connect(self._set_update_mode)
+        self.help.update_check.connect(lambda: self.check_updates(manual=True))
         pages = [
             self.library, self.develop,
             InfoPage("Dual Pixel Lab", "Everything Canon Dual Pixel RAW can do: split A/B, +1 stop highlight "
@@ -4896,7 +5625,7 @@ class MainWindow(QMainWindow):
                          ("Send to Photoshop", "Phase 13: TIFF hand-off and a Photoshop panel."),
                          ("Send to PhotoCraft", "Phase 13."),
                          ("Privacy", "Serial numbers and GPS are never written.")]),
-            HelpPage(),
+            self.help,
         ]
         for p in pages:
             self.stack.addWidget(p)
@@ -4923,6 +5652,124 @@ class MainWindow(QMainWindow):
         folder = self.settings.get("folder") or str(paths.APP_ROOT)
         if os.path.isdir(folder):
             QTimer.singleShot(50, lambda: self.library.load_folder(folder))
+        QTimer.singleShot(1500, self._updates_start)
+
+    # ------------------------------------------------------------------------------------ updates
+    def _upd_show(self, text, buttons=()):
+        """The sidebar update card: a message and its buttons [(text, callback, primary?)]; empty text hides it."""
+        while self.upd_btns.count():
+            w = self.upd_btns.takeAt(0).widget()
+            if w is not None:
+                w.deleteLater()
+        if not text:
+            self.upd_card.hide()
+            return
+        self.upd_text.setText(text)
+        for t, fn, primary in buttons:
+            b = QPushButton(t)
+            if primary:
+                b.setObjectName("primary")
+            b.clicked.connect(fn)
+            self.upd_btns.addWidget(b)
+        self.upd_card.show()
+
+    def _updates_start(self):
+        from .. import updates as U
+        self.upd_kind = U.install_kind()
+        mode = self.settings.get("updates")
+        self.help.set_update_state(mode or "off", self.upd_kind)
+        st = U.staged()
+        if st and self.upd_kind in ("bat", "folder"):
+            self._upd_show(f"Update {st} is downloaded. It goes in when the Studio restarts.",
+                           [("Restart now", self._upd_restart, True), ("Later", lambda: self._upd_show(""), False)])
+            return
+        if mode is None:
+            if self.upd_kind != "git":                 # asked once; a developer's git copy is never asked
+                self._upd_show("Keep Photographic Studio up to date? It only asks GitHub for the newest version "
+                               "number: no photos, nothing about you.",
+                               [("Update automatically", lambda: self._set_update_mode("auto"), True),
+                                ("Just tell me", lambda: self._set_update_mode("notify"), False),
+                                ("No thanks", lambda: self._set_update_mode("off"), False)])
+            return
+        last = float(self.settings.get("updates_last", 0) or 0)
+        if mode in ("notify", "auto") and time.time() - last > U.CHECK_EVERY_S:
+            self.check_updates(manual=False)
+
+    def _set_update_mode(self, mode):
+        self.settings.set("updates", mode)
+        self.help.set_update_state(mode, self.upd_kind)
+        log.info("updates: %s", mode)
+        self._upd_show("")
+        if mode != "off":
+            self.check_updates(manual=False)
+
+    def check_updates(self, manual=False):
+        from .. import updates as U
+        self.help.set_update_info("Checking GitHub for the newest version...")
+
+        def done(_, rel):
+            self.settings.set("updates_last", time.time())
+            self.upd_rel = rel
+            if not rel["newer"]:
+                self.help.set_update_info(f"You have the newest version ({__version__}).")
+                if manual:
+                    self.statusBar().showMessage(f"You have the newest version ({__version__}).", 6000)
+                return
+            tag = rel["tag"]
+            self.help.set_update_info(f"New version {tag} is out (you have {__version__}).")
+            notes = ("What's new", lambda: QDesktopServices.openUrl(QUrl(rel["page"])), False)
+            if self.upd_kind == "git":
+                self._upd_show(f"New version {tag} is out. This is a git copy: update it with git.",
+                               [notes, ("OK", lambda: self._upd_show(""), False)])
+            elif self.settings.get("updates") == "auto" and not manual:
+                self._upd_download(rel, apply_now=False)
+            else:
+                self._upd_show(f"New version {tag} is out (you have {__version__}).",
+                               [("Update now", lambda: self._upd_download(rel, apply_now=True), True), notes,
+                                ("Later", lambda: self._upd_show(""), False)])
+
+        def fail(_, err):
+            self.help.set_update_info(f"Could not reach GitHub ({err}). The Studio tries again later.")
+            if manual:
+                self.statusBar().showMessage("Could not reach GitHub to check for updates.", 6000)
+        run_bg(lambda: U.check(), "updates", done, fail)
+
+    def _upd_download(self, rel, apply_now=False):
+        from .. import updates as U
+        tag, msi = rel["tag"], self.upd_kind == "msi"
+        self._upd_show(f"Downloading {tag}...")
+
+        def done(_, path):
+            if msi:
+                self.upd_msi = path
+                self._upd_show(f"Update {tag} is downloaded. It installs when you close the Studio.",
+                               [("Install now", self._upd_install_msi, True)])
+                if apply_now:
+                    self._upd_install_msi()
+            else:
+                self._upd_show(f"Update {tag} is ready. It goes in the next time the Studio starts.",
+                               [("Restart now", self._upd_restart, True), ("Later", lambda: self._upd_show(""), False)])
+                if apply_now:
+                    self._upd_restart()
+
+        def fail(_, err):
+            self._upd_show(f"The update could not be downloaded ({err}).",
+                           [("Try again", lambda: self._upd_download(rel, apply_now), True),
+                            ("Later", lambda: self._upd_show(""), False)])
+        run_bg(lambda: (U.stage_msi(rel) if msi else U.stage_folder_update(rel)), "update-download", done, fail)
+
+    def _upd_restart(self):
+        from .. import updates as U
+        if U.restart_into_update():
+            self.close()
+        else:
+            self._upd_show("Close the Studio and start it again (Start Studio.bat) to finish the update.")
+
+    def _upd_install_msi(self):
+        from .. import updates as U
+        if self.upd_msi and U.run_msi(self.upd_msi):
+            self.upd_msi = None
+            self.close()
 
     def _jobs(self):
         n = POOL.activeThreadCount()
@@ -5004,6 +5851,10 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e):
         self.develop.save_sidecar()
+        if self.upd_msi is not None:                  # an MSI update downloaded earlier goes in as the Studio closes
+            from .. import updates as U
+            U.run_msi(self.upd_msi)
+            self.upd_msi = None
         super().closeEvent(e)
 
 

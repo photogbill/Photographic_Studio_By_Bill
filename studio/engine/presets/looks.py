@@ -24,10 +24,10 @@ EXT = ".psblook"
 # Copy / paste groups: what the photographer thinks of, mapped to Edit fields
 GROUPS = {
     "light": ("Light (exposure, contrast, highlights, shadows, curves, clipped highlights)",
-              ["exposure_ev", "tone", "light", "highlight_mode", "glow_profile"]),
+              ["exposure_ev", "tone", "light", "hdr", "highlight_mode", "glow_profile"]),
     "white_balance": ("White balance", ["white_balance"]),
     "colour": ("Colour (saturation, HSL, colour wheel, grading, B&W)", ["colour"]),
-    "detail": ("Detail (microcontrast, sharpening)", ["microcontrast", "sharpen"]),
+    "detail": ("Detail (detail by scale, sharpening)", ["microcontrast", "detail", "sharpen"]),
     "clean": ("Clean (noise, banding)", ["denoise", "banding"]),
     "lens": ("Lens fixes (fringing, distortion, vignetting)", ["lens"]),
     "shape": ("Shape (straighten, perspective, crop)", ["geometry"]),
@@ -81,7 +81,8 @@ def _deep_merge(base: dict, part: dict) -> dict:
 
 
 # A look never changes brightness on its own (Bill's rule): these are dropped from every look, shared or saved.
-BRIGHTNESS_KEYS = {"exposure_ev": None, "tone": ("mid_grey", "match_camera_brightness")}
+BRIGHTNESS_KEYS = {"exposure_ev": None, "tone": ("mid_grey", "match_camera_brightness"),
+                   "hdr": None}       # Auto HDR lifts and holds brightness: a look never carries it
 
 
 def _strip(settings: dict) -> dict:
@@ -172,7 +173,7 @@ def save_look(look: dict) -> str:
 
 # ------------------------------------------------------------------------------------------ history labels
 _NAMES = {"exposure_ev": "Exposure", "light": "Light", "tone": "Tone", "colour": "Colour", "white_balance":
-          "White balance", "microcontrast": "Microcontrast", "sharpen": "Sharpening", "denoise": "Noise",
+          "White balance", "microcontrast": "Local contrast", "detail": "Detail by scale", "hdr": "Auto HDR", "sharpen": "Sharpening", "denoise": "Noise",
           "banding": "Banding", "lens": "Lens", "geometry": "Shape", "demosaic": "Demosaic",
           "masks": "Masks", "retouch": "Retouch", "finish": "Finish", "profile": "Camera profile", "highlight_mode": "Clipped highlights",
           "glow_profile": "Lens glow profile", "portrait": "Portrait"}
@@ -253,7 +254,8 @@ def _describe_retouch(old: list, new: list) -> str:
 
 
 _PORTRAIT = {"younger": "younger", "lines": "lines", "under_eyes": "under eyes", "smile_lines": "smile lines",
-             "even_skin": "even skin", "jawline": "jawline", "eyes": "eyes", "teeth": "teeth"}
+             "even_skin": "even skin", "jawline": "jawline", "double_chin": "double chin", "eyes": "eyes",
+             "teeth": "teeth"}
 
 
 def _describe_portrait(old: dict, new: dict) -> str:

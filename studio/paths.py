@@ -13,12 +13,32 @@ from pathlib import Path
 
 APP_ROOT = Path(__file__).resolve().parent.parent
 
-LOGS = APP_ROOT / "logs"
-CACHE = APP_ROOT / "cache"
-SETTINGS = APP_ROOT / "settings"
-OUTPUTS = APP_ROOT / "outputs"
-PROFILES = APP_ROOT / "profiles"
-CALIBRATION_LOCAL = APP_ROOT / "calibration_local"   # never shared: hot-pixel, PRNU, dust maps, darks
+
+def is_msi_install(root: Path = APP_ROOT) -> bool:
+    """The MSI installer's layout (Briefcase): the app in <install>/app, its packages in <install>/app_packages."""
+    return root.name == "app" and (root.parent / "app_packages").is_dir()
+
+
+def _data_root() -> Path:
+    """Where the user's own files live (settings, logs, caches, outputs, calibrations). Beside the app, as rule
+    0.3.3 says, in every copy but one: the MSI install's folder belongs to Windows Installer, which may clear it
+    on an upgrade or uninstall, so that copy keeps them in Documents/Photographic Studio, where they survive
+    (and are easy to find). STUDIO_DATA_DIR overrides both."""
+    if os.environ.get("STUDIO_DATA_DIR"):
+        return Path(os.environ["STUDIO_DATA_DIR"])
+    if is_msi_install():
+        return Path.home() / "Documents" / "Photographic Studio"
+    return APP_ROOT
+
+
+DATA_ROOT = _data_root()
+
+LOGS = DATA_ROOT / "logs"
+CACHE = DATA_ROOT / "cache"
+SETTINGS = DATA_ROOT / "settings"
+OUTPUTS = DATA_ROOT / "outputs"
+PROFILES = APP_ROOT / "profiles"                       # shared profiles ship with the app
+CALIBRATION_LOCAL = DATA_ROOT / "calibration_local"   # never shared: hot-pixel, PRNU, dust maps, darks
 
 # Environment overrides exist for tests and for users who move the cache; the defaults stay beside the app.
 _OVERRIDES = {

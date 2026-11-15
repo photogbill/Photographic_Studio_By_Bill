@@ -647,3 +647,62 @@ class FilmicPlot(QWidget):
             else:
                 p.drawText(QRectF(c.x() - 30, r.bottom() + 2, 60, 14), Qt.AlignmentFlag.AlignCenter, txt)
         _ = MID_OUT
+
+
+class DetailMeter(QWidget):
+    """Detail by scale: what the stack of methods does to each band (fine, medium, broad), each method's share in
+    its own colour, the outline amber where a guard limited the total (plan 23.11, rule 3)."""
+
+    COLOURS = {"tonal": T.CYAN, "local": T.VIOLET, "crisp": T.AMBER, "separation": T.GREEN, "veil": "#fb7185",
+               "broad": "#60a5fa"}
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedHeight(74)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.data = None
+        self.setToolTip("How much each band is changed, by which method (colours match the method names below).\n"
+                        "Bars to the right lift that scale, to the left soften it. An amber outline means the\n"
+                        "total reached a guard and was limited there to protect edges and noise.")
+
+    def set_data(self, data):
+        self.data = data
+        self.update()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(QPen(QColor(T.LINE)))
+        p.setBrush(QColor(T.BG2))
+        p.drawRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), 8, 8)
+        p.setFont(QFont("Segoe UI", 8))
+        rows = (("fine", "Fine"), ("medium", "Medium"), ("broad", "Broad"))
+        x0, x1 = 64.0, self.width() - 46.0
+        zero = x0 + (x1 - x0) * 0.25                       # room on the left for softening
+        full = 2.0                                         # a total of +2.0 (small differences tripled) fills the bar
+        for i, (key, name) in enumerate(rows):
+            y = 8.0 + i * 21.0
+            band = (self.data or {}).get(key) or {"parts": {}, "total": 0.0, "limited": False}
+            p.setPen(QColor(T.DIM))
+            p.drawText(QRectF(8, y, 54, 16), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, name)
+            p.setPen(QPen(QColor(T.AMBER if band["limited"] else T.LINE), 1.4 if band["limited"] else 1))
+            p.setBrush(QColor(T.BG))
+            p.drawRoundedRect(QRectF(x0, y + 2, x1 - x0, 12), 4, 4)
+            pos, neg = zero, zero
+            p.setPen(Qt.PenStyle.NoPen)
+            for m, v in band["parts"].items():
+                wpx = abs(v) / full * (x1 - zero)
+                p.setBrush(QColor(self.COLOURS.get(m, T.TEXT)))
+                if v >= 0:
+                    wpx = min(wpx, x1 - pos)
+                    p.drawRect(QRectF(pos, y + 3, wpx, 10))
+                    pos += wpx
+                else:
+                    wpx = min(wpx, neg - x0)
+                    p.drawRect(QRectF(neg - wpx, y + 3, wpx, 10))
+                    neg -= wpx
+            p.setPen(QPen(QColor(T.DIM), 1))
+            p.drawLine(QPointF(zero, y + 1), QPointF(zero, y + 15))
+            p.setPen(QColor(T.AMBER if band["limited"] else T.TEXT))
+            p.drawText(QRectF(x1 + 4, y, 40, 16), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                       f"{band['total'] * 100:+.0f}%")

@@ -97,6 +97,10 @@
 # App icons only: PNGs are allowed in assets/icons and nowhere else.
 !/assets/icons/*.png
 
+# GitHub's build recipe for the MSI installer (Release.bat starts it; it puts tools/github_release.yml in place).
+!/.github/workflows/*.yml
+!/tools/github_release.yml
+
 # Face and people models (Google MediaPipe, Apache 2.0, see models/*/NOTICE): in models/faces and models/people only.
 !/models/faces/*.tflite
 !/models/people/*.tflite
@@ -120,6 +124,9 @@
 __pycache__/
 .venv/
 venv/
+/python/
+/_installer/
+/_update/
 node_modules/
 .vscode/
 .idea/

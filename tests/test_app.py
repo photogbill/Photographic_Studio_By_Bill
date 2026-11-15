@@ -551,3 +551,188 @@ def test_person_mask_from_the_panel(monkeypatch):
     page.controls_from_edit(page.edit)
     assert page.edit_from_controls().to_dict() == page.edit.to_dict()
     app.processEvents()
+
+
+def test_working_indicator_and_one_render_at_a_time(monkeypatch):
+    """A friend's first test: edits looked like they did nothing because renders were slow and the only sign was a
+    small label in a corner. The viewer and the Controls chip now show work in progress, and slider changes made
+    while a render runs wait for it (newest settings next, the ones in between skipped) instead of piling up."""
+    from conftest import scene, synthetic_raw
+    from studio.engine.pipeline.pipeline import Image
+    app, M, page = _page()
+    del page.render_now                                   # _page() switches renders off; this test needs them
+    seen = []
+    page.viewer.busy_changed.connect(seen.append)
+    jobs = []
+    monkeypatch.setattr(M, "run_bg", lambda fn, tok=None, done=None, fail=None: jobs.append((fn, tok, done, fail)))
+    page.image = Image(synthetic_raw(scene(120, 180)))
+    page.render_now()
+    assert len(jobs) == 1 and page.viewer.busy and seen == [True]
+    assert page.work_chip.text().startswith("● Working")
+    page.render_now()                                     # two more slider moves while it runs
+    page.render_now()
+    assert len(jobs) == 1 and page._render_again          # waiting, not started
+    fn, tok, done, _ = jobs[0]
+    done(tok, fn())                                       # first render ends: its picture shows, newest goes next
+    assert page.viewer.after is not None and len(jobs) == 2 and page.viewer.busy and seen == [True]
+    fn, tok, done, _ = jobs[1]
+    done(tok, fn())
+    assert not page.viewer.busy and seen == [True, False] and not page._render_live
+    assert page.work_chip.text().startswith("Ready")
+    page.render_now()                                     # a failed render clears the indicator too
+    jobs[2][3](jobs[2][1], "boom")
+    assert not page.viewer.busy and not page._render_live
+    page.viewer.busy = True                               # the indicator paints (pill and bar) without errors
+    page.viewer.busy_since -= 1.0
+    page.viewer.resize(640, 420)
+    page.viewer.grab()
+    page.viewer.busy = False
+    app.processEvents()
+
+
+def test_remove_double_chin_button():
+    """One press sets the Double chin slider to 60; a value set by hand is left alone."""
+    app, M, page = _page()
+    page.remove_double_chin()
+    assert page.pt_sl["double_chin"].value() == 60 and page.edit.portrait.get("double_chin") == 60
+    page.pt_sl["double_chin"].set_value(85)
+    page.remove_double_chin()
+    assert page.edit.portrait["double_chin"] == 85
+    app.processEvents()
+
+
+def test_composition_overlays_and_suggested_crops(monkeypatch):
+    """O cycles the overlays (off is one of them), Shift+O turns the spiral, and Suggest crops fills the list and
+    opens the crop tool on the best one, with the overlay that explains it."""
+    from studio import engine as E
+    app, M, page = _page()
+    page.toggle_crop = lambda on: setattr(page.viewer, "crop_mode", on)
+    page.crop_b.toggled.disconnect()
+    page.crop_b.toggled.connect(page.toggle_crop)
+    v = page.viewer
+    page._set_overlay("thirds", 0)
+    page.cycle_overlay()                                   # outside the crop tool: shows the current one
+    assert v.comp_outside and v.comp == "thirds"
+    page.cycle_overlay()
+    assert v.comp == "phi" and page.comp_combo.currentText().startswith("Golden ratio")
+    page._set_overlay("spiral", 0)
+    page.turn_overlay()
+    assert v.comp_orient == 1 and page.comp_turn.isEnabled()
+    page._set_overlay("grid", 0)
+    page.cycle_overlay()
+    assert v.comp == "off" and not v.comp_outside          # cycling to off hides it again
+    v.comp_outside, v.comp = True, "dynamic"
+    v.after = M.to_qimage(np.zeros((300, 450, 3), np.uint8))
+    v.resize(640, 420)
+    v.grab()                                               # every overlay paints without errors
+    for name in ("spiral", "armature", "radial", "rabatment"):
+        v.comp = name
+        v.grab()
+    jobs = []
+    monkeypatch.setattr(M, "run_bg", lambda fn, tok=None, done=None, fail=None: jobs.append((fn, tok, done, fail)))
+    monkeypatch.setattr(page, "_aspect_ratio", lambda: 1.0)
+    page._set_overlay("thirds", 0)
+    sugg = [{"crop": (0.1, 0.0, 0.7, 0.9), "method": "spiral", "orient": 2, "score": -0.3,
+             "text": "Golden spiral: the eyes on the upper left, a medium crop"},
+            {"crop": (0.2, 0.1, 0.8, 1.0), "method": "thirds", "orient": 0, "score": -0.2, "text": "Rule of thirds"}]
+    monkeypatch.setattr(E, "suggest_crops", lambda img, e, ratio, method: sugg)
+    page.suggest_crops()
+    fn, tok, done, fail = jobs[-1]
+    done(tok, fn())
+    assert page.suggest_list.count() == 2 and not page.suggest_list.isHidden()
+    assert v.crop_mode and v.crop == (0.1, 0.0, 0.7, 0.9) and v.comp == "spiral" and v.comp_orient == 2
+    assert page.edit.geometry.crop == [0.1, 0.0, 0.7, 0.9]
+    page._suggestion_picked(page.suggest_list.item(1))
+    assert v.comp == "thirds" and page.edit.geometry.crop == [0.2, 0.1, 0.8, 1.0]
+    app.processEvents()
+
+
+def test_detail_by_scale_panel():
+    """Plan 23.11: every method has its own switch and amount; Amount / Balance and the presets are saved
+    combinations of those sliders; the meter follows; "Judge in black and white" never changes the edit."""
+    from PySide6.QtWidgets import QApplication
+    from studio import engine as E
+    from studio.app import main as M
+    from studio.engine.detail import scales as DS
+    app = QApplication.instance() or QApplication([])
+    page = M.DevelopPage(M.Settings())
+    assert set(page.ds_rows) == set(DS.METHODS)
+    assert page.ds_balance.value() == -50, "Balance starts on the Tonal side"
+    # an edit survives edit -> controls -> edit, switched-off methods included
+    e = E.Edit()
+    e.detail.tonal, e.detail.crisp, e.detail.separation, e.detail.veil, e.detail.broad = 60, -20, 30, 45, 15
+    e.microcontrast.amount = 0.4
+    e.detail.off = ["veil"]
+    page.controls_from_edit(e)
+    page.edit = e
+    assert page.edit_from_controls().to_dict() == e.to_dict()
+    assert not page.ds_rows["veil"][0].isChecked() and page.ds_rows["veil"][1].value() == 45
+    # an edit made before the panel existed shows up as "Local contrast"
+    old = E.Edit.from_dict({"microcontrast": {"amount": 0.5}, "finish": {"texture": 20}})
+    page.controls_from_edit(old)
+    page.edit = old
+    assert page.ds_rows["local"][1].value() == 50 and page.ds_rows["tonal"][1].value() == 0
+    assert not page.f_tex.isHidden(), "the earlier Texture slider shows only for edits that used it"
+    assert page.edit_from_controls().to_dict() == old.to_dict()
+    # Simple level: Amount and Balance drive Tonal and Crisp
+    page.controls_from_edit(E.Edit())
+    page.edit = E.Edit()
+    assert page.f_tex.isHidden()
+    page.ds_balance.set_value(-50, emit=False)
+    page.ds_amount.set_value(60)
+    assert page.ds_rows["tonal"][1].value() == 60 and page.ds_rows["crisp"][1].value() == 30
+    page.ds_balance.set_value(100)
+    assert page.ds_rows["tonal"][1].value() == 0 and page.ds_rows["crisp"][1].value() == 60
+    page.ds_balance.set_value(-100)
+    assert page.ds_rows["tonal"][1].value() == 60 and page.ds_rows["crisp"][1].value() == 0
+    # ... and the method sliders move Amount and Balance back
+    page.ds_rows["crisp"][1].set_value(60)
+    assert page.ds_amount.value() == 60 and abs(page.ds_balance.value()) < 1e-6
+    # presets
+    page._ds_preset_picked(1 + list(DS.PRESETS).index("Both"))
+    got = page.edit_from_controls()
+    assert (got.detail.tonal, got.detail.crisp, got.detail.broad) == (55, 45, 20)
+    page._ds_preset_picked(1 + list(DS.PRESETS).index("Soft glow"))
+    got = page.edit_from_controls()
+    assert got.detail.veil < 0 and got.detail.crisp < 0
+    # the meter: stacking Tonal and Local contrast at 100% reaches the guard (amber)
+    for k in ("tonal", "local"):
+        page.ds_rows[k][1].set_value(100, emit=False)
+    page._ds_refresh(page.edit_from_controls())
+    assert page.ds_meter.data["medium"]["limited"] and "Limited" in page.ds_note.text()
+    # black-and-white judging is a view, not an edit
+    before = page.edit_from_controls().to_dict()
+    page.ds_bw.setChecked(True)
+    assert page.judge_bw and page.edit_from_controls().to_dict() == before
+    a8 = np.zeros((4, 4, 3), np.uint8)
+    a8[..., 1] = 200
+    g = M.bw8(a8)
+    assert g.shape == a8.shape and np.all(g[..., 0] == g[..., 1]) and np.all(g[..., 1] == g[..., 2])
+    page.ds_bw.setChecked(False)
+    app.processEvents()
+
+
+def test_auto_hdr_and_denoise_safeguard_controls():
+    """Auto HDR is off until turned on, each choice has its text, and the settings survive the round trip."""
+    from PySide6.QtWidgets import QApplication
+    from studio import engine as E
+    from studio.app import main as M
+    from studio.engine.color import hdr as HD
+    app = QApplication.instance() or QApplication([])
+    page = M.DevelopPage(M.Settings())
+    assert not page.hdr_on.isChecked(), "Auto HDR never runs by itself"
+    assert page.hdr_strength.count() == len(HD.STRENGTHS) and page.hdr_engine.count() == len(HD.ENGINES)
+    assert page.hdr_text.text() == HD.STRENGTHS["medium"]["does"]
+    e = E.Edit()
+    e.hdr.enabled, e.hdr.strength, e.hdr.amount, e.hdr.engine = True, "lowkey", 80.0, "retinex"
+    e.denoise.enabled, e.denoise.safeguard = True, False
+    page.controls_from_edit(e)
+    page.edit = e
+    assert page.hdr_text.text() == HD.STRENGTHS["lowkey"]["does"]
+    assert "Best for" in page.hdr_engine_text.text() and "Best for" in page.dn_info.text()
+    assert page.edit_from_controls().to_dict() == e.to_dict()
+    assert not page.dn_safe.isChecked()
+    # a look never carries Auto HDR (it changes brightness)
+    from studio.engine.presets import looks
+    assert "hdr" in looks.BRIGHTNESS_KEYS and "hdr" in looks.GROUPS["light"][1]
+    app.processEvents()

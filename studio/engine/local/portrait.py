@@ -9,6 +9,9 @@ the jawline, and subtle body sculpting. Everything is stored in the edit as plai
       "smile_lines": 0..100,     the folds from nose to mouth and mouth to chin
       "even_skin": 0..100,       blotches and uneven colour (the face only)
       "jawline": 0..100,         firms the jaw below the cheeks (a small warp)
+      "double_chin": 0..100,     lifts the soft area under the jaw toward it (a small warp), deepens the shadow
+                                 just under the jawline where there is one, and softens the crease. Not part of
+                                 Younger: it reshapes, so it is only ever asked for on its own
       "eyes": 0..100,            brighter whites, fewer red veins, crisper iris
       "teeth": 0..100,           whiter (towards the eye whites' colour, so a warm photo stays warm), a little brighter
       "sculpt": [...]            body sculpting: brush strokes and shape tools (see below)
@@ -58,10 +61,11 @@ from . import faces as fz
 log = slog.get("engine.portrait")
 
 LUMA = np.array([0.2880, 0.7119, 0.0001], np.float32)
-FACE_KEYS = ("younger", "lines", "under_eyes", "smile_lines", "even_skin", "jawline", "eyes", "teeth")
+FACE_KEYS = ("younger", "lines", "under_eyes", "smile_lines", "even_skin", "jawline", "double_chin", "eyes", "teeth")
 WORK_FACE_PX = 640                    # the face's width on the copy the changes are worked out on (at most)
 SHAPE_TOOLS = ("breast", "butt", "waist", "tummy", "arm", "thigh")
 LIFT_TOOLS = ("breast", "butt")
+JAW_LINE = list(fz.JAW_L) + [fz.CHIN] + list(fz.JAW_R)[::-1]
 
 
 # ------------------------------------------------------------------------------------------ settings
@@ -70,7 +74,7 @@ def amounts(p: dict | None) -> dict:
     p = p or {}
     y = min(max(float(p.get("younger", 0)), 0.0), 100.0) / 100.0
     share = {"lines": 1.0, "under_eyes": 0.85, "smile_lines": 0.6, "even_skin": 0.4, "jawline": 0.5, "eyes": 0.4,
-             "teeth": 0.3}
+             "teeth": 0.3, "double_chin": 0.0}
     out = {}
     for k, s in share.items():
         v = min(max(float(p.get(k, 0)), 0.0), 100.0) / 100.0
@@ -88,7 +92,7 @@ def face_active(p: dict | None) -> bool:
 
 
 def sculpt_active(p: dict | None) -> bool:
-    return bool(warps(p, 1, 1))
+    return bool(warps(p, 4096, 4096))          # a nominal size: the double-chin warp skips faces too small to see
 
 
 # ------------------------------------------------------------------------------------------ a face's geometry
@@ -231,8 +235,19 @@ def zones(face: Face) -> dict:
         c, r = P[i], 0.06 * W / q
         dr.ellipse([c[0] - r, c[1] - r, c[0] + r, c[1] + r], fill=255)
     cheek = arr(im, 0) * (skin_hard > 0.5)
+    # double chin: the band under the jaw where the crease forms (from 6% to 30% of the face below the jaw line),
+    # and a thin band just under the jaw (its shadow), fading towards the jaw angles
+    dn = -face.up * (W / q)
+    jaw = P[JAW_LINE]
+    im, dr = canvas()
+    _poly(dr, np.concatenate([jaw + 0.06 * dn, (jaw + 0.30 * dn)[::-1]]), 255)
+    chin = arr(im, 0.03 * W)
+    im, dr = canvas()
+    mid = P[JAW_LINE[2:-2]] + 0.025 * dn
+    dr.line([(float(x), float(y)) for x, y in mid], fill=255, width=max(1, int(round(0.05 * W / q))), joint="curve")
+    jawshade = arr(im, 0.015 * W)
     return {"x0": x0, "y0": y0, "q": q, "skin": skin, "lines": lines, "under": under, "smile": smile, "eye": eye,
-            "teeth": teeth, "blem": blem, "cheek": cheek, "ext": ext}
+            "teeth": teeth, "blem": blem, "cheek": cheek, "ext": ext, "chin": chin, "jawshade": jawshade}
 
 
 def sample_zone(z: dict, name: str, X, Y) -> np.ndarray:
@@ -337,7 +352,8 @@ def face_gain(rgb: np.ndarray, gx: float, gy: float, q: float, face: Face, amt: 
     X = gx + q * np.arange(w)[None, :] + c
     Y = gy + q * np.arange(h)[:, None] + c
     X, Y = np.broadcast_to(X, (h, w)), np.broadcast_to(Y, (h, w))
-    Z = {k: sample_zone(z, k, X, Y) for k in ("skin", "lines", "under", "smile", "eye", "teeth", "cheek", "ext")}
+    Z = {k: sample_zone(z, k, X, Y) for k in ("skin", "lines", "under", "smile", "eye", "teeth", "cheek", "ext",
+                                              "chin", "jawshade")}
     Wk = face.W / q
     pos = np.maximum(rgb, 0.0)
     Yl = np.maximum(pos @ LUMA, 1e-6)
@@ -346,7 +362,7 @@ def face_gain(rgb: np.ndarray, gx: float, gy: float, q: float, face: Face, amt: 
     gate = _skin_gate(lab, L, Z["cheek"])               # inside the mesh: lenient (one side of a candle-lit face
     strict = _skin_gate(lab, L, Z["cheek"], 0.05, 1.0)  # can be stops darker); above it: only forehead skin, no hair
     gate = (0.5 + 0.5 * gate) * (1.0 - Z["ext"]) + strict * Z["ext"]
-    for k in ("skin", "lines", "under", "smile"):
+    for k in ("skin", "lines", "under", "smile", "chin", "jawshade"):
         Z[k] = Z[k] * gate
     out = rgb.astype(np.float32).copy()
     # even skin first (the blotch layer), then light and shade, then colour
@@ -378,6 +394,14 @@ def face_gain(rgb: np.ndarray, gx: float, gy: float, q: float, face: Face, amt: 
         dL -= np.float32(0.75 * au) * Z["under"] * np.minimum(Df - np.minimum(Dl_dark, 0.0) * 0.0, 0.0)
     if asm > 0:
         dL -= np.float32(0.6 * asm) * Z["smile"] * Df
+    adc = amt.get("double_chin", 0)
+    if adc > 0:
+        # the crease under the chin: its shadow lifted part way (the warp in warps() does the shape)
+        dL -= np.float32(0.7 * adc) * Z["chin"] * Df
+        # the jaw's own shadow deepened a little, only where there already is one (darker than its surroundings),
+        # so flat, frontal light never gets a painted-on line
+        sd = np.clip(_blur(base2, max(2.0, 0.08 * Wk)) - base2, 0.0, 1.5)
+        dL -= np.float32(0.2 * adc) * Z["jawshade"] * np.clip(sd / 0.6, 0.0, 1.0)
     dL = np.clip(dL, -0.3, 0.8)
     out *= np.exp2(dL)[..., None]
     lab2 = to_oklab(np.maximum(out, 0.0))
@@ -568,9 +592,10 @@ def _bump(t, T: float = 1.0):
     return u * u
 
 
-def warps(p: dict | None, sw: int, sh: int) -> list:
-    """Every warp of the edit, in order, as primitives in S pixels: jawline first (attached to the face), then
-    the sculpting strokes and shapes."""
+def warps(p: dict | None, sw: int, sh: int, skin: list | None = None) -> list:
+    """Every warp of the edit, in order, as primitives in S pixels: jawline and double chin first (attached to the
+    face), then the sculpting strokes and shapes. ``skin``: per face (in faces_of order), the map from chin_skin()
+    that keeps the double-chin warp on skin; without it the warp moves whatever is under the jaw."""
     p = p or {}
     long = float(max(sw, sh))
     out = []
@@ -587,6 +612,12 @@ def warps(p: dict | None, sw: int, sh: int) -> list:
                     d = (0.75 * v + 0.45 * fc.up)
                     d = d / (np.hypot(*d) + 1e-9) * 0.022 * fc.W * jaw
                     out.append(("push", float(pt[0]), float(pt[1]), 0.12 * fc.W, float(d[0]), float(d[1])))
+    dc = amounts(p).get("double_chin", 0.0)
+    if dc > 1e-4:
+        for i, f in enumerate(faces_of(p)):
+            tk = _tuck(Face(f, sw, sh), dc, skin[i] if skin and i < len(skin) else None)
+            if tk is not None:
+                out.append(tk)
     for s in p.get("sculpt") or []:
         if not s.get("enabled", True):
             continue
@@ -623,8 +654,62 @@ def warps(p: dict | None, sw: int, sh: int) -> list:
     return out
 
 
+def chin_skin(rgb: np.ndarray, gx: float, gy: float, q: float, face: Face) -> np.ndarray:
+    """How much of each spot round one face is skin like its cheeks (0..1), on the face copy's grid, smooth enough
+    to weight a warp without tearing it. The double-chin warp is multiplied by it: skin under
+    the jaw moves, a collar, a scarf or a beard right under the chin stays where it is."""
+    from ..color.grade import to_oklab
+    z = zones(face)
+    h, w = rgb.shape[:2]
+    c = 0.5 * (q - 1)
+    X = np.broadcast_to(gx + q * np.arange(w)[None, :] + c, (h, w))
+    Y = np.broadcast_to(gy + q * np.arange(h)[:, None] + c, (h, w))
+    pos = np.maximum(rgb, 0.0)
+    L = np.log2(np.maximum(pos @ LUMA, 1e-6)).astype(np.float32)
+    g = _skin_gate(to_oklab(pos), L, sample_zone(z, "cheek", X, Y), 0.07, 1.2)
+    # pulled in from its edges first (4% of the face), so the weight is nearly 0 where skin meets a collar
+    # and the collar's edge stays put; then smoothed (6%), so the warp's slope stays well under one
+    from scipy.ndimage import minimum_filter
+    g = minimum_filter(g, size=max(3, int(round(0.08 * face.W / q)) | 1))
+    return gaussian_filter(g, 0.06 * face.W / q).astype(np.float32)
+
+
+def _tuck(fc: Face, amount: float, skin=None):
+    """The double-chin warp of one face: the soft area under the jaw drawn up towards it. Nothing moves at the jaw
+    line itself or above it (the face keeps its length and its jaw); the most movement, 4.5% of the face width at
+    100, is 16% of the face below the jaw, where the second chin's lower edge sits, and it fades out by 32%. The
+    profile (sin squared) never folds (steepest slope under half a pixel per pixel), and ``skin`` (chin_skin:
+    smooth, so the sum stays well under one) keeps it on skin."""
+    e1 = (fc.el - fc.er) / fc.iod
+    up = fc.up
+    c = fc.P[fz.CHIN]
+    J = fc.P[JAW_LINE] - c
+    ja, jv = J @ e1, J @ up
+    o = np.argsort(ja)
+    ja, jv = ja[o], jv[o]
+    A = 0.95 * float(min(-ja[0], ja[-1]))
+    if A < 2.0:
+        return None
+    return ("tuck", float(c[0]), float(c[1]), e1.astype(float), up.astype(float), ja, jv, A, 0.32 * fc.W,
+            0.045 * fc.W * float(amount), skin)
+
+
 def _disp(w, X, Y):
     """Forward displacement (dx, dy) of one warp at S positions."""
+    if w[0] == "tuck":
+        _, cx, cy, e1, up, ja, jv, A, S, m, sk = w
+        DX, DY = X - cx, Y - cy
+        a = DX * e1[0] + DY * e1[1]
+        s = np.interp(a, ja, jv) - (DX * up[0] + DY * up[1])     # how far below the jaw line
+        x = np.clip(s / S, 0.0, 1.0)
+        t = np.clip((A - np.abs(a)) / (0.35 * A), 0.0, 1.0)
+        f = m * (t * t * (3.0 - 2.0 * t)) * np.sin(np.pi * x) ** 2
+        if sk is not None:
+            M, kx, ky, q = sk
+            c0 = 0.5 * (q - 1)
+            f = f * map_coordinates(M, [(np.asarray(Y) - ky - c0) / q, (np.asarray(X) - kx - c0) / q], order=1,
+                                    mode="nearest")
+        return f * up[0], f * up[1]
     if w[0] == "push":
         _, cx, cy, R, dx, dy = w
         f = _bump(np.hypot(X - cx, Y - cy) / R)
@@ -667,6 +752,12 @@ def _disp(w, X, Y):
 
 def _reach(w) -> tuple:
     """(x0, y0, x1, y1) S box a warp can change, and how far it moves anything (pixels)."""
+    if w[0] == "tuck":
+        _, cx, cy, e1, up, ja, jv, A, S, m = w[:10]
+        corners = [(a, v) for a in (-A, A) for v in (float(jv.min()) - S, float(jv.max()))]
+        xs = [cx + a * e1[0] + v * up[0] for a, v in corners]
+        ys = [cy + a * e1[1] + v * up[1] for a, v in corners]
+        return (min(xs), min(ys), max(xs), max(ys)), m
     if w[0] in ("push", "scale"):
         cx, cy, R = w[1], w[2], w[3]
         mv = math.hypot(w[4], w[5]) if w[0] == "push" else abs(w[4]) * R * 0.4

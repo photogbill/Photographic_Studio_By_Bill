@@ -488,3 +488,144 @@ photo and again on each person's pose crop (closer look), Find person about 5.5 
 model labels hair, face skin, neck and suit correctly; it also calls the helmet she is holding an accessory, so the
 whole-person mask now includes the helmet (the person mask is the union of the pose mask and the parts model's
 "not background").
+
+## 2026-11-15 (session 9, part 3): first outside test, double chin, installers, updates
+
+**First outside test (a friend, Sony raws).** Sony raws open and develop. The report "the filters aren't working on
+the right-hand side" turned out to be speed: the only sign of work was a small "Rendering..." label in the photo's
+bottom-left corner, far from the Controls panel on the right. Measured on the 2-core build machine, preview of a
+45 MP photo (scale 0.26): first open 3.5 s, then per change: exposure 0.7 s, shadows 0.7 s, Smart lighting 1.0 s,
+saturation 1.0 s, Texture 1.8 s, Microcontrast 2.2 s, Dehaze 4.7 s (each with the ones before it still on). Dragging
+a slider also started a new full render on every pause, all running at once. Fixed: an obvious indicator (moving bar,
+"Working... n s" pill, amber chip beside Controls) and one render at a time with only the newest settings queued.
+A sweep of 23 sliders on a left-right mirrored test photo (so both halves should change identically) found the left
+and right fifths of every change equal to within about 1%: no stage leaves part of the frame unprocessed. (Capture
+sharpening shows no change at preview size, by design: it is judged at 100%.)
+
+**Double chin.** On a face mesh placed on a synthetic skin image (face 420 px wide): nothing moves at or above the jaw
+line (largest movement there 0.0 px), the largest movement is 4.5% of the face width at 16% of the face below the
+chin, the warp's area ratio never drops below 0.51 (no folding), and a drawn crease 12% below the chin is lifted 59%
+of its depth (test bounds 30-90%). With a dark collar 22% below the chin, the skin weight is under 0.1 on the collar
+and over 0.6 on the skin above it, and the collar's edge moves less than a quarter of the skin's movement. On the test
+portrait (no double chin, turtleneck right under the chin) the first version pulled the collar up and shortened the
+neck; weighting by skin fixed that (the collar edge now moves under a pixel). Region renders match the full render
+under the chin. Not yet tried on a real double chin: that, and the right strength for "one press" (60), need real
+portraits.
+
+**Hair model.** The runner's output on a fixed 512 x 512 input agrees with Google's MediaPipe ImageSegmenter to 0.0002
+on average, 99% of pixels within 0.005, largest single difference 0.064 (at steep hair edges; MediaPipe runs it with
+XNNPACK's arithmetic). This replaces an earlier note in the session that called the match "exact": it is close, not
+exact. MediaPipe fills the model's fourth input channel (the hair prior) with zero; with 1 instead the output is
+nonsense (mean hair probability 0.96), so the Studio feeds zero.
+
+**Installers and updates: built, not yet run on Windows.** The build machine cannot run .bat files or build an MSI,
+and python.org and GitHub downloads are blocked from it, so the installer, the update staging through
+`Start Studio.bat`, Release.bat and the GitHub build are checked only by reading and by unit tests of the Python side
+(version maths, how a copy was installed, staging a download, refusing a zip whose paths escape the folder, the
+sidebar card). Bill's first install and first release are the real test.
+
+**Composition overlays and suggested crops.** Each overlay's geometry is checked by a test: the golden spiral converges
+at (5 + sqrt 5) / 10 = 0.7236 across and down, as theory says; the golden triangles' short lines meet the diagonal at
+right angles in pixels; the diagonal method's lines are 45 degrees on a 3:2 photo; rabatment's lines are the squares on
+the short sides; the harmonic armature's corner-to-midpoint lines cross the diagonals at the thirds. On the test
+portrait (768 px), finding the subject takes 5.8 s on the 2-core build machine (face finder plus person finder), and
+the suggestions take milliseconds after that. For a 3:2 crop the three suggestions were rabatment (eyes on the left
+rabatment line, the shuttle as counterweight), rule of thirds (eyes on the upper right point) and rabatment again,
+tighter; every one keeps her head whole. A synthetic subject turned right gets its eyes on the left of the frame
+and turned left on the right (space in front of the face). Not yet tried on Bill's photos, so the weights between
+the rules are first guesses.
+
+
+## 2026-11-15 (session 10): Detail by scale, denoise safeguard, Auto HDR, auto white balance
+
+### Detail by scale (detail/scales.py, plan 23.11)
+
+**Why the first engine was invisible.** Measured on a sine texture (0.2 stops, features 32 px across, midtones):
+the first engine ("Local contrast") lifts it x1.33 at 100%. Two causes: its taper stops being monotone at an
+amplitude of 1.25, and its reference tones sit one stop apart, so about a third of the nominal gain arrives.
+
+**What was tried for the new "Tonal" method, in order:**
+
+| Remap | Result | Kept? |
+|---|---|---|
+| (1 - d/3)^2 taper, amplitude 2.2, tones 1.5 stops apart | +25-30% band energy on the R5 fly frame at 70%: still subtle. On that grid the gain goes negative beyond 1 stop from a reference tone, so most of it averaged away. | no |
+| Power law (exponent 0.45), tones 0.5 stops apart | Plain to see (+35-74%). But the gain is a spike at zero difference: a clean 9-stop ramp came out rippled by +-13 millistops with slope down to 3% of the original. | no |
+| Smooth Gaussian detail remap (sigma 0.5 stops) with the noise toe inside the remap | Ripple of +-15 millistops per pyramid level on a clean ramp: the toe is a notch at zero difference that the tone grid cannot follow. | no |
+| **Smooth Gaussian remap, noise protection applied to the coefficients per level, tones 0.25 stops apart** | Clean ramp: 0 millistops change. Small differences x2.1-2.5 at 100% (x1.8-2.0 at 70% in midtones), 0.5-stop differences x1.7-1.9, 1-stop x1.1-1.25, finest scale relaxed to x0.76-0.9. | **yes** |
+
+Numbers for the kept version (synthetic, flat tone weights, 6000 px frame; gain of a sine of that amplitude):
+
+| Features | 0.05 stops | 0.2 | 0.5 | 1.0 |
+|---|---|---|---|---|
+| 1.5 px | x0.76 | x0.80 | x0.87 | x0.95 |
+| 8 px | x1.64 | x1.63 | x1.28 | x0.94 |
+| 16 px | x2.08 | x2.30 | x1.68 | x1.07 |
+| 32-64 px | x2.10 | x2.48 | x1.85 | x1.2 |
+
+* **Frame edges.** With the pyramid's plain mirror at the border, a steep gradient running off the frame (9 stops
+  across the frame) came out 0.44-0.57 stops off within 16 px of the edge at Tonal 100%. Continuing the picture by
+  point reflection instead: 0.003 stops (Tonal), 0.013 with Tonal + Local contrast + Crisp + Broad all at 100%.
+* **Halos** (3-stop edge between flat areas, each method alone at 100%): flat areas stay within 0.025 stops (tonal),
+  0.014 (local), 0.009 (crisp), 0.003 (separation), 0.011 (broad). All 15 pairs pass at 100%.
+* **Candle flame** (6 stops above a dark room): centre moves at most 0.08 stops; no dark ring. Crisp first failed this
+  (+0.30 centre, -0.25 ring: it treated the flame's slope as texture). Fixed by also guarding on the next two coarser
+  scales.
+* **Tonal separation.** First version (contrast-limited histogram equalisation per tile) shifted flat areas by
+  0.4-0.6 stops near a big edge, tile by tile: a halo. Replaced by a mean-shift push away from the centre of each
+  crowd of tones: flat areas now move 0.001-0.003 stops, a smooth gradient is untouched.
+* **ProPhoto luminance is blind to blue.** On the UV-lit violet (2I2A3558) the median "luminance" is 10 stops below
+  mid grey (blue's weight is 0.0001), so the first run did nothing (+1%). The new methods are driven by a lightness
+  with weights 0.25 / 0.60 / 0.15, which equals luminance on neutrals. Same file after, Tonal 70%, fit to screen:
+  +10-17% at the finer preview scales (a dark, soft-lit subject: a modest gain is the honest result).
+* **High ISO (the 23.11 named test, R5 ISO 4000 noise model).** Gain of a 0.15-stop texture at 70%:
+
+  | Tone | -4 EV | -3 EV | -2 EV | 0 EV | +1.5 EV | +2.5 EV |
+  |---|---|---|---|---|---|---|
+  | denoiser off | x1.20 | x1.49 | x1.67 | x1.58 | x1.37 | x1.28 |
+  | denoiser on (hybrid 0.6) | x1.35 | x1.66 | x1.76 | x1.65 | x1.39 | x1.28 |
+
+  Shadows now get at least as much as highlights, and more with the denoiser on (it was the reverse).
+* **What the denoisers leave** (measured, flat patches, R5 ISO 4000 model; fraction of luminance noise left, by
+  pyramid level 0-4): hybrid at 0.6: 0.16 / 0.28 / 0.49 / 0.74 / 0.89; starlet at 0.6: 0.20 / 0.36 / 0.47 / 0.60 /
+  0.74. The old code assumed 0.70 at every level. MP-PCA is not measured yet (the starlet table is used for it).
+* **Real frames.** R5 ISO 4000 fly (3C9A6467), Tonal 70%, fit to screen: veins, drops and the fly's body plainly more
+  modelled; smooth background untouched; no rims. Balance number at 100% in the middle: 1.99 -> 2.13 with Tonal 70 +
+  Crisp 30 (band energy on the preview: +22-46%). R5 ISO 400 low-key leaves (3C9A6347): +7-12% over the whole frame,
+  which is mostly black; the shadow foliage separates.
+* **The 100% view matches the export**: region against full-size render, every method and Auto HDR on: max difference
+  0.0005 (16-bit: about 30 of 65535).
+* **Speed** (2-core build machine): Tonal adds 1.1-1.5 s to a 1638 px preview; full-size 45 MP with Tonal + Crisp +
+  Auto HDR: 30 s, peak memory 4.1 GB (the plain export was not measured for comparison). The reference tones are filtered in parallel, so more cores help directly.
+* **Not judged by me:** whether 60-80% looks right to Bill, in colour and in black and white (the acceptance test).
+
+### Denoise safeguard (raw/denoise.py, plan 23.12)
+
+* Pure noise (384 px flat patch, starlet 1.0): at most 30 photosites kept; mean squared error within 3% of the
+  unprotected result. The safeguard does not cost noise reduction.
+* A spark 40 sigma above its surroundings on one photosite (starlet 1.5): 67% of its height survives without the
+  safeguard, 82% with it. The guarantee is "within 4.5 to 6.75 sigma of where it started", not "untouched".
+
+### Auto HDR (color/hdr.py, plan 23.6)
+
+* **Halos.** Exposure fusion and Retinex both drifted inside the flat sides of a 6-stop edge (0.49 and 0.77 stops:
+  the plan's "cannot make halos by design" is not true of exposure fusion). Fixed for every engine by re-expressing
+  the change as one value per level of lighting (an edge-keeping average) before it is applied: 0.002-0.004 stops
+  now, every engine, Heavy.
+* **Amount** was not proportional with exposure fusion (50% gave a quarter of the lift); the engines now run at the
+  strength's 100% and Amount scales the result.
+* Synthetic backlit room (room -6 EV, window +3.5 EV), Medium: room +0.7 (fusion) to +1.6 stops (Laplacian, Retinex),
+  window -0.5 to -1.5; the texture in both keeps at least 70% of its contrast.
+* Low-key named test: black room unchanged within 0.1 stops, face lifted 0.1-1.6, flame still above +2 EV.
+* Real frame (R5 3C9A6347, range 7.3 stops, shadows at -6.8 EV): Medium opens the shadow foliage by up to 1.5 stops,
+  holds the sunlit leaves, no rims; 10% of the lift held back by the noise limit.
+* **Not built:** denoising the shadows harder in proportion to the lift (the denoiser runs before this stage; the
+  lift is limited by noise instead), Dual Pixel / bracket / burst sources.
+
+### Auto white balance (color/autowb.py, plan 23.9)
+
+* Grayness Index on a synthetic scene with grey patches under a warm light: within 3 degrees of the true light; two
+  lights (candle left, window right) both found within 5 degrees.
+* Real frames: R5 foliage shots (nothing neutral in them): grey edge 4870 K / 5850 K against grayness 4560 K / 5235 K,
+  11-12 degrees apart: reported as "they disagree: check by eye". UV-lit violet: 1 degree apart, both far from any
+  real light and pulled back to the band. This is the honest behaviour: the agreement is the confidence.
+* **Not built:** the mixed-light blend and the skin-based estimate.

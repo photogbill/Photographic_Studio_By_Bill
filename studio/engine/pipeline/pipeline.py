@@ -56,6 +56,7 @@ class Image:
         self._blur = {}
         self._warp = None
         self._memo: dict = {}
+        self.denoise_report: dict | None = None    # last whole-frame denoise: photosites kept by the safeguard
 
     def highlight_maps(self, mult, use_optical_black: bool = True):
         """Rebuilt highlight colour for the whole frame at this white balance (raw/highlights.py), computed once."""
@@ -109,6 +110,27 @@ class Image:
             self._memo[key] = A
         log.debug("dehaze airlight %s", np.round(A, 4).tolist())
         return A
+
+    def detail_proxy(self, edit: "Edit"):
+        """A small copy of the whole frame (scene-linear, before exposure, long edge about 1024 px) on which
+        "Detail by scale" measures its veil floor, tonal-separation regions and broad field, so that a 100% view
+        and the export agree."""
+        key = ("dproxy", edit.raw_key())
+        with self._lock:
+            if key in self._memo:
+                return self._memo[key]
+        from ..detail.scales import PROXY_LONG
+        e = Edit.from_dict(edit.to_dict())
+        e.sharpen.enabled = False
+        base = linear_rgb(self, e, None, half_size=True, cache=False)
+        k = min(1.0, float(PROXY_LONG) / max(base.shape[:2]))
+        if k < 1:
+            base = resize(base, max(8, round(base.shape[1] * k)), max(8, round(base.shape[0] * k)))
+        base = np.ascontiguousarray(base, np.float32)
+        with self._lock:
+            self._memo = {kk: v for kk, v in self._memo.items() if kk[0] != "dproxy"}
+            self._memo[key] = base
+        return base
 
     @property
     def path(self) -> str:
@@ -197,6 +219,9 @@ class Image:
         self._cache_key = self._cache_val = None
 
 
+SAFEGUARD_K = 4.5           # denoise safeguard: photosites moved by more than this many sigma are restored
+
+
 def open_image(path: str) -> Image:
     return Image(open_raw(path))
 
@@ -270,8 +295,12 @@ def linear_rgb(image: Image, edit: Edit, region=None, half_size: bool = False, c
         dn = edit.denoise
         model = image.noise_model(edit.use_optical_black)
         with slog.stage("denoise", log, method=dn.method, luma=dn.luma, chroma=dn.chroma, src=model.source):
-            mos = denoise_mosaic(mos, raw.cfa_rgb, model, DenoiseParams(method=dn.method, luma=dn.luma,
-                                                                       chroma=dn.chroma, grain=dn.grain))
+            st = {}
+            mos = denoise_mosaic(mos, raw.cfa_rgb, model,
+                                 DenoiseParams(method=dn.method, luma=dn.luma, chroma=dn.chroma, grain=dn.grain,
+                                               safeguard=SAFEGUARD_K if dn.safeguard else 0.0), stats=st)
+            if region is None and st:              # whole frame: what the Clean panel reports
+                image.denoise_report = dict(st, half=half_size)
     mult = wb_multipliers(image, edit)
     with slog.stage("white_balance", log, mult=np.round(mult, 4).tolist(), mode=edit.white_balance.mode):
         pat = raw.cfa_rgb
@@ -387,6 +416,55 @@ def luma_noise_fn(image: Image, edit: Edit):
     def sigma(y):
         y = np.maximum(np.asarray(y, np.float32), 0.0)
         return k * mg * np.sqrt(a * y / mg + b)
+    return sigma
+
+
+# Fraction of the luminance noise that each denoise method leaves, by pyramid level (0 = pixel level), at
+# luminance strengths 0.3 / 0.6 / 1.0. Measured on flat synthetic patches with the R5 ISO 4000 noise model
+# (docs/RESULTS.md, session 10): the denoisers clean the pixel level hard and leave most of the slow blotches.
+_RESIDUAL = {
+    "hybrid": ((0.3, 0.6, 1.0), ((0.18, 0.31, 0.51, 0.76, 0.90), (0.16, 0.28, 0.49, 0.74, 0.89),
+                                 (0.15, 0.26, 0.48, 0.73, 0.88))),
+    "starlet": ((0.3, 0.6, 1.0), ((0.36, 0.60, 0.68, 0.76, 0.84), (0.20, 0.36, 0.47, 0.60, 0.74),
+                                  (0.10, 0.19, 0.31, 0.45, 0.64))),
+}
+_RESIDUAL["nlm"] = _RESIDUAL["hybrid"]            # hybrid's luminance is the non-local means
+_RESIDUAL["mppca"] = _RESIDUAL["starlet"]         # not measured yet: the more cautious table
+
+
+def denoise_residual(edit: Edit) -> list:
+    """Noise left after the denoiser as a fraction of the original, per pyramid level (1.0 everywhere when the
+    denoiser is off). Keep-grain puts a fine fraction back, mostly at pixel level."""
+    dn = edit.denoise
+    if not dn.enabled or dn.luma <= 0:
+        return [1.0] * 5
+    xs, rows = _RESIDUAL.get(dn.method, _RESIDUAL["starlet"])
+    xs, rows = (0.0,) + tuple(xs), ((1.0,) * 5,) + tuple(rows)
+    r = [float(np.interp(min(dn.luma, xs[-1]), xs, [row[i] for row in rows])) for i in range(5)]
+    g = float(np.clip(dn.grain, 0.0, 1.0))
+    return [ri + g * (1.0 - ri) * w for ri, w in zip(r, (1.0, 0.5, 0.2, 0.0, 0.0))]
+
+
+def detail_noise_fn(image: Image, edit: Edit):
+    """sigma(Y) for "Detail by scale": the frame's luminance noise before denoising, carrying ``resid_levels``,
+    the measured fraction the denoiser leaves at each scale (plan 23.11: the noise toe must use the noise left
+    AFTER the denoiser, or noisy shadows get nothing while highlights get the most)."""
+    try:
+        nm = image.noise_model(edit.use_optical_black)
+    except Exception:
+        slog.log_exception("noise model unavailable; detail stages run without a noise gate", log)
+        return None
+    pat = image.raw.cfa_rgb
+    gpos = [(i, j) for i in (0, 1) for j in (0, 1) if pat[i, j] == 1]
+    a = float(np.mean([nm.a[p] for p in gpos]))
+    b = float(np.mean([nm.b[p] for p in gpos]))
+    mg = float(wb_multipliers(image, edit)[1])
+    g = 2.0 ** edit.exposure_ev                    # the array carries the exposure by the time stage 16 runs
+
+    def sigma(y):
+        y = np.maximum(np.asarray(y, np.float32), 0.0) / g
+        return g * 0.8 * mg * np.sqrt(a * y / mg + b)
+    sigma.resid_levels = denoise_residual(edit)
     return sigma
 
 
@@ -506,10 +584,113 @@ def _mid_in(image: Image, edit: Edit) -> float:
 
 
 def _mc_params(edit: Edit):
-    from ..detail.microcontrast import MCParams
-    m = edit.microcontrast
-    return MCParams(amount=m.amount, shadows=m.shadows, midtones=m.midtones, highlights=m.highlights, scale=m.scale,
-                    range_ev=m.range_ev)
+    """Stage 16 parameters ("Detail by scale", detail/scales.py): every method's amount, switched-off ones at 0."""
+    from ..detail.scales import ScaleParams
+    m, d = edit.microcontrast, edit.detail
+    off = set(d.off or ())
+    on = lambda k, v: 0.0 if k in off else float(v)
+    return ScaleParams(tonal=on("tonal", d.tonal) / 100.0, local=on("local", m.amount),
+                       crisp=on("crisp", d.crisp) / 100.0, separation=on("separation", d.separation) / 100.0,
+                       veil=on("veil", d.veil) / 100.0, broad=on("broad", d.broad) / 100.0, shadows=m.shadows,
+                       midtones=m.midtones, highlights=m.highlights, scale=m.scale, range_ev=m.range_ev).clamped()
+
+
+def _detail_fields(image: Image, edit: Edit, sp=None):
+    """Veil floor, tonal-separation table and broad field, measured once on the whole frame (detail/scales.py)."""
+    from ..detail import scales as sc
+    sp = sp or _mc_params(edit)
+    if not sp.needs_proxy:
+        return None
+    mid = _mid_in(image, edit)
+    key = ("dfields", edit.raw_key(), round(edit.exposure_ev, 4), round(mid, 6),
+           tuple(round(getattr(sp, k), 4) for k in ("separation", "veil", "broad", "shadows", "midtones",
+                                                    "highlights")))
+    with image._lock:
+        if key in image._memo:
+            return image._memo[key]
+    proxy = image.detail_proxy(edit)
+    nf = detail_noise_fn(image, edit)
+    g = 2.0 ** edit.exposure_ev
+    k = min(1.0, max(proxy.shape[:2]) / _long_edge(image))           # the proxy averages pixel noise away
+    nfs = (lambda y: k * nf(y)) if nf else None
+    f = sc.measure_fields(proxy, sp, g, mid, nfs)
+    with image._lock:
+        image._memo = {kk: v for kk, v in image._memo.items() if kk[0] != "dfields"}
+        image._memo[key] = f
+    return f
+
+
+def _hdr_params(edit: Edit):
+    from ..color.hdr import HDRParams
+    h = edit.hdr
+    return HDRParams(strength=h.strength, amount=float(np.clip(h.amount, 0.0, 150.0)) / 100.0 if h.enabled else 0.0,
+                     engine=h.engine)
+
+
+def _hdr_fields(image: Image, edit: Edit):
+    """Auto HDR's brightness field, measured once on the whole frame (color/hdr.py). None when it is off."""
+    from ..color import hdr
+    hp = _hdr_params(edit)
+    if not hp.active:
+        return None
+    mid = _mid_in(image, edit)
+    sp = _mc_params(edit)
+    key = ("hdr", edit.raw_key(), round(edit.exposure_ev, 4), round(mid, 6), hp.strength, round(hp.amount, 4),
+           hp.engine, round(sp.veil, 4))
+    with image._lock:
+        if key in image._memo:
+            return image._memo[key]
+    g = 2.0 ** edit.exposure_ev
+    proxy = image.detail_proxy(edit) * np.float32(g)
+    df = _detail_fields(image, edit, sp)
+    if df is not None and df.veil is not None:          # the veil comes off first: lifting a haze floor gives mush
+        from ..detail.scales import apply_veil
+        proxy = apply_veil(proxy, df)
+    nf = detail_noise_fn(image, edit)                   # the lift is judged by the noise of the full-size photo
+    f = hdr.measure(proxy, hp, 1.0, mid, nf)
+    with image._lock:
+        image._memo = {kk: v for kk, v in image._memo.items() if kk[0] != "hdr"}
+        image._memo[key] = f
+    log.debug("auto hdr: %s", f.report)
+    return f
+
+
+def hdr_report(image: Image, edit: Edit) -> dict | None:
+    """What Auto HDR measured and did for this photo (scene range, stops lifted and pulled), for the Light panel."""
+    f = _hdr_fields(image, edit)
+    return dict(f.report) if f is not None else None
+
+
+def _proxy_xy(image: Image, frame: "Frame", fields, h: int, w: int):
+    """Position of every pixel of an (h, w) render on the whole-frame proxy."""
+    xs, ys = frame.s_coords(h, w)
+    _, _, sw, sh = image.raw.crop
+    ph, pw = fields.shape
+    return (np.asarray(xs, np.float32) + 0.5) * np.float32(pw / sw) - 0.5, \
+           (np.asarray(ys, np.float32) + 0.5) * np.float32(ph / sh) - 0.5
+
+
+def detail_balance(image: Image, edit: Edit, size: int = 1024):
+    """(before, after): the balance number of "Detail by scale" (medium-scale tonal variation over pixel-level
+    contrast, detail/scales.balance_ratio), measured at 100% on the middle of the photo without and with the
+    panel's methods. Higher = modelled, lower = etched."""
+    from ..detail import scales as sc
+    _, _, cw, ch = image.raw.crop
+    w, h = min(size, cw // 2 * 2), min(size, ch // 2 * 2)
+    region = ((cw - w) // 4 * 2, (ch - h) // 4 * 2, w, h)
+    plain = Edit.from_dict(edit.to_dict())
+    plain.microcontrast.amount = 0.0
+    for k in ("tonal", "crisp", "separation", "veil", "broad"):
+        setattr(plain.detail, k, 0.0)
+    plain.geometry = Edit().geometry
+    cur = Edit.from_dict(edit.to_dict())
+    cur.geometry = Edit().geometry
+    le = _long_edge(image)
+    lum = lambda a: a @ np.array([0.2880402, 0.7118741, 0.0000857], np.float32)
+    before = sc.balance_ratio(lum(_render_plain(image, plain, region, 1.0)), 1.0, le)
+    if not _mc_params(edit).active:
+        return before, before
+    return before, sc.balance_ratio(lum(_render_plain(image, cur, region, 1.0)), 1.0, le)
 
 
 def _long_edge(image: Image) -> float:
@@ -559,6 +740,13 @@ def _post(image: Image, edit: Edit, out: np.ndarray, frame: Frame, lut) -> np.nd
     gain = np.float32(2.0 ** edit.exposure_ev)
     mc = _mc_params(edit)
     fin = edit.finish
+    fields = _detail_fields(image, edit, mc)
+    if fields is not None and fields.veil is not None:      # veil first: before any haze removal or shadow lift
+        if gain != 1:
+            _strips(out, lambda s: s.__imul__(gain))
+            gain = np.float32(1.0)
+        from ..detail.scales import apply_veil
+        _strips(out, lambda s: s.__setitem__(Ellipsis, apply_veil(s, fields)))
     if edit.light.dehaze:
         A = image.haze_airlight(edit) * gain
         if gain != 1:
@@ -572,14 +760,30 @@ def _post(image: Image, edit: Edit, out: np.ndarray, frame: Frame, lut) -> np.nd
             gain = np.float32(1.0)
         from ..color.light import smart_lighting
         out = smart_lighting(out, edit.light.smart, _mid_in(image, edit), eff, _long_edge(image))
-    if mc.active:
+    hf = _hdr_fields(image, edit)
+    if hf is not None:                                      # Auto HDR: after the veil, before local contrast
         if gain != 1:
             _strips(out, lambda s: s.__imul__(gain))
-        from ..detail import microcontrast as mcm
-        nf = luma_noise_fn(image, edit)
-        g = float(gain)
-        nfs = (lambda y: g * nf(np.asarray(y) / g)) if nf else None
-        out = mcm.apply(out, mc, _mid_in(image, edit) * 1.0, nfs, eff, _long_edge(image))
+            gain = np.float32(1.0)
+        from ..color import hdr as hdrm
+        hx, hy = _proxy_xy(image, frame, hf, out.shape[0], out.shape[1])
+        with slog.stage("hdr.apply", log, engine=hf.report["engine"], strength=hf.report["strength"]):
+            mid_h = _mid_in(image, edit)
+            for y0 in range(0, out.shape[0], STRIP):
+                out[y0:y0 + STRIP] = hdrm.apply(out[y0:y0 + STRIP], hf, mid_h, hx[y0:y0 + STRIP], hy[y0:y0 + STRIP])
+    if mc.beyond_veil:
+        g = float(gain) if mc.only_local else 2.0 ** edit.exposure_ev     # (the first engine's own scaling, kept)
+        if gain != 1:
+            _strips(out, lambda s: s.__imul__(gain))
+        from ..detail import scales as mcm
+        if mc.only_local:                                   # the first engine with its own noise estimate
+            nf = luma_noise_fn(image, edit)
+            nfs = (lambda y: g * nf(np.asarray(y) / g)) if nf else None
+        else:
+            nfs = detail_noise_fn(image, edit)
+        pxy = _proxy_xy(image, frame, fields, out.shape[0], out.shape[1]) if fields is not None else None
+        out = mcm.apply(out, mc, _mid_in(image, edit) * 1.0, nfs, eff, _long_edge(image), fields, pxy,
+                        veil_done=True)
         gain = np.float32(1.0)
     if fin.texture:
         if gain != 1:
@@ -671,8 +875,9 @@ def _context(image: Image, edit: Edit, near=None) -> tuple[int, int]:
             pad = max(pad, int(math.ceil(pt.margin(ws))) + 8)
     mc = _mc_params(edit)
     if mc.active:
-        from ..detail.microcontrast import context
-        pad, align = context(mc, _long_edge(image))
+        from ..detail.scales import context
+        cp, align = context(mc, _long_edge(image))
+        pad = max(pad, cp)
     if edit.light.smart > 0:
         from ..color.light import smart_radius
         pad = max(pad, 3 * smart_radius(1.0, _long_edge(image)) + 8)
@@ -904,10 +1109,34 @@ def auto_colour(image: Image, edit: Edit) -> dict:
     return {"vibrance": round(grade.auto_vibrance(m), 1), "colourfulness": round(m, 1)}
 
 
-def auto_white_balance(image: Image):
-    """Multipliers [R, G, B] from the grey-edge estimate, and how they were found."""
-    from ..color.autowb import auto_multipliers
-    return auto_multipliers(image)
+def auto_white_balance(image: Image, method: str = "grey_edge", mood: float | None = None):
+    """Auto white balance (plan 23.9). Returns (multipliers [R, G, B] or None, how, info).
+
+    method: "grey_edge" or "grayness". mood: how far to correct from the as-shot balance, 0..1 (1 = fully
+    neutral); None = the default for this photo (60% for a warm light in a low-light photo, else 90%).
+    info: both estimates in kelvin, their agreement, the confidence, the mood used, the number of lights."""
+    from ..color import autowb as aw
+    est = aw.estimates(image)
+    m = est["grayness"] if method == "grayness" and est["grayness"] is not None else est["grey_edge"]
+    how = "grayness index" if (method == "grayness" and est["grayness"] is not None) else "grey edge"
+    if m is None:
+        m, how = aw.auto_multipliers(image, "grey_edge")          # grey world, the last resort
+        if m is None:
+            return None, how, {}
+    cam_xyz = image.raw.cam_xyz
+    m, pulled = aw.in_band(cam_xyz, m)
+    T, _ = cam.temp_tint_from_multipliers(cam_xyz, m)
+    k = aw.default_mood(T, image.meta.iso) if mood is None else float(np.clip(mood, 0.0, 1.0))
+    as_shot = cam.normalise_wb(image.raw.wb_as_shot)
+    out = aw.keep_mood(m, as_shot, k)
+    info = {"mood": k, "confidence": est["confidence"], "agreement_deg": est["agreement_deg"],
+            "lights": len(est["lights"]), "in_band": not pulled, "neutral_k": round(T)}
+    for name in ("grey_edge", "grayness"):
+        if est[name] is not None:
+            info[name + "_k"] = round(cam.temp_tint_from_multipliers(cam_xyz, est[name])[0])
+    if len(est["lights"]) > 1:
+        info["lights_k"] = [round(cam.temp_tint_from_multipliers(cam_xyz, l)[0]) for l, _ in est["lights"]]
+    return out, how, info
 
 
 def wb_temp_tint(image: Image, mult) -> tuple[float, float]:
@@ -1319,14 +1548,55 @@ def apply_portrait(image: Image, edit: Edit, base: np.ndarray, box, half: bool) 
     return base if out is None else out
 
 
+def chin_skin(image: Image, edit: Edit, index: int):
+    """Where the skin is round one face (portrait.chin_skin), for the double-chin warp: (M, gx, gy, q), worked out
+    once per face and kept on the image, so every region render warps the same way."""
+    from ..local import portrait as pt
+    from ..local import retouch as rt
+    faces = pt.faces_of(edit.portrait)
+    if not (0 <= index < len(faces)):
+        return None
+    _, _, sw, sh = image.raw.crop
+    fc = pt.Face(faces[index], sw, sh)
+    box, half, k = pt.fetch_plan(fc, sw, sh)
+    hits = [s for s in rt.active(edit.retouch) if rt.overlaps(s, box, sw, sh)]
+    key = ("chinskin", edit.raw_key(), json.dumps(hits, sort_keys=True), json.dumps(faces[index]["pts"]),
+           edit.stage_versions.get("portrait", 1))
+    with image._lock:
+        if key in image._memo:
+            return image._memo[key]
+    with slog.stage("portrait.chin_skin", log, face=index, width=round(fc.W)):
+        rgb, gx, gy, q = _face_copy(image, edit, box, half, k)
+        res = (pt.chin_skin(rgb, gx, gy, q, fc), gx, gy, q)
+    with image._lock:
+        old = [kk for kk in image._memo if kk[0] == "chinskin"]
+        for kk in old[:-6]:
+            image._memo.pop(kk, None)
+        image._memo[key] = res
+    return res
+
+
+def portrait_warps(image: Image, edit: Edit) -> list:
+    """The edit's warps (portrait.warps), with the skin maps the double-chin warp needs."""
+    from ..local import portrait as pt
+    p = edit.portrait
+    if not p:
+        return []
+    _, _, sw, sh = image.raw.crop
+    skin = None
+    if pt.amounts(p).get("double_chin", 0.0) > 1e-4:
+        skin = [chin_skin(image, edit, i) for i in range(len(pt.faces_of(p)))]
+    return pt.warps(p, sw, sh, skin=skin)
+
+
 def apply_sculpt(image: Image, edit: Edit, base: np.ndarray, box, half: bool) -> np.ndarray:
-    """Body sculpting and the jawline: the block warped (box = its S-frame region, x and y used)."""
+    """Body sculpting, the jawline and the double chin: the block warped (box = its S-frame region, x and y
+    used)."""
     from ..local import portrait as pt
     p = edit.portrait
     if not p:
         return base
-    _, _, sw, sh = image.raw.crop
-    ws = pt.warps(p, sw, sh)
+    ws = portrait_warps(image, edit)
     if not ws:
         return base
     step = 2 if half else 1
@@ -1340,7 +1610,7 @@ def sculpt_source(image: Image, edit: Edit, xs, ys):
     placed by clicking on a sculpted photo go through this, so they land on what was clicked."""
     from ..local import portrait as pt
     _, _, sw, sh = image.raw.crop
-    ws = pt.warps(edit.portrait, sw, sh) if edit.portrait else []
+    ws = portrait_warps(image, edit)
     if not ws:
         return np.asarray(xs, float), np.asarray(ys, float)
     X, Y = pt.source_of(ws, np.asarray(xs, float) * sw, np.asarray(ys, float) * sh)
@@ -1552,4 +1822,153 @@ def find_people(image: Image, edit: Edit, size: int = 640) -> dict | None:
             v = map_coordinates(res["classes"][..., i], [fy, fx], order=1, mode="nearest")
             shape["classes"][name] = mk.encode_bitmap(np.clip(v * 255.0 + 0.5, 0, 255).astype(np.uint8))
         log.info("people: parts labelled by the multiclass model")
+    from ..local import people as pp2
+    if pp2.hair_available() and res["people"]:
+        shape["hair_maps"] = _hair_maps(image, edit, res["people"], img.shape[1], img.shape[0], k)
     return shape
+
+
+def _hair_maps(image: Image, edit: Edit, people: list, vw: int, vh: int, k: float) -> list:
+    """The hair model on a sharper render of each head (a crop of the photo, about 768 px across): its hair map on a
+    grid of the S frame over that head."""
+    from ..io.export import ExportSpec, to_output
+    from ..lens.geometry import d_to_s, s_to_d
+    from ..local import masks as mk
+    from ..local import people as pp
+    from .edit import Geometry
+    from scipy.ndimage import map_coordinates
+    _, _, sw, sh = image.raw.crop
+    e = Edit.from_dict(edit.to_dict())
+    e.portrait, e.masks, e.geometry = None, None, Geometry()
+    e.finish.grain = 0.0
+    out = []
+    for p in people:
+        x0, y0, x1, y1 = pp.head_box(p["pts"], vw, vh)
+        if x1 - x0 < 8 or y1 - y0 < 8:
+            continue
+        # the head's box in the S frame (full-resolution pixels), then a render of just that part
+        cx = np.array([x0, x1, x0, x1]) / k - 0.5
+        cy = np.array([y0, y0, y1, y1]) / k - 0.5
+        xs, ys = d_to_s(cx, cy, sw, sh, image.raw.flip)
+        sx0, sy0 = max(0, int(np.floor(np.min(xs)))), max(0, int(np.floor(np.min(ys))))
+        sx1, sy1 = min(sw, int(np.ceil(np.max(xs))) + 1), min(sh, int(np.ceil(np.max(ys))) + 1)
+        if sx1 - sx0 < 8 or sy1 - sy0 < 8:
+            continue
+        sc = min(1.0, 768.0 / max(sx1 - sx0, sy1 - sy0))
+        with slog.stage("people.hair", log, box=f"{sx1 - sx0}x{sy1 - sy0}", scale=round(sc, 3)):
+            crop = render(image, e, region=(sx0, sy0, sx1 - sx0, sy1 - sy0), scale=sc)
+            rgb = to_output(crop, ExportSpec(format="jpeg", space="srgb", bits=8)).astype(np.float32) / 255.0
+            prob = pp.hair_prob(rgb)
+        # back to the S frame: a grid over the box, each cell looked up in the (upright) crop
+        gw = max(8, min(512, int(round((sx1 - sx0) * sc))))
+        gh = max(8, min(512, int(round((sy1 - sy0) * sc))))
+        GX, GY = np.meshgrid(sx0 + (np.arange(gw) + 0.5) / gw * (sx1 - sx0) - 0.5,
+                             sy0 + (np.arange(gh) + 0.5) / gh * (sy1 - sy0) - 0.5)
+        dx, dy = s_to_d(GX, GY, sw, sh, image.raw.flip)
+        # the crop's own display-frame origin: its corner is the box corner seen upright
+        cxs, cys = s_to_d(np.array([sx0, sx1 - 1.0]), np.array([sy0, sy1 - 1.0]), sw, sh, image.raw.flip)
+        ox, oy = float(np.min(cxs)), float(np.min(cys))
+        kx = prob.shape[1] / float(np.max(cxs) - ox + 1.0)
+        ky = prob.shape[0] / float(np.max(cys) - oy + 1.0)
+        v = map_coordinates(prob, [(np.asarray(dy) - oy + 0.5) * ky - 0.5, (np.asarray(dx) - ox + 0.5) * kx - 0.5],
+                            order=1, mode="constant", cval=0.0)
+        out.append({"box": [round(sx0 / sw, 6), round(sy0 / sh, 6), round(sx1 / sw, 6), round(sy1 / sh, 6)],
+                    "w": int(gw), "h": int(gh),
+                    "data": mk.encode_bitmap(np.clip(v * 255.0 + 0.5, 0, 255).astype(np.uint8))})
+    log.info("people: hair model on %d head(s)", len(out))
+    return out
+
+
+# ------------------------------------------------------------------------------------------ composition
+def composition_subject(image: Image, edit: Edit) -> dict:
+    """What a crop should be built round, on the displayed photo before cropping (fractions 0..1): faces (from the
+    edit, else found now), people (33 body points), else the part that stands out and is sharp. See
+    local/composition.py for the keys."""
+    from ..local import faces as fz
+    from ..local import composition as cp
+    e0 = Edit.from_dict(edit.to_dict())
+    e0.geometry.crop = None
+    faces = [f for f in ((e0.portrait or {}).get("faces") or []) if len(f.get("pts") or []) == 468]
+    if not faces:
+        try:
+            faces = find_faces(image, e0)
+        except Exception:                                    # noqa: BLE001  (no face finder: carry on without)
+            log.warning("composition: the face finder failed", exc_info=True)
+            faces = []
+    ow, oh = output_size(image, e0)
+    sub = {"keep": [], "others": [], "joints": [], "necks": []}
+    fv = []
+    for f in faces:
+        P = np.asarray(f["pts"], float)
+        u, v = s_to_view(image, e0, P[:, 0], P[:, 1])
+        Q = np.stack([np.asarray(u) * ow, np.asarray(v) * oh], 1)          # display pixels, so angles are true
+        er, el = fz.eye_centres(Q)
+        oval = Q[fz.FACE_OVAL]
+        x0, y0 = oval.min(0)
+        x1, y1 = oval.max(0)
+        fh = y1 - y0
+        cx = 0.5 * (x0 + x1)
+        gaze = float(np.clip((Q[fz.NOSE_TIP][0] - cx) / max(0.5 * (x1 - x0), 1.0) * 2.5, -1.0, 1.0))
+        top = y0 - 0.3 * fh                                                  # hair above the hairline
+        box = ((x0 - 0.08 * (x1 - x0)) / ow, top / oh, (x1 + 0.08 * (x1 - x0)) / ow, (y1 + 0.05 * fh) / oh)
+        fv.append({"eyes": (0.5 * (er[0] + el[0]) / ow, 0.5 * (er[1] + el[1]) / oh), "box": box, "size": fh / oh,
+                   "gaze": gaze, "top": top / oh, "chin": (Q[fz.CHIN][0] / ow, Q[fz.CHIN][1] / oh)})
+    people = []
+    try:
+        shape = find_people(image, e0)
+    except Exception:                                        # noqa: BLE001
+        log.warning("composition: the person finder failed", exc_info=True)
+        shape = None
+    for pts in (shape or {}).get("people") or []:
+        A = np.asarray(pts, float)
+        u, v = s_to_view(image, e0, A[:, 0], A[:, 1])
+        vis = A[:, 2] > 0.5
+        people.append({"u": np.asarray(u), "v": np.asarray(v), "vis": vis})
+    for pl in people:
+        for j in cp.JOINTS:
+            if pl["vis"][j] and 0.0 < pl["u"][j] < 1.0 and 0.0 < pl["v"][j] < 1.0:
+                sub["joints"].append((float(pl["u"][j]), float(pl["v"][j])))
+        if pl["vis"][[9, 10, 11, 12]].all():
+            sub["necks"].append((float(0.5 * (pl["u"][[9, 10]].mean() + pl["u"][[11, 12]].mean())),
+                                 float(0.45 * pl["v"][[9, 10]].mean() + 0.55 * pl["v"][[11, 12]].mean())))
+    if fv:
+        big = max(f["size"] for f in fv)
+        main_faces = [f for f in fv if f["size"] > 0.6 * big]
+        sub["main"] = tuple(np.mean([f["eyes"] for f in main_faces], axis=0))
+        sub["keep"] = [f["box"] for f in main_faces]
+        sub["others"] = [f["box"] for f in fv if f not in main_faces]
+        sub["head_top"] = min(f["top"] for f in main_faces)
+        sub["gaze"] = float(np.mean([f["gaze"] for f in main_faces])) if len(main_faces) == 1 else 0.0
+        sub["portrait"] = big > 0.08
+        sub["what"] = "the eyes" if len(main_faces) == 1 else "the faces"
+        xs = [b[0] for b in sub["keep"]] + [b[2] for b in sub["keep"]]
+        ys = [b[1] for b in sub["keep"]] + [b[3] for b in sub["keep"]]
+        sub["box"] = (min(xs), min(ys), max(xs), max(ys))
+    elif people:
+        pl = max(people, key=lambda q: float(np.ptp(q["v"][q["vis"]])) if q["vis"].any() else 0.0)
+        uu, vv = pl["u"][pl["vis"]], pl["v"][pl["vis"]]
+        sub["main"] = (float(pl["u"][0]), float(pl["v"][0])) if pl["vis"][0] else (float(uu.mean()), float(vv.mean()))
+        sub["box"] = (float(uu.min()), float(vv.min()), float(uu.max()), float(vv.max()))
+        sub["what"] = "the person"
+    else:
+        from ..io.export import ExportSpec, to_output
+        sc = min(1.0, 384.0 / max(ow, oh))
+        small = to_output(render(image, e0, scale=sc), ExportSpec(format="jpeg", space="srgb", bits=8))
+        sub.update(cp.salient_subject(small))
+    log.info("composition: %s at (%.2f, %.2f); %d face(s), %d person(s), %d joint(s)", sub.get("what"),
+             sub["main"][0], sub["main"][1], len(fv), len(people), len(sub["joints"]))
+    return sub
+
+
+def suggest_crops(image: Image, edit: Edit, ratio: float | None = None, method: str | None = None, n: int = 3):
+    """Suggested crops for the displayed photo (fractions of the uncropped frame, like Geometry.crop), best first:
+    [{"crop", "method", "orient", "score", "text"}]. ``ratio``: the crop's width / height (None: the photo's own);
+    ``method``: a composition method (local/composition.py METHODS) or None for any."""
+    from ..local import composition as cp
+    e0 = Edit.from_dict(edit.to_dict())
+    e0.geometry.crop = None
+    ow, oh = output_size(image, e0)
+    with slog.stage("composition.suggest", log, method=method or "any"):
+        sub = composition_subject(image, e0)
+        return cp.suggest(sub, ow / oh, float(ratio or ow / oh), method, n)
+

@@ -51,7 +51,7 @@ goto :end
 :fail
 echo.
 echo  Something went wrong. Details are in logs\studio.log
-echo  (Help: run "%~dp0.venv\Scripts\python.exe" -m studio diag  for a report you can send.)
+echo  (Help: run "%PY%" -m studio diag  for a report you can send.)
 echo.
 pause
 endlocal

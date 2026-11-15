@@ -32,6 +32,7 @@ log = slog.get("engine.people")
 MODEL_FILES = {"seg": "selfie_segmentation.tflite", "detect": "pose_detection.tflite",
                "pose": "pose_landmark_full.tflite"}
 MULTICLASS = "selfie_multiclass_256x256.tflite"   # optional: labels hair, body skin, face skin, clothes directly
+HAIR = "hair_segmenter.tflite"                     # optional: hair alone, at 512 x 512 on a crop around the head
 CLASSES = ("background", "hair", "body_skin", "face_skin", "clothes", "others")
 _MODELS: dict = {}
 _LOCK = threading.Lock()
@@ -62,11 +63,15 @@ def multiclass_available() -> bool:
     return os.path.isfile(os.path.join(model_dir(), MULTICLASS))
 
 
+def hair_available() -> bool:
+    return os.path.isfile(os.path.join(model_dir(), HAIR))
+
+
 def _model(key: str):
     with _LOCK:
         if key not in _MODELS:
             from .tinynet import Model
-            path = os.path.join(model_dir(), MODEL_FILES.get(key, MULTICLASS if key == "multi" else ""))
+            path = os.path.join(model_dir(), MODEL_FILES.get(key, {"multi": MULTICLASS, "hair": HAIR}.get(key, "")))
             if not os.path.isfile(path):
                 raise FileNotFoundError(f"people model missing: {path} (run setup again, or copy models/people back)")
             _MODELS[key] = Model(path)
@@ -127,6 +132,30 @@ def classes(img: np.ndarray, roi=None) -> np.ndarray:
     Y, X = np.meshgrid(ys, xs, indexing="ij")
     return np.stack([map_coordinates(prob[..., k], [Y, X], order=1, mode="nearest") for k in range(6)],
                     -1).astype(np.float32)
+
+
+def hair_prob(img: np.ndarray) -> np.ndarray:
+    """Hair probability (0..1) for every pixel of a crop around one head (upright, display-encoded RGB 0..1), from
+    the 512 x 512 hair model. Its fourth input is last frame's mask in video; a still photo has none (zeros)."""
+    from .faces import _letterbox
+    h, w = img.shape[:2]
+    sq, s, ox, oy = _letterbox(img, 512)
+    x = np.concatenate([sq, np.zeros((512, 512, 1), np.float32)], -1)[None]
+    z = next(iter(_model("hair")(x).values()))[0]
+    prob = _softmax(z)[..., 1]
+    ys = (np.arange(h) + 0.5) * s + oy - 0.5
+    xs = (np.arange(w) + 0.5) * s + ox - 0.5
+    Y, X = np.meshgrid(ys, xs, indexing="ij")
+    return map_coordinates(prob, [Y, X], order=1, mode="nearest").astype(np.float32)
+
+
+def head_box(P: np.ndarray, w: int, h: int):
+    """A square around one person's head and hair in image pixels (x0, y0, x1, y1), from the body points."""
+    up, shw, head, hw = _person_frame(np.c_[P[:, 0] / w, P[:, 1] / h, P[:, 2]], w, h)
+    c = head - up * 0.35 * hw
+    half = 1.7 * hw
+    return (max(0, int(c[0] - half)), max(0, int(c[1] - half)), min(w, int(c[0] + half) + 1),
+            min(h, int(c[1] + half) + 1))
 
 
 # ------------------------------------------------------------------------------------------ BlazePose
@@ -335,6 +364,15 @@ def part_alpha(sh: dict, c) -> np.ndarray:
         return person
     if part == "background":
         return (1.0 - person).astype(np.float32)
+    if part == "hair" and sh.get("hair_maps"):        # the hair model's own maps, one per head, finest of all
+        hair = np.zeros(c.xs.shape, np.float32)
+        for hm in sh["hair_maps"]:
+            x0, y0, x1, y1 = (float(v) for v in hm["box"])
+            b = decode_bitmap(hm["data"], int(hm["w"]), int(hm["h"])).astype(np.float32) / 255.0
+            fy3 = (c.ys / c.sh - y0) / max(y1 - y0, 1e-9) * b.shape[0] - 0.5
+            fx3 = (c.xs / c.sw - x0) / max(x1 - x0, 1e-9) * b.shape[1] - 0.5
+            hair = np.maximum(hair, map_coordinates(b, [fy3, fx3], order=1, mode="constant", cval=0.0))
+        return refine(hair * np.clip(person * 1.5, 0.0, 1.0), c, 2.0)
     cls = None
     if sh.get("classes") and part in ("skin", "face", "hair", "clothes"):
         cw, ch = int(sh["cw"]), int(sh["ch"])

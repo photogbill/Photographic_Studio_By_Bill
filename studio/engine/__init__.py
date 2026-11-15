@@ -33,7 +33,11 @@ _EXPORTS = {
     "glow_profiles": ".pipeline.pipeline", "pick_glow_profile": ".pipeline.pipeline",
     "find_faces": ".pipeline.pipeline", "face_from_eyes": ".pipeline.pipeline", "face_outlines": ".pipeline.pipeline",
     "find_blemishes": ".pipeline.pipeline", "sculpt_source": ".pipeline.pipeline", "shape_up": ".pipeline.pipeline",
-    "find_people": ".pipeline.pipeline",
+    "find_people": ".pipeline.pipeline", "suggest_crops": ".pipeline.pipeline",
+    "composition_subject": ".pipeline.pipeline",
+    "detail_balance": ".pipeline.pipeline", "hdr_report": ".pipeline.pipeline",
+    "AutoHDR": ".pipeline.edit",
+    "Detail": ".pipeline.edit",
 }
 
 __all__ = sorted(_EXPORTS)

@@ -21,10 +21,11 @@ if errorlevel 1 goto :fail
 if errorlevel 1 goto :fail
 echo.
 echo  All set. Next:
+echo    - double-click "Start Studio.bat" to open the Studio
 echo    - drag raw files onto "Develop Raws.bat" to develop them
 echo    - double-click "Run Tests.bat" to run the self-tests
 echo.
-pause
+if /i not "%~1"=="/nopause" pause
 endlocal
 exit /b 0
 
@@ -32,6 +33,6 @@ exit /b 0
 echo.
 echo  Install did not finish. The details are in logs\setup.log and logs\studio.log.
 echo.
-pause
+if /i not "%~1"=="/nopause" pause
 endlocal
 exit /b 1

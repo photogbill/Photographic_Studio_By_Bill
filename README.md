@@ -31,7 +31,8 @@ One raw file in, one finished file out. Your photos never leave your PC.
 | 🧪 | **High-ISO denoiser** | Cleans noise in the raw data itself, before anything is clipped, smeared or tinted. |
 | 🧪 | **Automatic lens correction** | One **Fix lens** button: colour fringing, distortion (from a lens profile or from straight lines in the photo) and falloff, fixed automatically, even for vintage lenses with no contacts. Purple-fringe removal is on by default; vignetting correction stays off unless you want it. |
 | 🧪 | **Develop controls** | Exposure, white balance, straighten, perspective and crop work today; colour wheel and masks are next. |
-| 🧪 | **Microcontrast** | More shades of shadow: the quality great lenses are loved for. No halos, and noise is not amplified. |
+| 🧪 | **Detail by scale (microcontrast)** | More shades of shadow: the quality great lenses are loved for. One Amount and a Balance from tonal to crisp, or six methods you can dial in and combine. No halos, noise is not lifted as detail, and you can judge it in black and white. |
+| 🧪 | **Auto HDR** | One tick, then Light, Medium, Heavy, Highlights only, Low-key or Shadows only: opens shadows and holds highlights without flattening the photo. Never on unless you turn it on. |
 | 🧪 | **Recover lens sharpness** | Undoes part of the measured blur by deconvolution, without ringing. Off for lenses you mark as character lenses. |
 | 🗺️ | **Render like my lens** | A shared library of real lens signatures. |
 | 🗺️ | **Photoshop and PhotoCraft** | Send to Photoshop or PhotoCraft in one click, plus a Photoshop panel. |
@@ -45,15 +46,26 @@ One raw file in, one finished file out. Your photos never leave your PC.
 
 Canon **CR2** and **CR3** come first. The Raw Analyzer has been run on files from the **EOS R5**, **5D Mark IV** and **6D**. Other brands follow, and anyone with a different camera will be able to calibrate it with the wizard.
 
-## Try it today
+## Install
 
-1. Install **Python 3.12** from [python.org](https://www.python.org/downloads/). Tick **"Add python.exe to PATH"** during setup.
-2. Download this project: green **Code** button, then **Download ZIP**. Unzip it into a folder of its own.
-3. Drag your **CR2** or **CR3** files, or a whole folder, onto **`Analyze Raws.bat`**.
-4. The first run builds a private Python setup inside that folder (one time only). Then the report opens in your browser.
-5. To develop raws: double-click **`Install.bat`** once, then drag raw files onto **`Develop Raws.bat`**. Your TIFFs and the comparison page land in the `outputs` folder.
+**Easiest (recommended):** download **[Install-Photographic-Studio.bat](https://github.com/photogbill/Photographic_Studio_By_Bill/releases/latest/download/Install-Photographic-Studio.bat)** and double-click it.
+- It asks where to put the Studio (a folder on D: if your PC has one), then downloads everything into that one folder, including its own private copy of Python.
+- No git, no Python install, no admin rights. Nothing is installed anywhere else on your PC; the only thing outside the folder is a desktop shortcut, and only if you say yes.
+- Run it again at any time to update. Your settings, calibrations and photos are kept.
 
-Everything stays in that one folder. Nothing is installed anywhere else on your PC, and nothing is uploaded.
+**Prefer a classic installer?** Download **[Photographic-Studio.msi](https://github.com/photogbill/Photographic_Studio_By_Bill/releases/latest/download/Photographic-Studio.msi)** from the [Releases page](../../releases/latest). It is bigger (Python and every package are inside), installs for your Windows account only, and shows up in Settings > Apps with an Uninstall button.
+
+Windows may show a blue **"Windows protected your PC"** box for either file. That is because the Studio is not code-signed (signing costs money every year, and this is a free project). Click **More info**, then **Run anyway**.
+
+**Updates:** in the Studio, **Help > Check for updates**. It is off until you turn it on. When it is on, the Studio asks GitHub for the newest version number (nothing else is sent, never a photo) and can put the new version in place for you.
+
+## Using it
+
+- **Start Studio.bat** (or the desktop shortcut) opens the Studio.
+- Drag **CR2** or **CR3** files, or a whole folder, onto **Analyze Raws.bat** for a report on your camera's files.
+- Drag raw files onto **Develop Raws.bat** to develop them. Your TIFFs and the comparison page land in the `outputs` folder.
+
+**Developers:** clone the repository with git and double-click **Install.bat**. It uses your own Python (3.10 or newer) in a private environment inside the folder, or downloads a private copy of Python if your PC has none. Installers never overwrite a git copy.
 
 ## Your photos stay yours
 

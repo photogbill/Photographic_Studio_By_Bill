@@ -1,22 +1,24 @@
 # Build progress
 
-Updated 2026-11-15 (session 9). Plan: BUILD_PLAN.md v1.7.
+Updated 2026-11-15 (session 10: plan section 23, first part). Plan: BUILD_PLAN.md v1.9.
 
 ## Where things stand
 
 | Phase | State | Notes |
 |---|---|---|
-| 0. Foundation | **Done, needs Bill's double-click** | Layout (2.2), `Install.bat`, `Run Tests.bat`, logging, `THIRD_PARTY.md`, true-ISO fix in the analyzer. Stack taken as recommended (Python + NumPy/SciPy + rawpy; PySide6 in Phase 4) since Bill was away. Acceptance: `Run Tests.bat` green **on Bill's PC** (green on the Linux test machine: 251/251 with the sample raws). |
+| 0. Foundation | **Done, needs Bill's double-click** | Layout (2.2), `Install.bat`, `Run Tests.bat`, logging, `THIRD_PARTY.md`, true-ISO fix in the analyzer. Stack taken as recommended (Python + NumPy/SciPy + rawpy; PySide6 in Phase 4) since Bill was away. Acceptance: `Run Tests.bat` green **on Bill's PC** (green on the Linux test machine: 342 passed, 3 skipped). |
 | 1. Decode + develop engine | **Done, awaiting Bill's eye** | Stages 1, 2, 10, 11, 15 (basic), 21. `studio-cli` / `Develop Raws.bat` turns CR2/CR3 into 16-bit Adobe RGB TIFF. Export now also writes lens, exposure and the true ISO (EXIF in JPEG, XMP in TIFF/PNG). |
 | 2. Calibration engine | **Engine done, awaiting frames** | `Calibrate Camera.bat` / `studio-cli calibrate`. Part G (exposure latitude) not yet. Acceptance needs Bill's Part A and B frames. |
 | 3. Denoiser v1 | **Built, awaiting Bill's blind test** | Hybrid NLM + starlet default; MP-PCA and starlet candidates; blind-test tool (10 pairs ready). BM3D-class baseline still to write. Off by default until the blind test. |
 | 4. Studio shell | **Built** | `Start Studio.bat`: Library, Develop (live render, wipe, loupe, histogram, panels, undo, sidecars, Make it good), Export, Cameras, Lenses, Help. |
 | 5. Lens | **Built, awaiting Bill's eye** | Lateral CA and purple-fringe removal (earlier), plus this session: **Fix lens** button with a colour-coded report; distortion from lensfun (violet) or measured from straight lines (amber, strict gate: never on organic subjects); lens falloff measured (lensfun or estimated) with correction OFF by default; stage 13 geometry in one resample (distortion, vertical/horizontal perspective, straighten with **Auto level**, crop with aspect presets drawn on the photo, constrain-to-image); **lens tagging** (Library: Tag lens for a whole shoot; Develop: lens picker; shared starter list + your own private list; written into exports). Acceptance: fringing on Bill's vintage-lens files fixed by one button with no colour damage. |
 | 6. Full develop | **Built, awaiting Bill's eye** | Session 4: **Microcontrast** (stage 16) and **capture sharpening** (stage 12). Session 5: the full **Light** panel (highlights, shadows, whites, blacks in stops; **Smart lighting**, region by region with a guided filter; **Auto** that sets highlights / whites / blacks only and keeps low-key photos low-key, the named test; a point **tone curve** per channel), the **Colour** stage (OKLCh: saturation, vibrance with skin protection, **Pick white** eyedropper, **Auto** white balance (grey-edge), a **DxO-style colour wheel** with several ranges, **HSL** in 8 bands, **colour grading** wheels with balance and blending, **black & white** with a colour mixer, **.cube LUTs**), **Looks** (8 starter looks incl. a draft **"Bill's Candlelight"**, Save look), **Copy / Paste settings** (Develop, and Library for many photos), **virtual copies**, a labelled **History** with **snapshots** (kept in the sidecar), **export presets**. Session 6: **highlight rebuild** (clipped channels get the colour of the clipped area's edge), **Dehaze** (dark-channel prior), **Texture**, **film grain** (size, roughness, mono or colour), **film toe** and **highlight roll-off** with a drawn film curve, a **parametric curve** (four regions), **Auto colour** (vibrance from measured colourfulness), **B&W filter presets**, a **camera-profile picker** reading DNG camera profiles (.dcp), and **output sharpening** for screen / glossy / matte in Export. Acceptance: Bill's microcontrast blind test against DxO; "Bill's Candlelight" tuned by Bill. |
+| 6b. Plan section 23 (session 10) | **Part built, awaiting Bill's eye** | **Detail by scale** (23.11) replaces the Microcontrast and Texture sliders: six methods, each with its own switch, amount and "best for / weak at" text (Tonal, Local contrast, Crisp, Tonal separation, Veil removal, Broad), stackable under one shared budget per scale; Simple level = Amount + Balance (starts on the Tonal side) + presets (Tonal, Crisp, Both, Soft glow); **Judge in black and white**; a live meter (amber when a guard limits the stack) and the balance number; diffraction note from f/8. **Denoise safeguard** (23.12, on by default, with a count). **Auto HDR** on one raw (23.6): Light / Medium / Heavy / Highlights only / Low-key / Shadows only, Amount 0-150%, three engines (exposure fusion, local Laplacian, Multi-Scale Retinex), noise-aware lift, off until turned on. **Auto white balance** (23.9): Grayness Index beside grey edge, both shown with their agreement, two light sources reported, **Keep the mood**. Method texts on the denoise picker (23.1). **Not built yet from section 23:** 23.2 neural runtime and 23.3 learned denoisers, 23.4 highlight methods (by area, detail transfer, grain match), 23.5 Dual Pixel HDR, 23.7 stacking, 23.8 demosaic picker (RCD, LMMSE, dual) and PDAF line filter, 23.9 mixed light and skin estimate. Acceptance: Bill's blind test of Detail by scale, in colour and in black and white. |
 | 7, 8 | Not started | Wizards; Dual Pixel Lab. |
 | 9. Local + retouch | **Built (masks session 6, retouch session 7), awaiting Bill's eye** | **Masks** in Develop: Brush (feather, flow, erase, **auto mask**), Gradient, Radial, **Object** (one click selects a leaf; Alt-click takes a part away), **Colour**, **Brightness** and now **Skin** (skin tones of any complexion); shapes combine (add, subtract, only-where), invert, amount; inside each mask: exposure, contrast, highlights, shadows, whites, blacks, temperature, tint, saturation, vibrance, texture, clarity, dehaze, sharpness, noise reduction and now **Smooth skin** (softens blotches and uneven colour, keeps pores and edges). **Retouch** (its own group): **Heal**, **Clone** and **Red eye** spots, clicked or brushed along a hair, source chosen automatically and draggable; **Find dust** (one photo); **Learn dust map** in the Library (the dust on your sensor, learnt from several photos, kept on this PC) and **Dust map** in Develop to heal it in any photo (also `--dust-map` for batch develop). New **100% view** (Z, mouse wheel or the 100% button; drag to move) where every tool works. Still to do: depth and focus range masks (need Dual Pixel, Phase 8), denoise strength and microcontrast per mask, editing a drawn gradient or circle by its handles, content-aware fill for large removals. Acceptance: Bill selects one leaf in two clicks and adjusts it; dust removed automatically. |
 | 9c. Person mask | **Built (session 9), awaiting a real portrait** | Masks > **Person**: everyone in the photo selected on this PC (MediaPipe person segmentation + BlazePose 33 body points), then a **Part**: whole person, background, skin, face, hair, clothes, arms, legs, torso; snapped to the photo's edges. Also in "Refine" (+ / - / x Person). |
 | 9b. Portrait | **Built (session 9), awaiting a real portrait** | New **Portrait** group in Develop. **Find faces** (Google MediaPipe face detector and 468-point face mesh, run on this PC by the Studio's own NumPy code, no new install; a brightened copy is tried for candle-dark photos) or **Click the eyes** when a face is missed. **Remove blemishes** (one button: red spots and dark spots become Heal spots in Retouch, amber; moles and beauty marks are left alone). Sliders, all 0 by default: **Younger** (all of them at once), **Lines**, **Under eyes**, **Smile lines**, **Even skin**, **Jawline**, **Eyes**, **Teeth**. **Body sculpting**: Push / Shrink / Grow brushes and shape tools (**Breast lift & size**, **Butt improvement tool**, **Slim waist / tummy / arm / thigh**) with Lift, Size, Slim and width sliders; every warp capped. Acceptance: the person in a real portrait looks like themselves on a good day, judged by Bill and the sitter. |
+| Install + updates | **Built (session 9), awaiting Bill's first run on Windows** | **Install Photographic Studio.bat**: one file for people without git or Python (downloads the Studio and a private Python into one folder; run again to update; never touches a git copy). **Release.bat** + GitHub Actions: GitHub builds the **MSI** (Briefcase + WiX) and publishes the release with both installers. **Help > Check for updates** (off until chosen; an installed copy asks once in the sidebar): automatic updates go in when the Studio next starts (.bat copies) or as it closes (MSI). Not yet run on Windows by me: Bill's first install and first release are the test. |
 | 10+ | Not started | |
 
 ## Waiting for you in the outputs folder (already generated)
@@ -55,6 +57,16 @@ Updated 2026-11-15 (session 9). Plan: BUILD_PLAN.md v1.7.
   `Blind Test vs DxO.bat`: as before. `studio develop` also takes `--microcontrast 0.6 --sharpen --fix-lens --rotate`,
   `--look "Warm film"`, `--smart-lighting 40`, `--highlights rebuild --dehaze 30 --texture 20 --grain 15
   --profile NAME.dcp --sharpen-for screen`, and now `--dust-map` (heal the camera's learnt dust in every photo).
+
+**Session 10 adds** (all in `Start Studio.bat`, Develop):
+* **Detail** group: Preset, **Judge in black and white**, **Amount**, **Balance (tonal - crisp)**, the meter, the
+  balance number; in Full, the six methods with their own switches and amounts, and "Where it works" (shadows /
+  midtones / highlights). Try Amount 70 on a low-ISO file, then tick Judge in black and white.
+* **Clean** group: **Protect stars, catchlights and sparks** (on) with its count; a text under the method picker.
+* **Light** group: **Auto HDR** (off until ticked), its strength, amount and (Full) engine, and a report line.
+* **Colour** group: **Auto uses** (grey edge / grayness index), **Auto: keep the mood**, and a report line after Auto.
+* `Develop Raws.bat` / `studio develop` also take `--detail "tonal=70,crisp=30"` (or a preset name: `--detail Both`)
+  and `--hdr medium` (`--hdr lowkey:laplacian --hdr-amount 80`).
 
 ## Decisions taken while Bill was away (all reversible)
 
@@ -181,6 +193,84 @@ Updated 2026-11-15 (session 9). Plan: BUILD_PLAN.md v1.7.
     server is blocked here; Bill downloaded it (models\people\selfie_multiclass_256x256.tflite), and when it is
     there hair, skin, face and clothes come from it directly (the worked-out parts stay as the fallback).
 
+49. **Work in progress is shown where you are looking** (a friend's first test read slow renders as "the filters
+    don't work"): a moving bar on the photo, a "Working... 2.4 s" pill, and an amber chip beside Controls; nothing for
+    the first 0.15 s, so quick renders don't flicker. **One preview render at a time**: changes made while one runs
+    wait, and only the newest goes next (they used to run side by side and slow each other down).
+50. **Double chin** (a friend's request): a slider and a one-press button (sets 60) in Portrait, off by default and
+    **not part of Younger** (it reshapes, so it is only ever asked for on its own). A warp draws the area under the
+    jaw up towards it (nothing at or above the jaw line moves; at most 4.5% of the face width; never folds), weighted
+    by where the skin is, so a collar, scarf or beard right under the chin stays put; plus the crease lifted part way
+    and the jaw's own shadow deepened a little only where there already is one.
+51. **Installer for people without git**: Bill chose the one-file .bat (downloads the Studio and python.org's
+    embeddable Python into the chosen folder; D:\Photographic Studio by default when there is a D: drive) **and** an
+    MSI built by GitHub ("the easy way": Release.bat sends a version tag, GitHub Actions builds and publishes).
+52. **Updates are opt-in but offered**: an installed copy asks once (Update automatically / Just tell me / No thanks);
+    a git copy is never asked and never changed. The only thing sent is a request to GitHub's public API for the
+    latest release. Automatic updates are staged in `_update` and put in place by `Start Studio.bat` before the
+    Studio starts (so no file is ever replaced while in use); MSI copies install the new MSI as the Studio closes.
+53. **MSI copies keep the user's files in Documents\Photographic Studio** (settings, logs, calibrations, outputs):
+    Windows Installer owns the program folder and may clear it on upgrade or uninstall. Every other copy keeps
+    everything beside the app (rule 0.3.3). `STUDIO_DATA_DIR` overrides both.
+54. The hair segmentation model (Apache 2.0, downloaded by Bill) drives the Person mask's Hair part on a 512-pixel
+    crop of each head; without it the multiclass model's hair (or the worked-out hair) is used.
+55. **Composition overlays for every method that has one** (Bill: "a set of overlays for every composition method in
+    art"): rule of thirds, golden ratio (phi grid), golden spiral, golden triangles, diagonals (baroque and
+    sinister), the 45-degree diagonal method, dynamic symmetry, harmonic armature, rabatment, centre, radial and a
+    grid. O cycles (off is one of them; outside the crop tool the first O shows the overlay on the whole photo),
+    Shift+O turns the spiral (4 ways) and the triangles (2); a combo and a Turn button do the same in the Crop group.
+    Geometry is worked out in pixels where the frame's shape matters (a 45-degree line is 45 degrees).
+56. **Suggested crops are rules, not a learnt model**: no crop model with a licence that fits was found (the public
+    ones are trained on research-only datasets). The eyes (or the person, or what stands out and is sharp) go on the
+    chosen method's strong points; heads stay whole with room above; space in front of a turned face; no edge on a
+    joint or the neck; nobody half in the frame; bigger is better when all else is equal. Three different crops,
+    each with a sentence saying why; the best one opens in the crop tool with its overlay.
+
+57. **Every push is an update** (Bill: "otherwise I won't write them"): after a successful push, push.bat runs
+    Release.bat /auto, which raises the version's last number by one (0.1.0 to 0.1.1), tags it and sends the tag,
+    so GitHub builds the installers and copies with updates on pick it up. Pressing N within 10 seconds skips it for
+    that push; Release.bat by hand is for bigger jumps (0.1.x to 0.2.0).
+
+58. **Detail by scale keeps old edits exact.** "Local contrast" IS the first microcontrast engine: an edit that
+    holds only that amount renders through the old code, bit for bit. The earlier Texture slider shows only on
+    edits that used it. The new methods live in a new `detail` block of the sidecar, in percent, with an `off` list
+    (a switched-off method keeps its amount).
+59. **Tonal's remap is the smooth one, and noise protection sits on the coefficients.** Three stronger-looking
+    remaps were tried and dropped because they rippled clean gradients (RESULTS.md). Tonal at 100% lifts small
+    tonal differences about x2.5 (the monotone limit is x3.2); the first engine managed x1.3.
+60. **Shared budget:** 0.8 x Local contrast + 0.446 x Tonal <= 1 per pyramid level; over that, both are scaled back
+    together and the meter turns amber. Fine total is held between -0.5 and +2.0.
+61. **A lightness that sees blue** (weights 0.25 / 0.60 / 0.15) drives every new method, Auto HDR included: ProPhoto
+    luminance counts a violet flower as black. The first engine keeps true luminance (old edits unchanged).
+62. **Veil, tonal separation, broad and Auto HDR are measured on a 1024 px copy of the whole frame** and sampled at
+    each pixel's place on the sensor, so the 100% view and the export agree (measured: 0.0005) and a region render
+    needs no extra context. They read the frame before Dehaze and Smart lighting; if those are on, the regions are
+    measured slightly differently from what they then act on (harmless, stated here).
+63. **Veil removal never treats a dark subject as haze**: the floor is the darkest 0.5% of the frame, capped at a
+    quarter of mid grey; mid grey is held, so only the shadows deepen. Negative = add a haze (Soft glow preset).
+64. **Tonal separation is a push away from the centre of each crowd of tones**, not histogram equalisation: flat
+    areas keep their brightness and smooth gradients are untouched (the first version made tile-sized halos).
+65. **Crisp leaves edges and their skirts alone** and also anything riding on a bigger structure two scales up (a
+    flame's slope is not texture). It is for texture; edges belong to Recover lens sharpness. Make it good sharpens
+    less when Crisp is already up.
+66. **Order in stage 15-16:** exposure, Veil, Dehaze, Smart lighting, Auto HDR, then Tonal separation + Broad +
+    Tonal + Local contrast + Crisp in one pass, then (old edits only) Texture. Same sliders, same picture.
+67. **Denoise safeguard: 4.5 sigma, on for new edits, off for sidecars written before it existed** (denoise stage
+    version 2), so those render as they did. It is applied per photosite in the variance-stabilised domain.
+68. **Auto HDR never runs by itself, and looks never carry it** (it changes brightness: Bill's rule). Every engine's
+    change is re-expressed as one value per level of lighting before it is applied; that is what keeps exposure
+    fusion and Retinex from drifting into halos. Engines run at the strength's 100%; Amount scales the result.
+69. **What "needs" means in Auto HDR:** shadows are lifted toward -3.5 EV (2nd percentile), highlights pulled under
+    +2 EV (99.5th percentile); Light gives 35% / 80% of that, Medium 60% / 90%, Heavy all of it; a photo that
+    already fits gets a small minimum (0.5 / 0.3 stops) so the button is never a no-op. Low-key lifts only tones
+    between about -6.5 and -1.5 EV.
+70. **The lift is limited by noise, not followed by more denoising**: the denoiser runs on the raw data long before
+    this stage. The report says how much lift was held back and suggests turning Clean on.
+71. **Auto white balance default: 60% of the way for a warm light (under 3500 K) at ISO 1600 and up, 90%
+    otherwise.** Both estimates are always computed; under 3 degrees apart is "confident", over 7 is "check by
+    eye". An estimate with a tint beyond +-60 is pulled back to the daylight / tungsten band. Moving "keep the
+    mood" after Auto runs Auto again at that amount.
+
 ## Questions for Bill (one at a time, in chat)
 
 1. (Answered 2026-11-14: no automatic brightness changes unless turned on.)
@@ -194,11 +284,40 @@ Updated 2026-11-15 (session 9). Plan: BUILD_PLAN.md v1.7.
 7. Portrait: one or two raws of a face (ideally a candle-lit one, and one in ordinary light) to tune the face finder,
    the blemish finder and the Lines / Under eyes strengths on a real face.
 
+8. Detail by scale: is Amount 70 on the Tonal side the look you mean by microcontrast (judge it in black and
+   white too)? If it is still too timid or already too much, the one number to change is `K_TONAL` in `scales.py`.
+9. Auto HDR: which strength should "Make it good" never touch? (Today it touches none: Auto HDR is only ever on
+   when you tick it.)
+
 ## Open items for the next session
 
-* Person mask: try on Bill's photos (candle-lit edges, long hair, hands); the 512 px hair model for finer hair; the
-  MagicTouch click-to-select model for Object masks (int8: the runner needs integer layers first); snap sculpt shapes
-  to the body points (one click for waist / thigh / arm ovals).
+* **Section 23, still to build** (in the plan's order): the demosaic picker (RCD, LMMSE, dual) and PDAF line filter
+  (23.8: the Sony tester needs the PDAF filter); highlight recovery by area, detail transfer and grain match with a
+  method picker (23.4); BM3D-class baseline, NL-Bayes, Zero-Shot Noise2Noise and the optional ONNX runtime with the
+  learned candidates (23.2, 23.3); mixed-light white balance and the skin estimate (23.9); Dual Pixel HDR (23.5,
+  with Phase 8); stacking (23.7, with Phases 10-11).
+* **Detail by scale leftovers:** measure MP-PCA's residual noise (the starlet table stands in); per-mask Detail by
+  scale; the focus-plane-only option (needs Dual Pixel depth); the Focus Stack hand-off; the blue-channel check
+  after the lens fix; presets measured from real lenses (lens signatures); a "Recover diffraction loss" that knows
+  the f-number's blur exactly instead of measuring it. (Fixed this session: a gradient running off the frame was
+  treated as a crease and came out up to half a stop darker or brighter along the frame edge at Tonal 100%; the
+  picture is now continued beyond the frame by point reflection. The first engine alone, for old edits, keeps its
+  old border behaviour so those render as they did.)
+* **Speed:** Tonal adds 1.1-1.5 s to a preview on the 2-core build machine (its reference tones run in parallel:
+  Bill's 14 cores should make it a fraction of that); the denoiser still dominates any preview it is in (40 s here).
+  A 45 MP export with Tonal + Crisp + Auto HDR peaked at 4.1 GB: check an 8 GB laptop.
+* **Auto HDR:** Dual Pixel, bracket and burst sources; noise-matched denoise of lifted shadows; tune the six
+  strengths on Bill's candle portraits (Low-key) and a backlit scene.
+
+* Person mask: try on Bill's photos (candle-lit edges, long hair, hands); the MagicTouch click-to-select model for
+  Object masks (the runner now reads its 8-bit weights; its click encoding still to be matched against MediaPipe);
+  snap sculpt shapes to the body points (one click for waist / thigh / arm ovals).
+* Composition: try the suggested crops on Bill's own photos (candle portraits, botanicals) and tune the weights;
+  horizon placement for landscapes (thirds / golden lines on the horizon found by Auto level).
+* Speed (the friend's test): Dehaze, Texture and Microcontrast are the slow sliders on big raws (a 45 MP preview goes
+  from 0.7 s to 4.7 s with all three on, on the 2-core build machine).
+* Installers: Bill's first run of Install Photographic Studio.bat and first Release.bat (I cannot run Windows .bat
+  files or build an MSI here); then an app icon for the MSI and the desktop shortcut.
 * Portrait: tune on Bill's real portraits (blemish thresholds, line and fold strengths, the candle-light face finder);
   editing a sculpt shape by handles (today: move by dragging, width and sliders; redraw to resize); the face outline
   shown after sculpting follows the unsculpted face; face tools on very small faces in group photos (the detector
@@ -226,3 +345,5 @@ Updated 2026-11-15 (session 9). Plan: BUILD_PLAN.md v1.7.
 * Speed: tone + output stages remain the slow part on a 45 MP frame; port hot kernels if Bill's PC is still slow.
 * Nothing has been committed to git: the device shell cannot delete git's lock files, so `push.bat` should do the
   commit (it shows every file first).
+* Session 10 was built and tested on the Linux build machine (342 tests pass, 3 skipped) and copied into the
+  folder; `Run Tests.bat` on Bill's PC is still the acceptance check, and `push.bat` still does the commit.

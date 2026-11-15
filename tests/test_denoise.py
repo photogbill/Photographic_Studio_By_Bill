@@ -1,6 +1,8 @@
 """Noise model, VST with exact unbiased inverse, and the starlet denoiser (section 8), on synthetic data."""
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
 
@@ -140,3 +142,66 @@ def test_row_banding_never_added_to_a_clean_frame():
     on, off = E.Edit(), E.Edit(banding=False)
     on.tone.mode = off.tone.mode = "linear"
     assert _row_noise(E.render(img, on)) <= 1.05 * _row_noise(E.render(img, off))
+
+
+# ------------------------------------------------------------------------------------------ safeguard (23.12)
+def _noisy_flat(level=0.05, n=256, seed=11, a=8.68e-4, b=3.2e-6):
+    from studio.engine.calib.noise import NoiseModel
+    rng = np.random.default_rng(seed)
+    model = NoiseModel(a=np.full((2, 2), a), b=np.full((2, 2), b), source="test")
+    clean = np.full((n, n), level, np.float32)
+    sig = math.sqrt(a * level + b)
+    return clean, clean + sig * rng.standard_normal((n, n)).astype(np.float32), model, sig
+
+
+def test_safeguard_leaves_pure_noise_to_the_denoiser():
+    """Pure noise moves by more than 4.5 sigma about 7 times in a million: nothing visible is let back in."""
+    clean, noisy, model, sig = _noisy_flat(n=384)
+    st = {}
+    plain = DN.denoise_mosaic(noisy, PAT, model, DN.DenoiseParams(method="starlet", luma=1.0, chroma=1.5))
+    safe = DN.denoise_mosaic(noisy, PAT, model, DN.DenoiseParams(method="starlet", luma=1.0, chroma=1.5,
+                                                              safeguard=4.5), stats=st)
+    assert st["sites"] == noisy.size and st["protected"] <= 30
+    mse = lambda x: float(np.mean((x - clean) ** 2))
+    assert mse(safe) <= 1.03 * mse(plain), "the safeguard must not cost noise reduction"
+
+
+def test_named_safeguard_keeps_stars_and_sparks():
+    """Named test (23.12): a spark far above the noise survives the denoiser when the safeguard is on."""
+    clean, noisy, model, sig = _noisy_flat()
+    sparks = [(40, 60), (101, 33), (200, 180), (150, 121)]
+    for y, x in sparks:
+        noisy[y, x] += 40.0 * sig                           # one photosite, 40 sigma above its surroundings
+    st = {}
+    p = dict(method="starlet", luma=1.5, chroma=2.0)
+    plain = DN.denoise_mosaic(noisy, PAT, model, DN.DenoiseParams(**p))
+    safe = DN.denoise_mosaic(noisy, PAT, model, DN.DenoiseParams(**p, safeguard=4.5), stats=st)
+    kept_plain = np.mean([(plain[y, x] - 0.05) / (40.0 * sig) for y, x in sparks])
+    kept_safe = np.mean([(safe[y, x] - 0.05) / (40.0 * sig) for y, x in sparks])
+    # the guarantee: a photosite ends within 1.5 k sigma of where it started (here 40 sigma up: at least 80% kept)
+    assert kept_safe > 0.8, f"sparks must survive, kept {kept_safe:.2f}"
+    assert kept_safe > kept_plain + 0.1, f"without the safeguard: {kept_plain:.2f}"
+    assert st["protected"] >= 1
+
+
+def test_safeguard_blends_between_k_and_one_and_a_half_k():
+    orig = np.array([0.0, 3.0, 4.5, 5.8, 6.75, 10.0], np.float32)
+    out, n = DN.safeguard(np.zeros_like(orig), orig, 4.5)
+    assert out[0] == 0 and out[1] == 0 and out[2] == 0, "moves up to k sigma are the denoiser's business"
+    assert 0 < out[3] < orig[3]
+    assert out[4] == pytest.approx(6.75) and out[5] == pytest.approx(10.0), "beyond 1.5 k the original is kept"
+    assert n == 3
+
+
+def test_safeguard_in_the_edit_and_old_sidecars():
+    from studio import engine as E
+    e = E.Edit()
+    assert e.denoise.safeguard and e.stage_versions["denoise"] == 2
+    assert E.Edit.from_json(e.to_json()).denoise.safeguard
+    off = E.Edit()
+    off.denoise.safeguard = False
+    assert off.raw_key() != e.raw_key()
+    old = E.Edit.from_dict({"denoise": {"enabled": True, "luma": 0.6}, "stage_versions": {"denoise": 1}})
+    assert old.denoise.enabled and not old.denoise.safeguard, "an older sidecar renders exactly as it did"
+    assert set(DN.METHOD_INFO) == {"hybrid", "starlet", "nlm", "mppca"}
+    assert all(i["best"] and i["weak"] and i["speed"] for i in DN.METHOD_INFO.values())

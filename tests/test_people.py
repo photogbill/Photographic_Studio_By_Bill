@@ -128,6 +128,24 @@ def test_runner_matches_reference_on_the_parts_model():
     assert math.isclose(float(v.astype(np.float64).sum()), -157441.08, rel_tol=1e-5)
 
 
+def test_runner_matches_reference_on_the_hair_model():
+    """The optional hair model (MediaPipe's own max-pooling-with-indices and unpooling layers). The reference sum is
+    our runner's; on this input it agrees with Google's MediaPipe ImageSegmenter to 0.0002 on average (99% of
+    pixels within 0.005), checked on the build machine with the fourth input channel (the hair prior) at zero."""
+    pp = _have_models()
+    if not pp.hair_available():
+        pytest.skip("hair model not downloaded")
+    from studio.engine.local.tinynet import Model
+    yy, xx = np.mgrid[0:512, 0:512] / 512.0
+    blob = np.exp(-(((xx - 0.5) / 0.25) ** 2 + ((yy - 0.35) / 0.2) ** 2))
+    rgb = np.stack([0.25 + 0.5 * blob * (0.6 + 0.4 * np.sin(xx * 40)), 0.18 + 0.3 * blob, 0.12 + 0.2 * blob], -1)
+    u8 = np.round(rgb * 255).astype(np.uint8)
+    x = np.concatenate([u8 / 255.0, np.zeros((512, 512, 1))], -1)[None].astype(np.float32)
+    v = next(iter(Model(os.path.join(pp.model_dir(), pp.HAIR))(x).values()))
+    assert v.shape == (1, 512, 512, 2)
+    assert math.isclose(float(v.astype(np.float64).sum()), 4733.0717, rel_tol=1e-5)
+
+
 def test_parts_from_the_parts_model_labels():
     """When the multiclass labels are stored, hair / skin / face / clothes come from them."""
     from studio.engine.local import masks as mk

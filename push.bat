@@ -2,7 +2,8 @@
 setlocal EnableExtensions EnableDelayedExpansion
 title Photographic Studio By Bill - Push to GitHub
 rem ==========================================================================
-rem  push.bat - sends the software and shared profiles to GitHub.
+rem  push.bat - sends the software and shared profiles to GitHub, and then makes
+rem  it an update everyone gets (Release.bat /auto; N within 10 s skips that).
 rem  Double-click it. It shows every file before anything is sent, and asks.
 rem  Photos, raws, calibration data, logs and reports are never sent:
 rem  .gitignore keeps them out, and this script checks again.
@@ -156,6 +157,30 @@ set "URL=!URL:.git=!"
 echo.
 echo  Done. It's on GitHub: !URL!
 call :log "Pushed to !URL!"
+
+rem --- 6. Make it an update everyone gets (Release.bat /auto) ---
+rem  Bill: "otherwise I won't write them". So every push also becomes an update:
+rem  the version's last number goes up by one and GitHub builds the installers.
+rem  Press N within 10 seconds to send a push without making it an update.
+if not exist "%~dp0Release.bat" goto :end
+echo.
+echo  6. Making this an update for everyone (the version number goes up by itself).
+choice /c YN /t 10 /d Y /n /m "     Press N within 10 seconds to skip it this time, Y to go now: "
+if errorlevel 2 (
+  call :log "Update skipped by the user."
+  echo     Skipped: this push is on GitHub, but not an update.
+  goto :end
+)
+call :log "Running Release.bat /auto"
+call "%~dp0Release.bat" /auto
+if errorlevel 1 (
+  call :log "Release.bat /auto did not finish"
+  echo.
+  echo  The push worked, but the update was not made. Details: logs\release.log
+  echo  Run Release.bat by hand to try again.
+) else (
+  call :log "Update made"
+)
 
 :end
 call :log "push.bat finished"

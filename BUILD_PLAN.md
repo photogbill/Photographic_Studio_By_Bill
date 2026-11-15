@@ -1,6 +1,6 @@
 # Photographic Studio By Bill — Master Build Plan
 
-Version 1.7 · 2026-11-14 · Owner: Bill (photogbill) · Written for the coding agent that builds it
+Version 1.9 · 2026-11-15 · Owner: Bill (photogbill) · Written for the coding agent that builds it
 
 This is the single source of truth for building the software. Read all of it before writing code.
 Build it phase by phase, in order. Do not start a phase until the one before it passes its acceptance tests.
@@ -724,3 +724,179 @@ Searched and found nothing that changes the plan: local tone mapping and microco
 **Considered and not applicable: time-folded optics** (Heshmat, Tancik, Satat, Raskar, *Photography optics in the time dimension*, Nature Photonics 2018). It shortens a lens by bouncing light between mirrors and picking out the right bounce by its arrival time, which needs an ultrafast time-resolving sensor and pulsed laser light. It is a hardware design; an ordinary camera file contains nothing it could be applied to. Documented here so it is not re-investigated.
 
 **What it suggests for this project:** the software way to "mimic a longer lens" is already in the plan. Package it as one named preset in Super-Res Stack, **"Reach"**: handheld burst → sharpest-frame selection → 2× merge → diffraction recovery → crop. A 2× result is the practical equivalent of doubling the focal length for a static subject. State the limits in the UI (static subject, real hand movement between frames, lens sharp enough to benefit).
+
+---
+
+## 23. Third research pass and Bill's decisions (2026-11-15)
+
+Same caveats as sections 21 and 22: verify every citation and every licence before use, record each in `THIRD_PARTY.md`, and run each method through the section 14 test loop. Everything here was decided by Bill in chat on 2026-11-15 unless marked "candidate".
+
+### 23.1 New rule: more than one method is fine, if the user can choose and understand
+
+Where several techniques do the same job and each wins on different photos, ship them all as a **Method** picker. Every option carries a short text beside it, in plain words: **Best for**, **Weak at**, **Speed**. One option is marked "Recommended" (chosen automatically from the photo where possible: ISO, lens, amount of clipping). Simple level shows only the recommended one; Full level shows the picker. The method used is written into the sidecar and colour-coded like every other result (rule 0.3.11). This applies to: denoise, demosaic, highlight recovery, HDR, stack merge, rejection, auto white balance.
+
+### 23.2 Optional neural runtime (decided: yes)
+
+- Add **ONNX Runtime** (MIT; verify) as an optional install, the way lensfunpy is optional. GPU through DirectML on Windows, CPU fallback. Off until the user turns it on; when off, nothing is loaded. No network use except a user-triggered model download that shows the file, its size, its licence and its source first.
+- Models are never committed to the repo (rule 0.3.7). A `models/catalog.json` lists name, job, licence, source URL, SHA-256. Verify the hash after download.
+- A model's **weights licence** is checked separately from its code licence (example: GraXpert code is GPL-3 but its models are CC BY-NC-SA, so they are **not** shipped or offered).
+- Neural results are colour-coded as their own tier and labelled "learned". Generative models (ones that invent detail) stay in the Lab and are labelled "synthetic" (section 1.2 rule).
+
+### 23.3 Denoiser candidates added to the ladder (8.1) and to the blind test (decided: all of them)
+
+| Candidate | What it is | Licence (verify) | Notes |
+|---|---|---|---|
+| **RawNIND UtNet2 (Bayer)** | Raw-domain network, what darktable 5.6 ships | GPL-3.0 | Works on the mosaic. First learned baseline to beat. |
+| **RawForge TreeNet** (light to heavy) + DeepSharpen | NAFNet-style networks trained mostly on RawNIND | MIT | Several sizes: offer by speed. |
+| **SCUNet** (real-world blind) | RGB denoiser | Apache-2.0 | For JPEG/TIFF input and already-developed files, not for raws. |
+| **MAXIM** (Google) | RGB denoiser | Apache-2.0 | Include for the comparison. Expected weak for us: trained on phone pictures that were already developed (SIDD), not raw data; very heavy on 45 MP; published as TensorFlow/JAX weights that must be converted. Keep only if it earns its place in the blind test. |
+| **Zero-Shot Noise2Noise** (Mansour & Heckel, CVPR 2023) | A tiny two-layer network trained on the photo itself; no dataset, no noise model | method only, our code | Needs noise that is independent pixel to pixel: run on the mosaic planes after banding and hot-pixel removal. |
+| **Learning to Recorrupt** (Monroy, Bacca, Tachella, arXiv 2603.25869, 2026) | Self-supervised training that does not need to know the noise distribution | method only | For cameras nobody has calibrated, and for the structured noise our model does not capture. |
+| NL-Bayes (Lebrun, Buades, Morel 2013), dual-domain denoising (Knaus & Zwicker 2013) | Classical | methods only | Candidates beside the BM3D-class baseline (still to write). |
+
+**"Do better than the published models" (candidate, the project's own edge).** Nobody else has a per-camera library of real dark frames, cold and hot. Use it:
+1. **Camera-specific fine-tuning.** Take a general raw network (RawNIND or TreeNet architecture). Make training pairs from clean low-ISO raws: add photon noise from the calibrated gain, then add a **real dark frame sampled from this camera's own library** at the matching ISO, exposure time and temperature band (this carries the true read noise, banding and fixed pattern, which formulas miss; cf. Sony Research "Noise Modeling in One Hour", section 21). Fine-tune on the user's PC; result is a per-camera model stored with the profile. GPL-3 weights we train ourselves may be shared with the profile library.
+2. **Temperature-matched everything.** Read the camera temperature from the maker notes where present (verify per brand); pick the dark library band (cold / warm / hot) for hot-pixel subtraction, banding and the training noise.
+3. **Per-photo tuning.** Run Zero-Shot N2N or Learning to Recorrupt for a few seconds on the photo itself, starting from the camera model (test-time adaptation). On Dual Pixel files the A and B halves are a true noise pair in focused areas (11 row 4): use them as the training pair.
+4. **k-sigma normalisation** (PMRID, Wang et al., ECCV 2020; verify) so one network serves every ISO: scale the raw by the calibrated gain and read noise before the network, invert after.
+5. **Fusion by local signal-to-noise.** Blend candidates per region: learned model where it is confident, classical (MP-PCA / starlet) where the learned one smears low-contrast texture. Decide by the dead-leaves texture score and the blind test, never by PSNR alone (section 22).
+
+### 23.4 Highlight recovery (stage 9)
+
+Re-implement darktable's **ideas** in our own code (Bill: "their ideas, not their code entirely"; no source copied, cite the documentation):
+- **By area** (darktable "segmentation based"): treat each clipped area as its own region, take colour from that region's own unclipped rim, join regions that belong to one object, rebuild fully clipped cores from the surrounding brightness gradients.
+- **Detail transfer** (darktable "guided laplacians"): copy fine detail from channels that did not clip into the ones that did, and continue colour gradients inward, scale by scale. Aimed at lamps, speculars and candle flames.
+- **Grain match:** add photon-like noise from the camera profile to rebuilt areas so they do not look smoother than their surroundings at high ISO. On by default at high ISO.
+- **White level per ISO** measured in the calibration wizard: a wrong white point defeats every method.
+- **Declipping, self-supervised** (Sechaud, Jacques, Abry, Tachella, TMLR 2026): a network learns to rebuild clipped values from clipped photos alone, by assuming pictures look statistically the same at any brightness. Train on the user's own raws (re-clip them lower to make examples). Lab first; promote if it beats the classical methods on candle and sun tests. Label "learned".
+- **Already built, keep and combine:** "Rebuild colour" (`highlights.py`) and "Measured highlights from the lens glow" (`glow.py`, the NASA SDO/AIA solar method: the glow around a blown light tells how bright it really was). Use the glow measurement as the brightness target for the declipper and the detail-transfer method.
+- **Dual Pixel +1 stop** (11 row 2) feeds all of the above.
+- Method picker texts (23.1), for example: *Rebuild colour: fast, best for one blown channel, weak on big white-out areas. Detail transfer: best for lamps and flames, slow. Measured from glow: only method that knows the true brightness, needs a lens glow profile.*
+
+### 23.5 Dual Pixel HDR (decided: build as an option)
+
+"**Dual Pixel HDR**" in the Dual Pixel Lab and as a source for Auto HDR (23.6). A+B is the normal exposure; A alone received half the light, so it is a second exposure one stop darker taken at the same instant (no ghosting, ever).
+- Merge: use A+B everywhere it is not clipped; fade to 2×A where A+B approaches clipping; noise-weighted blend in between.
+- Required corrections first: per-half shading (A is darker toward one side of the frame; measure in Calibration Part C), and local A-to-B alignment in out-of-focus areas (the halves see from slightly different positions).
+- Honest label in the UI: **about one extra stop in the highlights, nothing extra in the shadows** (A+B already holds all the light). Real gain depends on where the sensor itself saturates; measure per body in calibration and show the measured number, cyan tier.
+- Only on files shot with Dual Pixel RAW turned on. Otherwise the option is hidden with a one-line explanation.
+
+### 23.6 Auto HDR (decided: build; Bill's words: "I suck at balancing the dynamic range")
+
+One button, then a strength choice. It never runs by itself (decision 0.4: no automatic brightness changes unless turned on).
+- **Sources, picked automatically:** one raw; Dual Pixel raw (23.5); an exposure bracket; a burst (section 13 "HDR burst").
+- **Engine A (default): exposure fusion** (Mertens, Kautz, Van Reeth 2007) of several virtual exposures made from the merged scene-referred data, as HDR+ does (Hasinoff et al. 2016). Cannot make halos by design. **Engine B: local Laplacian tone compression** (reuses `microcontrast.py`). Both offered under rule 23.1.
+- **Auto part:** measure the scene's range from the raw histogram (robust percentiles of shadows and highlights), decide how many stops must be compressed, and set the lift and the pull-down separately. Shadows are denoised harder in proportion to the lift, using the calibrated signal-to-noise (noise-aware lift). Local contrast is kept by the microcontrast stage.
+- **Strengths:**
+
+| Option | What it does |
+|---|---|
+| **Light** | Holds the highlights, opens shadows a little. Looks like a careful single exposure. |
+| **Medium** | Balanced; the default. |
+| **Heavy** | Everything visible, flatter global contrast, strong local contrast. |
+| **Highlights only** | Tames bright areas, leaves shadows exactly as shot. |
+| **Low-key** | For candle and night work: protects flames and lamps, keeps blacks black, lifts only the lower mid-tones. Named test: a candlelit portrait stays a candlelit portrait. |
+| **Shadows only** | Opens shadows, leaves highlights as shot (backlit subjects). |
+
+  Each has an Amount slider (0–150%) and a short strengths / weaknesses text. Colour is handled so lifted shadows do not go grey and compressed highlights do not shift hue.
+- **Bracket merge** in linear raw with noise-optimal weights (Granados et al. 2010; Hanji et al. 2020; verify), ghost rejection from the HDR+ robust merge.
+
+### 23.7 Stacking
+
+- **HDR+ align-and-merge** (Hasinoff et al. 2016; reference: Monod, Delon, Veit, IPOL 2021; article CC BY-NC-SA, check the code licence, re-implement from the paper if needed) as the default "Noise-only" merge: tile alignment, then a per-frequency merge that trusts a frame only where its difference from the reference is explained by the calibrated noise. Keep sigma-clipped mean as the other choice (23.1).
+- **Burst exposure advice** in the UI: for a burst, expose for the highlights (slightly under); averaging cleans the shadows. State clearly that this is the opposite of Bill's single-frame Canon rule and why.
+- **Pixel-shift merge** (Sony, Pentax) with motion masking.
+- **Night sky:** rejection picker: percentile (up to 6 frames), sigma, winsorized sigma, linear-fit, MAD (for drizzled colour data); normalise frames before rejection; frame weighting by star sharpness; **rejection map** shown as a colour overlay (satellite and plane trails visible).
+- **Freeze ground** (nightscapes on a fixed tripod, 4+ frames): find what moves with the stars and what stays still, align and stack the two separately, join along a soft mask (auto, with brush correction). Correct lens distortion **before** star alignment (wide lenses are where other stackers fail). No open-source tool does this well: a headline feature.
+- **Background / light-pollution removal:** radial-basis-function surface fitted to sky samples (classical, no model), auto-sampled with the ground masked out.
+- RCD demosaic by default for star fields.
+
+### 23.8 Raw processing
+
+- Demosaic picker: **RCD** (default), **LMMSE** (recommended automatically at high ISO), **dual demosaic** (detail method where there is detail, smooth method in flat areas), Markesteijn 3-pass for X-Trans. Our own implementations from the papers.
+- **PDAF line filter** for Sony and Nikon Z striping (first outside tester shoots Sony), green equilibration, lateral CA correction on the mosaic before demosaic.
+
+### 23.9 Auto white balance
+
+- Add **Grayness Index** (Qian, Kämäräinen, Nikkanen, Matas, CVPR 2019): learning-free, finds the pixels most likely to be grey; can report more than one light source. Offered beside grey-edge (23.1); show both estimates and their agreement as a confidence.
+- **Mixed light** (idea from Afifi, Brubaker, Brown, WACV 2022, no code used): render with two or three white balances and blend them with a smooth map built from the Grayness Index. For candle plus window light. Optional.
+- **"Keep the mood" amount** on Auto: 100% = fully neutral, lower = partial correction toward the as-shot or a preferred rendering (research shows people prefer not-quite-neutral; Afifi et al., ICCV 2025). Default below 100% for warm low-light scenes so Auto no longer kills candlelight.
+- **Skin-based estimate** (Bianco & Schettini 2014; verify) when faces are found, reusing the face and skin masks.
+- Keep every estimate inside a sensible band around the daylight/tungsten curve unless the user overrides.
+
+### 23.10 Where this goes in the phases
+
+Phase 3 (denoiser): 23.2, 23.3 candidates into the blind test. Phase 6 follow-up: 23.4 classical parts, 23.6 Auto HDR on a single raw, 23.8, 23.9. Phase 8 (Dual Pixel Lab): 23.5. Stack phases: 23.7. Research backlog: declipping network, camera-specific fine-tuning, per-photo tuning. Phase 6 follow-up also takes 23.11 (Detail by scale) and the 23.12 safeguard and Retinex engine.
+
+### 23.11 Microcontrast, revised: "Detail by scale" with a Balance control (decided 2026-11-15)
+
+**Why.** Review of the built tool (`microcontrast.py`) on the detail-preview renders: safe (no halos, noise-aware, colour-safe) but too timid. At 80% it is not visible at screen size; measured gain is about +4 to +11% in shadows, and at high ISO the noise protection turns it off in the shadows while highlights get +17 to +27% (backwards). The strength cap (monotone limit, `A_MAX`) keeps it "subtle".
+
+**What microcontrast means here (Bill's ruling).** Photographers disagree on the word (Hogan and others: pixel-level differences; Khong and others: richness of tonal transitions; several: clean shadows from low stray light). **Bill is on the tonal-transitions side**: more distinguishable shades, smooth and rich transitions, and **it shows when the photo is converted to black and white**. That is the default and the acceptance test. The other meanings are offered as controls, not argued about.
+
+**Evidence that it is a balance, not an amount** (Bill's finished same-leaf JPEGs, Heliar vs Sigma 135 Art vs Canon 180 macro; weak evidence: focus stacks finished in Photoshop, light changed between lenses; not a deciding test, by Bill's instruction): the Sigma has the *most* contrast at every scale and the widest tonal span, yet the Heliar is the one people pick. What differs is the ratio of medium-scale tonal variation (about 4-8 px at 2600 px wide) to pixel-level contrast (1-2 px): Heliar 1.35, Canon 1.21, Sigma 1.06. Tonal variation concentrated at medium scales with relaxed pixel-level crunch reads as "modelled"; equal at both reads as "etched".
+
+**Build: one panel, "Detail by scale".** It replaces the separate Texture, Clarity and Microcontrast sliders and owns their scales so they cannot fight each other; capture sharpening (10.5) stays a lens correction but the panel shows its effect on the Fine band.
+
+*Simple level*
+- **Amount** (0-100).
+- **Balance**: left = **Tonal** (medium scales up, finest scale slightly relaxed), centre = both, right = **Crisp** (finest scale up). **Default sits on the Tonal side.**
+- **Judge in black and white** toggle: shows the preview as a luminance-only image while adjusting (does not change the edit). This is how Bill sees microcontrast.
+
+*Full level* (each slider can go negative; each has the rule 23.1 text: best for / weak at)
+- **Fine** (about 1-4 px on a 6000 px frame): crispness. Negative = gentle softening, capped so it never looks blurred.
+- **Medium** (about 8-90 px): shades and modelling. The existing local Laplacian engine.
+- **Broad** (about 100 px and up): overall punch.
+- **Veil**: shadow separation. Removes (or adds) a small uniform stray-light haze, measured per lens where a glow profile exists (10.6, section 22 row 9).
+- Existing shadows / midtones / highlights weighting stays, shadows first.
+
+*Presets* (rule 23.1): **Tonal**, **Crisp**, **Both** (sharp and tonal together: Bill's Zeiss Otus), **Soft glow**. Later: presets measured from real lenses in the signature library ("render like my lens", 10.6), stored as per-band gains plus veil.
+
+**Methods are selectable and stackable (Bill, 2026-11-15: "every version gets a selection ... use the slider for one, and then a different one").** Every microcontrast method ships, each with its own on/off, its own Amount slider and its rule 23.1 text (best for / weak at). Any number can be on at once; the result is their combination. The Simple-level Balance and presets are just saved combinations of these sliders.
+
+| Method | What it does | Best for | Weak at |
+|---|---|---|---|
+| **Tonal** (default; Bill's meaning) | Medium scales up, finest scale slightly relaxed | Modelling, shades of shadow, black and white | Can look soft on subjects that need bite |
+| **Local contrast** (the engine built first) | Medium-scale differences made larger, edges left alone | General depth | Subtle; weak in noisy shadows |
+| **Crisp** | Finest scale up | Fur, feathers, fabric, lenses that are a little soft | Raises grain; can look etched |
+| **Tonal separation** | Spreads tones apart inside shadows and midtones region by region (no scale boost) | Flat, dull files; dark-on-dark subjects | Can look processed if pushed |
+| **Veil removal** | Takes off the stray-light haze floor | Backlit and hazy scenes, uncoated lenses | Nothing to gain on clean modern lenses |
+| **Broad** | Large shapes, overall punch | Flat light | Deepens shadows; watch clipping |
+
+Rules for combining:
+1. **Fixed order, whatever order the user moves the sliders:** Veil removal, then Tonal separation, then the scale methods (Broad, Medium-based, Fine-based) computed together in one pass from the same pyramid. Same sliders always give the same picture.
+2. **One shared budget per scale.** Methods that touch the same scale add into a single gain for that scale, and the edge guard, the noise protection and the no-tone-reversal limit apply to the **total**, not to each method separately. Stacking three methods can never produce halos or amplify noise that one method alone could not.
+3. **A live meter** in the panel shows the total change per band and the medium-to-fine ratio, colour-coded by which method contributed what, and turns amber when the total reaches a guard ("limited here to protect edges / noise").
+4. The sidecar stores each method's amount, so a combination can be saved as a preset and shared.
+5. Named tests: every pair of methods at 100% passes the no-halo and candle-flame tests; a stack of all methods at 100% never reverses tones.
+
+This stackable pattern (own slider per method, shared guards on the total) extends rule 23.1 wherever combining is physically sensible: microcontrast, denoise (fusion in 23.3), highlight recovery (23.4). Where only one can apply at a time (demosaic, stack rejection), it stays a single pick.
+
+*Engine changes*
+- Replace the single scale bump (`level_weights`) with separate gains per band; negative gains allowed on Fine.
+- Raise the usable strength: the effect at 60-80% must be plainly visible at screen size on a low-ISO file. Keep the no-halo and no-tone-reversal tests.
+- Fix the high-ISO behaviour: the noise toe must use the noise left *after* the denoiser; shadows must receive at least as much as highlights when the denoiser is on. Named test: ISO 4000 R5 frame, denoiser on, shadows gain >= highlights gain.
+- Fine band up uses the same noise protection as Medium.
+- Report in the panel, colour-coded: change per band and the **medium-to-fine ratio** before and after (the balance number).
+
+*Acceptance*: Bill's blind test, judged in black and white as well as colour. The controlled raw comparison (checklist Part E) is still wanted for the lens-signature library, but it no longer blocks this tool.
+
+Sources read (definitions only, no code): Hogan, "What is Micro Contrast?" (dslrbodies.com); Khong, "Micro-contrast, the biggest optical luxury of the world" (2016); Griffin, "Micro-contrast: is it real?"; The Monochrome Collective, blog 328; Ice Cream Geometry, "Sharpness vs Microcontrast".
+
+**Added from the Zeiss article (Lloyd Chambers, "Micro Contrast and the ZEISS 'Pop'", Lenspire, 2017; Bill supplied the text 2026-11-15; ideas only):**
+- **Veil direction settled.** Stray light sets a grey floor that dark detail cannot go below, so dark tones merge. Removing that floor *is* shadow microcontrast (Chambers calls telling dark from slightly darker "penetrating power", which is Bill's "shades of shadow"). So **Veil defaults to removing haze**; adding haze is the "Soft glow" look only. Apply before any shadow lift (Auto HDR, 23.6), because lifting shadows that sit on a haze floor gives grey mush.
+- **Bands are coupled.** Fine contrast cannot be high unless medium and broad contrast are too. The Balance control therefore never drives Fine up while Medium is negative; the "Both" preset raises all three.
+- **Diffraction awareness.** Contrast at every scale starts to fall around f/8 and is plainly reduced by f/11 on high-resolution bodies. Read the aperture from EXIF: from f/8 the panel offers "Recover diffraction loss" (10.5) and says why; at f/16 and beyond it states honestly that the finest detail was never recorded.
+- **Focus Stack hand-off (section 12).** Stacking keeps broad and medium contrast but loses some fine contrast. After a merge, measure the Fine band against the best source frame and offer to restore the difference (cyan tier: measured).
+- **Blue light.** Lenses with weaker colour correction lose fine contrast in blue/violet light (faint violet halos). Check the blue channel's sharpness against green after the lens fix (10.2); candidate: guide blue-channel detail from green where they disagree.
+- **Focus-plane only (with Dual Pixel depth, 11 row 5).** Sharp against blurred is what makes a subject stand out; option to apply the panel only to the in-focus plane.
+- **Less sharpening.** When the panel has raised Fine, reduce the default capture and output sharpening so noise is not sharpened twice.
+
+### 23.12 Additions from Bill's paper list (2026-11-15; arXiv numbers not yet verified, verify first)
+
+- **Noise-aware shadow lift**: "A Retinex-based Image Enhancement Scheme with Noise Aware Shadow-up Function" (arXiv 1811.03280) is the published reference for the noise-aware lift in 23.6. Use its idea (the lift curve is limited where the signal is mostly noise) with our calibrated noise model.
+- **Multi-Scale Retinex** (Jobson, Rahman, Woodell, NASA Langley, 1997; Retinex theory itself is Land's) as **Engine C** of Auto HDR (23.6), under rule 23.1. Picker text: *strong at pulling detail from very deep shadows; weak: can halo at hard edges and grey out colour.* Use the colour-restoration variant and our edge guard.
+- **Denoise safeguard ("restore" step)**, idea from the solar Self2Self "train, denoise, restore" method (arXiv 2502.16807): after any denoiser, learned or classical, no pixel may move from its original value by more than a set multiple of its calibrated noise; beyond that, the original is kept (blended). Protects stars, catchlights and candle sparks from being smoothed away. On by default; shows a count of protected pixels.
+- **Candidate**: "Learning to See Everything in Ultra-High Dynamic Range" (arXiv 2510.07741): one short raw exposure, highlights kept, shadows rebuilt by a denoising network. Same idea as exposing for highlights and letting our calibrated denoiser rebuild the shadows (Bill's ETTL calibration). Test their network against our pipeline; check licence.
+- **Lab only (generative)**: Intrinsic Single-Image HDR (2409.13803); single-shot HDR via a video diffusion prior (2605.11628).
+- **Not used, recorded so they are not re-investigated**: HDRUNet (2105.13084; for developed 8-bit images, not raw); the extreme-dark Mamba network (2508.03336) and latent-space Retinex transformer (2603.15131) (developed-image low-light networks that tend to invent texture); solar CNN denoising (1908.02815; same family as Zero-Shot N2N, nothing new); cloud-shadow removal for solar images (2407.13379) and NeRF relighting of satellite images (NASA NTRS 20230005357; needs many views of one scene).

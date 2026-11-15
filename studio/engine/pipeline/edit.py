@@ -16,7 +16,7 @@ STAGE_VERSIONS = {
     "banding": 1,
     "lens_ca": 1,
     "defringe": 1,
-    "denoise": 1,
+    "denoise": 2,                    # 2: the safeguard exists (version 1 sidecars render without it)
     "white_balance": 1,
     "highlights": 1,
     "demosaic": 1,
@@ -40,6 +40,8 @@ STAGE_VERSIONS = {
     "retouch": 1,
     "glow": 1,
     "portrait": 1,
+    "detail": 1,
+    "hdr": 1,
 }
 
 
@@ -70,6 +72,8 @@ class Denoise:
     luma: float = 1.0                # luminance strength (1 = matched to the measured noise)
     chroma: float = 1.5              # colour-noise strength
     grain: float = 0.0               # keep-grain: fraction of removed luminance noise put back
+    safeguard: bool = True           # "restore" step (23.12): a photosite the denoiser moved by more than 4.5x
+                                     # its noise was not noise (a star, a spark): the original is kept there
 
 
 @dataclass
@@ -118,6 +122,20 @@ class Microcontrast:
 
 
 @dataclass
+class Detail:
+    """Stage 16, "Detail by scale" (detail/scales.py, plan 23.11): every microcontrast method with its own
+    amount, stackable. Percent. "Local contrast" is the first engine and keeps its place in ``microcontrast``
+    (amount 0..1, which may now also go down to -0.5); its shadows / midtones / highlights weights are shared by
+    every method. Defaults change nothing."""
+    tonal: float = 0.0               # 0..100: medium scales up, the finest slightly relaxed (Bill's meaning)
+    crisp: float = 0.0               # -50..100: the finest scale up; negative softens gently
+    separation: float = 0.0          # 0..100: crowded tones spread apart, region by region
+    veil: float = 0.0                # -100..100: + takes off the stray-light haze floor, - adds a soft haze
+    broad: float = 0.0               # -50..100: large shapes, overall punch
+    off: list | None = None          # methods switched off without losing their amounts (may hold "local")
+
+
+@dataclass
 class Light:
     """Stage 15 controls beyond exposure and contrast (color/light.py). Defaults change nothing."""
     highlights: float = 0.0          # -100..100: - brings back bright areas, + brightens them
@@ -128,6 +146,15 @@ class Light:
     curve: dict | None = None        # point curves {"master"|"r"|"g"|"b": [[x, y], ...]}, 0..1 display values
     param: dict | None = None        # parametric curve {"highlights"|"lights"|"darks"|"shadows": -100..100}
     dehaze: float = 0.0              # -100..100: + removes haze (dark-channel prior), - adds a soft haze
+
+
+@dataclass
+class AutoHDR:
+    """Auto HDR on one raw (color/hdr.py, plan 23.6). Off until the user turns it on: it changes brightness."""
+    enabled: bool = False
+    strength: str = "medium"         # light | medium | heavy | highlights | lowkey | shadows
+    amount: float = 100.0            # 0..150 percent of that strength
+    engine: str = "fusion"           # fusion (exposure fusion) | laplacian (local Laplacian) | retinex (MSR)
 
 
 @dataclass
@@ -170,6 +197,8 @@ class Edit:
     geometry: Geometry = field(default_factory=Geometry)
     sharpen: Sharpen = field(default_factory=Sharpen)
     microcontrast: Microcontrast = field(default_factory=Microcontrast)
+    detail: Detail = field(default_factory=Detail)
+    hdr: AutoHDR = field(default_factory=AutoHDR)
     light: Light = field(default_factory=Light)
     colour: Colour = field(default_factory=Colour)
     finish: Finish = field(default_factory=Finish)
@@ -191,18 +220,23 @@ class Edit:
         wb = WhiteBalance(**{k: v for k, v in d.pop("white_balance", {}).items()
                              if k in WhiteBalance.__dataclass_fields__})
         tone = Tone(**{k: v for k, v in d.pop("tone", {}).items() if k in Tone.__dataclass_fields__})
-        dn = Denoise(**{k: v for k, v in d.pop("denoise", {}).items() if k in Denoise.__dataclass_fields__})
+        dn_d = d.pop("denoise", {})
+        dn = Denoise(**{k: v for k, v in dn_d.items() if k in Denoise.__dataclass_fields__})
+        if "safeguard" not in dn_d and (d.get("stage_versions") or {}).get("denoise", 2) < 2:
+            dn.safeguard = False     # written before the safeguard existed: renders exactly as it did
         ln = LensFix(**{k: v for k, v in d.pop("lens", {}).items() if k in LensFix.__dataclass_fields__})
         ge = Geometry(**{k: v for k, v in (d.pop("geometry", None) or {}).items() if k in Geometry.__dataclass_fields__})
         sh = Sharpen(**{k: v for k, v in (d.pop("sharpen", None) or {}).items() if k in Sharpen.__dataclass_fields__})
         mc = Microcontrast(**{k: v for k, v in (d.pop("microcontrast", None) or {}).items()
                               if k in Microcontrast.__dataclass_fields__})
+        de = Detail(**{k: v for k, v in (d.pop("detail", None) or {}).items() if k in Detail.__dataclass_fields__})
+        hd = AutoHDR(**{k: v for k, v in (d.pop("hdr", None) or {}).items() if k in AutoHDR.__dataclass_fields__})
         li = Light(**{k: v for k, v in (d.pop("light", None) or {}).items() if k in Light.__dataclass_fields__})
         co = Colour(**{k: v for k, v in (d.pop("colour", None) or {}).items() if k in Colour.__dataclass_fields__})
         fi = Finish(**{k: v for k, v in (d.pop("finish", None) or {}).items() if k in Finish.__dataclass_fields__})
         known = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
         e = cls(white_balance=wb, tone=tone, denoise=dn, lens=ln, geometry=ge, sharpen=sh, microcontrast=mc,
-                light=li, colour=co, finish=fi, **known)
+                detail=de, hdr=hd, light=li, colour=co, finish=fi, **known)
         # stages missing from an old sidecar are version 1
         for k in STAGE_VERSIONS:
             e.stage_versions.setdefault(k, 1)

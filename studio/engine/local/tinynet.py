@@ -21,13 +21,15 @@ ADD, AVERAGE_POOL_2D, CONCATENATION, CONV_2D, DEPTHWISE_CONV_2D, DEPTH_TO_SPACE,
 LOGISTIC, MAX_POOL_2D, MUL, RELU, RESHAPE, RESIZE_BILINEAR = 14, 17, 18, 19, 22, 23
 SOFTMAX, CUSTOM, PAD, TRANSPOSE, PRELU, TRANSPOSE_CONV, SUM = 25, 32, 34, 39, 54, 67, 74
 RESIZE_NEAREST_NEIGHBOR, HARD_SWISH, DENSIFY = 97, 117, 124
+STRIDED_SLICE, MEAN = 45, 40
 _NAMES = {ADD: "ADD", AVERAGE_POOL_2D: "AVERAGE_POOL_2D", CONCATENATION: "CONCATENATION", CONV_2D: "CONV_2D",
           DEPTHWISE_CONV_2D: "DEPTHWISE_CONV_2D", DEPTH_TO_SPACE: "DEPTH_TO_SPACE", DEQUANTIZE: "DEQUANTIZE",
           LOGISTIC: "LOGISTIC", MAX_POOL_2D: "MAX_POOL_2D", MUL: "MUL", RELU: "RELU", RESHAPE: "RESHAPE",
           RESIZE_BILINEAR: "RESIZE_BILINEAR", CUSTOM: "CUSTOM", PAD: "PAD", PRELU: "PRELU", HARD_SWISH: "HARD_SWISH",
           DENSIFY: "DENSIFY", SOFTMAX: "SOFTMAX", TRANSPOSE: "TRANSPOSE", TRANSPOSE_CONV: "TRANSPOSE_CONV", SUM: "SUM",
-          RESIZE_NEAREST_NEIGHBOR: "RESIZE_NEAREST_NEIGHBOR"}
-CUSTOM_OPS = ("Convolution2DTransposeBias",)       # MediaPipe's transposed convolution (selfie segmentation)
+          RESIZE_NEAREST_NEIGHBOR: "RESIZE_NEAREST_NEIGHBOR", STRIDED_SLICE: "STRIDED_SLICE", MEAN: "MEAN"}
+CUSTOM_OPS = ("Convolution2DTransposeBias",        # MediaPipe's transposed convolution (selfie segmentation)
+              "MaxPoolingWithArgmax2D", "MaxUnpooling2D")   # and its pooling pair (hair segmentation)
 _DTYPES = {0: np.float32, 1: np.float16, 2: np.int32, 3: np.uint8, 4: np.int64, 9: np.int8}
 
 
@@ -123,6 +125,9 @@ class Model:
                 const = np.frombuffer(data, dtype)                  # the non-zero values of a pruned tensor
             else:
                 const = np.frombuffer(data, dtype).reshape(shape) if data else None
+            q = t.table(4)
+            if const is not None and q is not None and dtype in (np.int8, np.uint8) and q.vector(2, "f").size:
+                const = _dequantize(const, q)                       # int8 weights (hybrid models): to float once
             self.tensors.append({"name": t.string(3), "shape": shape, "dtype": dtype, "const": const, "sparsity": sp})
         self.inputs = [int(v) for v in g.vector(1, "i")]
         self.outputs = [int(v) for v in g.vector(2, "i")]
@@ -136,8 +141,9 @@ class Model:
             if code == CUSTOM:
                 if customs[k] not in CUSTOM_OPS:
                     raise ModelError(f"custom layer {customs[k]!r} is not supported by this runner")
-                raw = op.raw_bytes(5)                               # padding, stride w, stride h (int32 each)
-                opt = struct.unpack_from("<3i", raw, 0) if len(raw) >= 12 else (1, 2, 2)
+                raw = op.raw_bytes(5)          # a C struct of int32: padding, stride w, stride h (, filter w, filter h)
+                ints = struct.unpack_from(f"<{len(raw) // 4}i", raw, 0) if len(raw) >= 12 else (1, 2, 2, 2, 2)
+                opt = (customs[k],) + tuple(ints)
             self.ops.append((code, [int(v) for v in op.vector(1, "i")], [int(v) for v in op.vector(2, "i")], opt))
         self.input_shape = self.tensors[self.inputs[0]]["shape"]
         self.output_names = [self.tensors[i]["name"] for i in self.outputs]
@@ -174,8 +180,27 @@ class Model:
             if code in (DEQUANTIZE, DENSIFY) and outs[0] in self._consts:
                 continue
             a = [self._value(vals, i) if i >= 0 else None for i in ins]
-            vals[outs[0]] = _run(code, a, opt, self.tensors[outs[0]]["shape"])
+            r = _run(code, a, opt, self.tensors[outs[0]]["shape"])
+            if isinstance(r, tuple):                        # layers with several outputs
+                for i, v in zip(outs, r):
+                    vals[i] = v
+            else:
+                vals[outs[0]] = r
         return {self.tensors[i]["name"]: vals[i] for i in self.outputs}
+
+
+def _dequantize(v: np.ndarray, q: _Table) -> np.ndarray:
+    """int8 / uint8 weights to float32: scale x (value - zero point), per channel along the quantized dimension."""
+    scale = q.vector(2, "f").astype(np.float32)
+    zero = q.vector(3, "q").astype(np.float32) if q.vector(3, "q").size else np.zeros(1, np.float32)
+    axis = q.scalar(6, "i", 0)
+    v = v.astype(np.float32)
+    if scale.size > 1:
+        shp = [1] * v.ndim
+        shp[axis] = scale.size
+        scale = scale.reshape(shp)
+        zero = zero.reshape(shp) if zero.size == scale.size else zero[0]
+    return ((v - zero) * scale).astype(np.float32)
 
 
 # ------------------------------------------------------------------------------------------ sparse weights
@@ -348,6 +373,53 @@ def _transpose_conv_bias(x, w, b, opt):
     return out[None].astype(np.float32)
 
 
+def _maxpool_argmax(x, ints):
+    """MediaPipe's MaxPoolingWithArgmax2D (2 x 2, stride 2 in the hair model): the maxima and where each came from
+    (an index into the input plane, as float; only MaxUnpooling2D reads it)."""
+    pad, sw_, sh_, fw, fh = (list(ints) + [2, 2, 2, 2, 2])[:5]
+    _, H, W, C = x.shape
+    oh, ow = H // sh_, W // sw_
+    best = np.full((oh, ow, C), -np.inf, np.float32)
+    where = np.zeros((oh, ow, C), np.float32)
+    for i in range(fh):
+        for j in range(fw):
+            v = x[0, i:i + oh * sh_:sh_, j:j + ow * sw_:sw_][:oh, :ow]
+            yy = (np.arange(oh) * sh_ + i)[:, None, None]
+            xx = (np.arange(ow) * sw_ + j)[None, :, None]
+            better = v > best
+            best = np.where(better, v, best)
+            where = np.where(better, (yy * W + xx).astype(np.float32), where)
+    return best[None], where[None]
+
+
+def _max_unpool(x, where, ints):
+    """MediaPipe's MaxUnpooling2D: each value back to where its maximum was (zeros elsewhere), output 2x larger."""
+    pad, sw_, sh_ = (list(ints) + [2, 2, 2])[:3]
+    _, H, W, C = x.shape
+    OH, OW = H * sh_, W * sw_
+    out = np.zeros((OH * OW, C), np.float32)
+    idx = where[0].reshape(-1, C).astype(np.int64)
+    vals = x[0].reshape(-1, C)
+    cols = np.broadcast_to(np.arange(C), idx.shape)
+    out[idx, cols] = vals
+    return out.reshape(1, OH, OW, C)
+
+
+def _strided_slice(x, begin, end, strides, opt):
+    bm, em = (opt.scalar(0, "i", 0), opt.scalar(1, "i", 0)) if opt is not None else (0, 0)
+    shrink = opt.scalar(4, "i", 0) if opt is not None else 0
+    sl = []
+    for d in range(x.ndim):
+        b = None if (bm >> d) & 1 else int(begin[d])
+        e = None if (em >> d) & 1 else int(end[d])
+        st = int(strides[d])
+        if (shrink >> d) & 1:
+            sl.append(int(begin[d]))
+        else:
+            sl.append(slice(b, e, st))
+    return x[tuple(sl)]
+
+
 def _depth_to_space(x, bs: int):
     _, H, W, C = x.shape
     oc = C // (bs * bs)
@@ -411,7 +483,12 @@ def _run(code, a, opt, out_shape):
     if code == DEPTH_TO_SPACE:
         return _depth_to_space(a[0], opt.scalar(0, "i", 2))
     if code == CUSTOM:
-        return _transpose_conv_bias(a[0], a[1], a[2] if len(a) > 2 else None, opt)
+        name, ints = opt[0], opt[1:]
+        if name == "Convolution2DTransposeBias":
+            return _transpose_conv_bias(a[0], a[1], a[2] if len(a) > 2 else None, ints[:3])
+        if name == "MaxPoolingWithArgmax2D":
+            return _maxpool_argmax(a[0], ints)
+        return _max_unpool(a[0], a[1], ints)
     if code == TRANSPOSE_CONV:
         return _transpose_conv(np.asarray(a[0]).ravel(), a[1], a[2], a[3] if len(a) > 3 and a[3] is not None else None,
                                opt)
@@ -428,6 +505,12 @@ def _run(code, a, opt, out_shape):
         return a[0].sum(axis=axes, keepdims=keep).astype(np.float32)
     if code == RESIZE_NEAREST_NEIGHBOR:
         return _resize_nearest(a[0], np.asarray(a[1]).ravel(), opt)
+    if code == STRIDED_SLICE:
+        return _strided_slice(a[0], np.asarray(a[1]).ravel(), np.asarray(a[2]).ravel(), np.asarray(a[3]).ravel(), opt)
+    if code == MEAN:
+        axes = tuple(int(v) for v in np.asarray(a[1]).ravel())
+        keep = bool(opt.scalar(0, "B", 0)) if opt is not None else False
+        return a[0].mean(axis=axes, keepdims=keep).astype(np.float32)
     if code == PRELU:
         return np.where(a[0] >= 0, a[0], a[0] * a[1]).astype(np.float32)
     if code == MAX_POOL_2D:

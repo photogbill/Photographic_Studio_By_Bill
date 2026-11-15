@@ -235,12 +235,12 @@ def test_sculpt_and_face_work_match_between_region_and_full_render():
     e = Edit()
     e.sharpen.enabled = False
     P = sample_face(400, 330, 300)
-    e.portrait = {"faces": [face_dict(P, w, h)], "younger": 80, "eyes": 50, "teeth": 50,
+    e.portrait = {"faces": [face_dict(P, w, h)], "younger": 80, "eyes": 50, "teeth": 50, "double_chin": 100,
                   "sculpt": [{"kind": "push", "pts": [[0.25, 0.5]], "vec": [[0.02, 0.0]], "r": 0.08},
                              {"kind": "shape", "tool": "butt", "c": [0.75, 0.7], "e1": [1, 0], "a": 0.07,
                               "b": 0.06, "up": [0, -1], "lift": 60, "size": 40}]}
     full = render(img, e)
-    for u, v in ((0.5, 0.45), (0.25, 0.5), (0.75, 0.7)):
+    for u, v in ((0.5, 0.45), (0.25, 0.5), (0.75, 0.7), (0.5, 0.86)):            # (0.5, 0.86): under the chin
         r = render_view(img, e, u, v, 200, 160)
         x, y, ww, hh = view_window(img, e, u, v, 200, 160)
         assert np.abs(r - full[y:y + hh, x:x + ww]).max() < 1e-5
@@ -249,6 +249,53 @@ def test_sculpt_and_face_work_match_between_region_and_full_render():
     assert np.abs(full - render(img, e0)).max() > 0.01                    # it did something
     xs, ys = sculpt_source(img, e, [0.25 + 0.02], [0.5])                   # a click on pushed content
     assert abs(float(xs[0]) - 0.25) < 0.004
+
+
+def test_double_chin_lifts_under_the_jaw_only():
+    """A friend's request: the soft area under the jaw drawn up towards it (nothing at or above the jaw line moves,
+    capped, never folds), on skin only (a collar right under the chin stays put), and the crease softened."""
+    pt, P, f, fc = _face_setup(h=1000, w=700, width=300.0)
+    W = fc.W
+    assert pt.warps({"faces": [f]}, 700, 1000) == [] and pt.amounts({"younger": 100})["double_chin"] == 0.0
+    ws = pt.warps({"faces": [f], "double_chin": 100}, 700, 1000)
+    assert [w[0] for w in ws] == ["tuck"] and pt.sculpt_active({"faces": [f], "double_chin": 40})
+    up = fc.up
+    above = np.concatenate([P[pt.JAW_LINE], P[[1, 10, 50, 280, 13]], P[pt.JAW_LINE] + 0.05 * W * up])
+    dx, dy = pt._disp(ws[0], above[:, 0], above[:, 1])
+    assert np.abs(np.hypot(dx, dy)).max() < 0.02                            # the jaw and the face never move
+    under = P[pt.fz.CHIN] - 0.16 * W * up
+    dx, dy = pt._disp(ws[0], np.array([under[0]]), np.array([under[1]]))
+    mv = float(np.hypot(dx, dy)[0])
+    assert 0.03 * W < mv <= 0.0451 * W and float(dx[0] * up[0] + dy[0] * up[1]) > 0   # drawn up towards the jaw
+    G = np.stack(np.meshgrid(np.arange(60, 640, 2.0), np.arange(450, 950, 2.0)), -1)
+    X, Y = G[..., 0], G[..., 1]
+    dx, dy = pt._disp(ws[0], X, Y)
+    nx, ny = X + dx, Y + dy
+    jac = (np.gradient(nx, axis=1) * np.gradient(ny, axis=0) - np.gradient(nx, axis=0) * np.gradient(ny, axis=1)) / 4
+    assert jac.min() > 0.4                                                  # never folds
+    # a dark collar 0.22 of the face under the chin: the skin weight is ~0 there, and high on the skin above it
+    img = skin_image(1000, 700, 5)
+    c = P[pt.fz.CHIN]
+    yy = np.mgrid[0:1000, 0:700][0].astype(float)
+    img[yy > c[1] + 0.22 * W] *= 0.05
+    sk = pt.chin_skin(img, 0, 0, 1, fc)
+    assert sk[int(c[1] + 0.30 * W), int(c[0])] < 0.1 and sk[int(c[1] + 0.08 * W), int(c[0])] > 0.6
+    ws2 = pt.warps({"faces": [f], "double_chin": 100}, 700, 1000, skin=[(sk, 0, 0, 1)])
+    edge = np.array([[c[0] - 0.1 * W, c[1] + 0.22 * W], [c[0], c[1] + 0.22 * W], [c[0] + 0.1 * W, c[1] + 0.22 * W]])
+    dx, dy = pt._disp(ws2[0], edge[:, 0], edge[:, 1])
+    assert np.hypot(dx, dy).max() < 0.25 * mv                               # the collar's edge stays (nearly) put
+    # the crease: lifted part way, nothing at 0
+    img = skin_image(1000, 700, 4)
+    ref = img.copy()
+    cc = c - 0.12 * W * up
+    _line(img, cc[0] - 0.12 * W, cc[1], cc[0] + 0.12 * W, cc[1], 0.012 * W, 0.5)
+    G0 = pt.face_gain(img, 0, 0, 1, fc, pt.amounts({}))
+    assert np.allclose(G0, 1.0, atol=1e-6)
+    Gc = pt.face_gain(img, 0, 0, 1, fc, pt.amounts({"double_chin": 100}))
+    L = lambda a: np.log2(a @ pt.LUMA)                                  # noqa: E731
+    d0, d1 = L(img) - L(ref), L(img * Gc) - L(ref)
+    m = d0 < -0.2
+    assert 0.3 < 1 - d1[m].mean() / d0[m].mean() < 0.9
 
 
 # ------------------------------------------------------------------------------------------ settings plumbing

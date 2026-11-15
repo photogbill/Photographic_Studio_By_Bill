@@ -77,6 +77,34 @@ def apply_flags(edit, a):
         edit.white_balance.tint = a.tint or 0.0
     if getattr(a, "microcontrast", None) is not None:
         edit.microcontrast.amount = max(0.0, min(1.0, a.microcontrast))
+    if getattr(a, "detail", None):
+        from .engine.detail.scales import METHODS, PRESETS
+        spec = a.detail.strip()
+        vals = dict(PRESETS[spec]) if spec in PRESETS else {}
+        if not vals:
+            for part in spec.split(","):
+                k, _, v = part.partition("=")
+                k = k.strip().lower()
+                if k not in METHODS:
+                    raise SystemExit(f"--detail: unknown method {k!r}. Methods: {', '.join(METHODS)}; "
+                                     f"presets: {', '.join(PRESETS)}")
+                vals[k] = float(v)
+        for k, v in vals.items():
+            v = max(float(METHODS[k]["lo"]), min(float(METHODS[k]["hi"]), float(v)))
+            if k == "local":
+                edit.microcontrast.amount = v / 100.0
+            else:
+                setattr(edit.detail, k, v)
+    if getattr(a, "hdr", None):
+        from .engine.color.hdr import ENGINES, STRENGTHS
+        strength, _, engine = a.hdr.strip().lower().partition(":")
+        if strength not in STRENGTHS or (engine and engine not in ENGINES):
+            raise SystemExit(f"--hdr: use one of {', '.join(STRENGTHS)}, optionally with an engine, e.g. "
+                             f"medium:laplacian (engines: {', '.join(ENGINES)})")
+        edit.hdr.enabled, edit.hdr.strength = True, strength
+        edit.hdr.engine = engine or "fusion"
+        if getattr(a, "hdr_amount", None) is not None:
+            edit.hdr.amount = max(0.0, min(150.0, a.hdr_amount))
     if getattr(a, "sharpen", None) is not None:
         edit.sharpen.enabled = a.sharpen > 0
         edit.sharpen.amount = a.sharpen
@@ -322,6 +350,14 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--temp", type=float, help="white balance temperature in K")
     d.add_argument("--tint", type=float)
     d.add_argument("--microcontrast", type=float, default=None, help="microcontrast 0..1 (shades of shadow)")
+    d.add_argument("--hdr", default=None, metavar="STRENGTH[:ENGINE]",
+                   help="Auto HDR on each raw: light, medium, heavy, highlights, lowkey or shadows; optional engine "
+                        "fusion (default), laplacian or retinex, e.g. --hdr medium:laplacian")
+    d.add_argument("--hdr-amount", type=float, default=None, help="Auto HDR amount in percent (0-150, default 100)")
+    d.add_argument("--detail", default=None, metavar="SPEC",
+                   help='Detail by scale: a preset ("Tonal", "Crisp", "Both", "Soft glow") or method amounts in '
+                        'percent, e.g. "tonal=70,crisp=30,veil=40" (methods: tonal, local, crisp, separation, '
+                        'veil, broad)')
     d.add_argument("--sharpen", type=float, nargs="?", const=0.5, default=None,
                    help="capture sharpening (recover lens sharpness), amount 0..1.5 (default 0.5)")
     d.add_argument("--fix-lens", action="store_true", help="run Fix lens on every photo (as the Develop button)")
