@@ -1,0 +1,43 @@
+{
+  "format": 1,
+  "name": "Bill's Candlelight (draft)",
+  "about": "DRAFT for Bill to tune: low-key candle portrait. Protects the flame, keeps the shadows deep but separated (microcontrast in the shadows), warms the highlights, calms over-saturated candle-orange skin. Never changes exposure.",
+  "author": "Photographic Studio By Bill (starter set)",
+  "settings": {
+    "light": {
+      "highlights": -30,
+      "blacks": -10,
+      "shadows": 0
+    },
+    "colour": {
+      "vibrance": 10,
+      "hsl": {
+        "orange": [
+          0,
+          -12,
+          0
+        ],
+        "red": [
+          0,
+          -8,
+          0
+        ]
+      },
+      "grading": {
+        "highlights": [
+          65,
+          12,
+          0
+        ],
+        "balance": -20,
+        "blending": 50
+      }
+    },
+    "microcontrast": {
+      "amount": 0.5,
+      "shadows": 1.0,
+      "midtones": 0.6,
+      "highlights": 0.2
+    }
+  }
+}

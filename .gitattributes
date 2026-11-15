@@ -1,0 +1,6 @@
+# Windows scripts keep CRLF line endings, or cmd.exe can misread them.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+# Face models are binary files.
+*.tflite binary

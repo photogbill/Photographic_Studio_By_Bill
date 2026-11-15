@@ -1,0 +1,21 @@
+{
+  "format": 1,
+  "about": "Shared starter list of manual and adapted lenses for tagging contactless glass in Photographic Studio By Bill. CC BY-SA 4.0 (see profiles/LICENSE.md). 'character' = a lens whose softness or glow is the point: automatic sharpening stays off for it unless the user turns it on.",
+  "lenses": [
+    {"name": "Laack 13.5cm Anastigmat", "maker": "Laack", "focal_mm": 135, "character": true, "notes": "1920s; candle flare"},
+    {"name": "Voigtlander Heliar 15cm f/4.5", "maker": "Voigtlander", "focal_mm": 150, "max_aperture": 4.5, "character": true, "notes": "1920s"},
+    {"name": "Voigtlander Apo-Lanthar", "maker": "Voigtlander", "character": true, "notes": "Heliar-derived"},
+    {"name": "Carl Zeiss 13.5cm Anastigmat (1898)", "maker": "Carl Zeiss", "focal_mm": 135, "character": true},
+    {"name": "Carl Zeiss Tessar", "maker": "Carl Zeiss"},
+    {"name": "Asahi Super-Takumar 50mm f/1.4", "maker": "Asahi Pentax", "focal_mm": 50, "max_aperture": 1.4},
+    {"name": "Helios 44-2 58mm f/2", "maker": "KMZ", "focal_mm": 58, "max_aperture": 2.0, "character": true, "notes": "swirly bokeh"},
+    {"name": "Jupiter-9 85mm f/2", "maker": "KMZ / LZOS", "focal_mm": 85, "max_aperture": 2.0, "character": true},
+    {"name": "Meyer-Optik Trioplan 100mm f/2.8", "maker": "Meyer-Optik Gorlitz", "focal_mm": 100, "max_aperture": 2.8, "character": true, "notes": "soap-bubble bokeh"},
+    {"name": "Carl Zeiss Jena Pancolar 50mm f/1.8", "maker": "Carl Zeiss Jena", "focal_mm": 50, "max_aperture": 1.8},
+    {"name": "Canon FD 50mm f/1.4", "maker": "Canon", "focal_mm": 50, "max_aperture": 1.4},
+    {"name": "Minolta MC Rokkor-PG 58mm f/1.2", "maker": "Minolta", "focal_mm": 58, "max_aperture": 1.2},
+    {"name": "Nikon Nikkor 50mm f/1.4 AI-S", "maker": "Nikon", "focal_mm": 50, "max_aperture": 1.4},
+    {"name": "Petzval-type portrait lens", "character": true, "notes": "any Petzval design (brass or modern)"},
+    {"name": "Voigtlander 90mm (manual focus)", "maker": "Voigtlander", "focal_mm": 90}
+  ]
+}

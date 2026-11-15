@@ -1,0 +1,20 @@
+Face models used by Photographic Studio By Bill (Portrait section)
+
+face_detection_short_range.tflite   BlazeFace, short range
+face_detection_full_range.tflite    BlazeFace, full range
+face_landmark.tflite                Face Mesh (468 points)
+
+Copyright Google LLC. Part of MediaPipe (https://github.com/google-ai-edge/mediapipe).
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use these files except in compliance
+with the License. A copy of the License is in the file LICENSE in this folder.
+Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
+an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+
+The files are unmodified. They were taken from the MediaPipe models bundled in the Python package
+face-detection-tflite 0.6.0 (PyPI, MIT licence for its code; the models keep Google's Apache 2.0 licence).
+
+Model cards:
+  Bazarevsky et al., "BlazeFace: Sub-millisecond Neural Face Detection on Mobile GPUs", CVPR Workshops 2019.
+  Kartynnik et al., "Real-time Facial Surface Geometry from Monocular Video on Mobile GPUs", CVPR Workshops 2019.
+
+They are run by the Studio's own NumPy code (studio/engine/local/tinynet.py, GPL-3.0); TensorFlow is not used.

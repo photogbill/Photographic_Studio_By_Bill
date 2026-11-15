@@ -1,0 +1,21 @@
+{
+  "format": 1,
+  "name": "Punchy",
+  "about": "More contrast, colour and microcontrast for landscapes and flowers.",
+  "author": "Photographic Studio By Bill (starter set)",
+  "settings": {
+    "tone": {
+      "contrast": 1.5
+    },
+    "light": {
+      "blacks": -15,
+      "highlights": -15
+    },
+    "colour": {
+      "vibrance": 25
+    },
+    "microcontrast": {
+      "amount": 0.35
+    }
+  }
+}

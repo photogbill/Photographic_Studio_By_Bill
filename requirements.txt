@@ -1,0 +1,11 @@
+# Photographic Studio By Bill - Python packages (installed into .venv by tools\ensure_env.bat).
+# Every entry is GPL-3.0 compatible; see THIRD_PARTY.md. Lower bounds only, so new Python versions work.
+numpy>=1.24
+scipy>=1.10
+rawpy>=0.21
+tifffile>=2023.7.10
+Pillow>=10.0
+exifread>=3.0
+pytest>=7.4
+PySide6-Essentials>=6.6
+# Optional (installed separately by tools\ensure_env.bat, never required): lensfunpy - modern-lens profiles

@@ -1,0 +1,33 @@
+{
+  "format": 1,
+  "name": "Natural",
+  "about": "Back to the Studio's neutral rendering: undoes any look (keeps exposure, white balance, crop).",
+  "author": "Photographic Studio By Bill (starter set)",
+  "settings": {
+    "tone": {
+      "contrast": 1.35
+    },
+    "light": {
+      "highlights": 0,
+      "shadows": 0,
+      "whites": 0,
+      "blacks": 0,
+      "smart": 0,
+      "curve": null
+    },
+    "colour": {
+      "saturation": 0,
+      "vibrance": 0,
+      "hsl": null,
+      "ranges": null,
+      "grading": null,
+      "bw": false,
+      "bw_mix": null,
+      "lut": "",
+      "lut_amount": 1.0
+    },
+    "microcontrast": {
+      "amount": 0.0
+    }
+  }
+}

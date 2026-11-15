@@ -1,0 +1,31 @@
+{
+  "format": 1,
+  "name": "Cool film",
+  "about": "Blue-green shadows and cool, clean highlights.",
+  "author": "Photographic Studio By Bill (starter set)",
+  "settings": {
+    "tone": {
+      "contrast": 1.3
+    },
+    "light": {
+      "blacks": 10
+    },
+    "colour": {
+      "saturation": -10,
+      "grading": {
+        "shadows": [
+          250,
+          18,
+          0
+        ],
+        "highlights": [
+          190,
+          8,
+          0
+        ],
+        "balance": 0,
+        "blending": 50
+      }
+    }
+  }
+}

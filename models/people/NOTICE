@@ -1,0 +1,26 @@
+People models used by Photographic Studio By Bill (Person mask)
+
+selfie_segmentation.tflite   Selfie segmentation (person / not a person), 256 x 256
+pose_detection.tflite        BlazePose detector (finds a person from the face and hips)
+pose_landmark_full.tflite    BlazePose GHUM 3D, full model: 33 body points and a person mask
+selfie_multiclass_256x256.tflite   Multiclass selfie segmentation: background, hair, body skin, face skin, clothes,
+                             others (accessories). Model card dated May 10, 2023, "Licensed under Apache License,
+                             Version 2.0". Downloaded by the user from Google's MediaPipe model page
+                             (storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/...).
+
+Copyright Google LLC. Part of MediaPipe (https://github.com/google-ai-edge/mediapipe).
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use these files except in compliance
+with the License. A copy of the License is in the file LICENSE in this folder.
+Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
+an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+
+The files are unmodified. The first three were taken from the official MediaPipe 0.10.9 Python package (PyPI,
+Apache 2.0), folders mediapipe/modules/selfie_segmentation, pose_detection and pose_landmark; the multiclass model
+from Google's MediaPipe model download page.
+
+Model cards / papers:
+  Bazarevsky, Grishchenko, Raveendran, Zhu, Zhang, Grundmann, "BlazePose: On-device Real-time Body Pose tracking",
+  CVPR Workshop on Computer Vision for AR/VR 2020 (arXiv 2006.10204).
+  MediaPipe Selfie Segmentation model card (Google, Apache 2.0).
+
+They are run by the Studio's own NumPy code (studio/engine/local/tinynet.py, GPL-3.0); TensorFlow is not used.

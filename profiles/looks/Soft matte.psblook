@@ -1,0 +1,27 @@
+{
+  "format": 1,
+  "name": "Soft matte",
+  "about": "Lifted, matte blacks and quiet colour: gentle and airy.",
+  "author": "Photographic Studio By Bill (starter set)",
+  "settings": {
+    "tone": {
+      "contrast": 1.2
+    },
+    "light": {
+      "blacks": 40,
+      "highlights": -20
+    },
+    "colour": {
+      "saturation": -12,
+      "grading": {
+        "highlights": [
+          70,
+          12,
+          0
+        ],
+        "balance": 0,
+        "blending": 60
+      }
+    }
+  }
+}

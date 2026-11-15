@@ -1,0 +1,25 @@
+{
+  "format": 1,
+  "name": "B&W high contrast",
+  "about": "Black and white through a red filter: darker skies and foliage, bright skin.",
+  "author": "Photographic Studio By Bill (starter set)",
+  "settings": {
+    "tone": {
+      "contrast": 1.7
+    },
+    "light": {
+      "blacks": -20
+    },
+    "colour": {
+      "bw": true,
+      "bw_mix": {
+        "red": 30,
+        "orange": 25,
+        "yellow": 10,
+        "green": -20,
+        "aqua": -30,
+        "blue": -45
+      }
+    }
+  }
+}

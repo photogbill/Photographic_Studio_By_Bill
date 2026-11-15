@@ -1,0 +1,18 @@
+{
+  "format": 1,
+  "name": "B&W classic",
+  "about": "Black and white with a full tonal range and lifted shades of shadow.",
+  "author": "Photographic Studio By Bill (starter set)",
+  "settings": {
+    "tone": {
+      "contrast": 1.4
+    },
+    "colour": {
+      "bw": true,
+      "bw_mix": null
+    },
+    "microcontrast": {
+      "amount": 0.3
+    }
+  }
+}

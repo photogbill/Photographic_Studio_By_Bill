@@ -1,0 +1,138 @@
+# Photographic Studio By Bill
+# Allowlist: this repository holds ONLY the software and the shared lens and camera profiles.
+# Everything else is ignored by default: photos, raws, exports, PDFs, logs, reports, calibration data.
+# To add a new kind of software file, add its extension to the list below.
+
+# 1. Ignore every file...
+*
+# ...but still look inside folders, so the rules below can let files back in.
+!*/
+
+# 2. Let the repository's own housekeeping files in.
+!.gitignore
+!.gitattributes
+!.editorconfig
+!LICENSE
+!LICENSE.*
+!NOTICE
+!CHANGELOG
+!Cargo.lock
+
+# 3. Software and profile file types (text only; no picture or raw formats are on this list).
+
+!*.py
+!*.PY
+!*.pyi
+!*.PYI
+!*.bat
+!*.BAT
+!*.cmd
+!*.CMD
+!*.ps1
+!*.PS1
+!*.sh
+!*.SH
+!*.js
+!*.JS
+!*.mjs
+!*.MJS
+!*.ts
+!*.TS
+!*.html
+!*.HTML
+!*.css
+!*.CSS
+!*.json
+!*.JSON
+!*.rs
+!*.RS
+!*.toml
+!*.TOML
+!*.c
+!*.C
+!*.h
+!*.H
+!*.cpp
+!*.CPP
+!*.hpp
+!*.HPP
+!*.cc
+!*.CC
+!*.cmake
+!*.CMAKE
+!*.md
+!*.MD
+!*.txt
+!*.TXT
+!*.ini
+!*.INI
+!*.cfg
+!*.CFG
+!*.yml
+!*.YML
+!*.yaml
+!*.YAML
+!*.xml
+!*.XML
+!*.csv
+!*.CSV
+!*.svg
+!*.SVG
+!*.ico
+!*.ICO
+!*.woff
+!*.WOFF
+!*.woff2
+!*.WOFF2
+!*.ttf
+!*.TTF
+!*.otf
+!*.OTF
+
+# Looks: the shared starter looks in profiles/looks (our own settings, CC BY-SA).
+# Your own looks are saved in /settings/looks, which is never shared (section 4).
+!*.psblook
+!*.PSBLOOK
+
+# App icons only: PNGs are allowed in assets/icons and nowhere else.
+!/assets/icons/*.png
+
+# Face and people models (Google MediaPipe, Apache 2.0, see models/*/NOTICE): in models/faces and models/people only.
+!/models/faces/*.tflite
+!/models/people/*.tflite
+
+# 4. Folders that are never shared, even if a file inside has an allowed type.
+/Voigtlander/
+/Zeiss/
+/high iso raw/
+/calibration/
+/private/
+/logs/
+/reports/
+/outputs/
+/build/
+/dist/
+/cache/
+/settings/
+/calibration_local/
+/.pytest_cache/
+*.partial
+__pycache__/
+.venv/
+venv/
+node_modules/
+.vscode/
+.idea/
+
+# 5. Private by design, wherever they turn up: sensor fingerprints, hot-pixel and dust maps, secrets.
+*fingerprint*
+*prnu*
+*hotpixel*
+*hot_pixel*
+*hot-pixel*
+*dustmap*
+*dust_map*
+*dust-map*
+.env
+*.env
+*secret*
