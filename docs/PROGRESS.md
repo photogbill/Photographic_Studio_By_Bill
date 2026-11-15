@@ -1,6 +1,6 @@
 # Build progress
 
-Updated 2026-11-15 (session 10: plan section 23, first part). Plan: BUILD_PLAN.md v1.9.
+Updated 2026-11-15 (session 11: Phase 4b, plan section 24). Plan: BUILD_PLAN.md v2.0.
 
 ## Where things stand
 
@@ -11,9 +11,11 @@ Updated 2026-11-15 (session 10: plan section 23, first part). Plan: BUILD_PLAN.m
 | 2. Calibration engine | **Engine done, awaiting frames** | `Calibrate Camera.bat` / `studio-cli calibrate`. Part G (exposure latitude) not yet. Acceptance needs Bill's Part A and B frames. |
 | 3. Denoiser v1 | **Built, awaiting Bill's blind test** | Hybrid NLM + starlet default; MP-PCA and starlet candidates; blind-test tool (10 pairs ready). BM3D-class baseline still to write. Off by default until the blind test. |
 | 4. Studio shell | **Built** | `Start Studio.bat`: Library, Develop (live render, wipe, loupe, histogram, panels, undo, sidecars, Make it good), Export, Cameras, Lenses, Help. |
+| 4b. Library + card import (session 11) | **Built, awaiting Bill's card** | All four steps of 24.9. **Import from card** (Library, primary button): the Photos folder dialog (you choose it: drive buttons with free space, OneDrive warning, nothing created until you confirm), one-screen import dialog (cards = any drive with DCIM, refreshed every 2 s; raws only by default; what stays on the card always said; one folder per shooting day named by its date, a new day at 04:00, grouped by year; your own name per folder or one folder for all; space check; second copy), copied in the background with progress, Cancel and a finish summary; a quiet **Card found** notice. Engine `engine/io/ingest.py`: copy, check (BLAKE2b, read back), then name; never overwrites; import record `<Photos>\_studio\imports.jsonl`; `studio-cli import`. **Library speed**: disk thumbnail cache (1 GB cap, Clear cache), only what is on screen, ratings/details in the background with `cache\library_index.sqlite`. **Review** (Space): large view + filmstrip, keyboard rating with auto-advance, Z / click 100% (zoom kept from photo to photo), C compare with locked zoom, Camera preview (amber) or From the raw (cyan). **Process picks**: picks / selected / shown, own edit or Make it good, background with Cancel. Plus sort, filters (rating, camera, lens, ISO, date, not rated, name), size slider, subfolders, right-click menu, drop a folder, recent and pinned folders, Tools menu, ratings that cannot be saved are shown and can be kept on this PC. Acceptance: Bill goes card to exported picks without Explorer; a tester on another brand does it with no help. |
 | 5. Lens | **Built, awaiting Bill's eye** | Lateral CA and purple-fringe removal (earlier), plus this session: **Fix lens** button with a colour-coded report; distortion from lensfun (violet) or measured from straight lines (amber, strict gate: never on organic subjects); lens falloff measured (lensfun or estimated) with correction OFF by default; stage 13 geometry in one resample (distortion, vertical/horizontal perspective, straighten with **Auto level**, crop with aspect presets drawn on the photo, constrain-to-image); **lens tagging** (Library: Tag lens for a whole shoot; Develop: lens picker; shared starter list + your own private list; written into exports). Acceptance: fringing on Bill's vintage-lens files fixed by one button with no colour damage. |
 | 6. Full develop | **Built, awaiting Bill's eye** | Session 4: **Microcontrast** (stage 16) and **capture sharpening** (stage 12). Session 5: the full **Light** panel (highlights, shadows, whites, blacks in stops; **Smart lighting**, region by region with a guided filter; **Auto** that sets highlights / whites / blacks only and keeps low-key photos low-key, the named test; a point **tone curve** per channel), the **Colour** stage (OKLCh: saturation, vibrance with skin protection, **Pick white** eyedropper, **Auto** white balance (grey-edge), a **DxO-style colour wheel** with several ranges, **HSL** in 8 bands, **colour grading** wheels with balance and blending, **black & white** with a colour mixer, **.cube LUTs**), **Looks** (8 starter looks incl. a draft **"Bill's Candlelight"**, Save look), **Copy / Paste settings** (Develop, and Library for many photos), **virtual copies**, a labelled **History** with **snapshots** (kept in the sidecar), **export presets**. Session 6: **highlight rebuild** (clipped channels get the colour of the clipped area's edge), **Dehaze** (dark-channel prior), **Texture**, **film grain** (size, roughness, mono or colour), **film toe** and **highlight roll-off** with a drawn film curve, a **parametric curve** (four regions), **Auto colour** (vibrance from measured colourfulness), **B&W filter presets**, a **camera-profile picker** reading DNG camera profiles (.dcp), and **output sharpening** for screen / glossy / matte in Export. Acceptance: Bill's microcontrast blind test against DxO; "Bill's Candlelight" tuned by Bill. |
-| 6b. Plan section 23 (session 10) | **Part built, awaiting Bill's eye** | **Detail by scale** (23.11) replaces the Microcontrast and Texture sliders: six methods, each with its own switch, amount and "best for / weak at" text (Tonal, Local contrast, Crisp, Tonal separation, Veil removal, Broad), stackable under one shared budget per scale; Simple level = Amount + Balance (starts on the Tonal side) + presets (Tonal, Crisp, Both, Soft glow); **Judge in black and white**; a live meter (amber when a guard limits the stack) and the balance number; diffraction note from f/8. **Denoise safeguard** (23.12, on by default, with a count). **Auto HDR** on one raw (23.6): Light / Medium / Heavy / Highlights only / Low-key / Shadows only, Amount 0-150%, three engines (exposure fusion, local Laplacian, Multi-Scale Retinex), noise-aware lift, off until turned on. **Auto white balance** (23.9): Grayness Index beside grey edge, both shown with their agreement, two light sources reported, **Keep the mood**. Method texts on the denoise picker (23.1). **Not built yet from section 23:** 23.2 neural runtime and 23.3 learned denoisers, 23.4 highlight methods (by area, detail transfer, grain match), 23.5 Dual Pixel HDR, 23.7 stacking, 23.8 demosaic picker (RCD, LMMSE, dual) and PDAF line filter, 23.9 mixed light and skin estimate. Acceptance: Bill's blind test of Detail by scale, in colour and in black and white. |
+| 6b. Plan section 23 (session 10) | **Part built, awaiting Bill's eye** | **Detail by scale** (23.11) replaces the Microcontrast and Texture sliders: six methods, each with its own switch, amount and "best for / weak at" text (Tonal, Local contrast, Crisp, Tonal separation, Veil removal, Broad), stackable under one shared budget per scale; Simple level = Amount + Balance (starts on the Tonal side) + presets (Tonal, Crisp, Both, Soft glow); **Judge in black and white**; a live meter (amber when a guard limits the stack) and the balance number; diffraction note from f/8. **Denoise safeguard** (23.12, on by default, with a count). **Auto HDR** on one raw (23.6): Light / Medium / Heavy / Highlights only / Low-key / Shadows only, Amount 0-150%, three engines (exposure fusion, local Laplacian, Multi-Scale Retinex), noise-aware lift, off until turned on. **Auto white balance** (23.9): Grayness Index beside grey edge, both shown with their agreement, two light sources reported, **Keep the mood**. Method texts on the denoise picker (23.1). **Not built yet from section 23:** 23.2 neural runtime and 23.3 learned denoisers, 23.4 highlight methods (by area, detail transfer, grain match), 23.5 Dual Pixel HDR, 23.7 stacking, 23.8 PDAF line filter (needs a Sony raw that shows striping), 23.9 mixed light and skin estimate. **Session 11 built 23.8's demosaic picker** (see the 23.8 row). Acceptance: Bill's blind test of Detail by scale, in colour and in black and white. |
+| 6c. Demosaic picker (session 11, plan 23.8) | **Built, awaiting Bill's eye** | Develop > Detail (Full): **RCD** (new default), Menon, **LMMSE**, **Dual** (RCD + LMMSE by local contrast), MHC, each with its best-for / weak-at text; **Even out the two greens** (green equilibration, off by default). RCD measured ahead of Menon on every crop, clean and noisy, and twice as fast; older edits keep Menon (their sidecars say so). Not built: the PDAF line filter. |
 | 7, 8 | Not started | Wizards; Dual Pixel Lab. |
 | 9. Local + retouch | **Built (masks session 6, retouch session 7), awaiting Bill's eye** | **Masks** in Develop: Brush (feather, flow, erase, **auto mask**), Gradient, Radial, **Object** (one click selects a leaf; Alt-click takes a part away), **Colour**, **Brightness** and now **Skin** (skin tones of any complexion); shapes combine (add, subtract, only-where), invert, amount; inside each mask: exposure, contrast, highlights, shadows, whites, blacks, temperature, tint, saturation, vibrance, texture, clarity, dehaze, sharpness, noise reduction and now **Smooth skin** (softens blotches and uneven colour, keeps pores and edges). **Retouch** (its own group): **Heal**, **Clone** and **Red eye** spots, clicked or brushed along a hair, source chosen automatically and draggable; **Find dust** (one photo); **Learn dust map** in the Library (the dust on your sensor, learnt from several photos, kept on this PC) and **Dust map** in Develop to heal it in any photo (also `--dust-map` for batch develop). New **100% view** (Z, mouse wheel or the 100% button; drag to move) where every tool works. Still to do: depth and focus range masks (need Dual Pixel, Phase 8), denoise strength and microcontrast per mask, editing a drawn gradient or circle by its handles, content-aware fill for large removals. Acceptance: Bill selects one leaf in two clicks and adjusts it; dust removed automatically. |
 | 9c. Person mask | **Built (session 9), awaiting a real portrait** | Masks > **Person**: everyone in the photo selected on this PC (MediaPipe person segmentation + BlazePose 33 body points), then a **Part**: whole person, background, skin, face, hair, clothes, arms, legs, torso; snapped to the photo's edges. Also in "Refine" (+ / - / x Person). |
@@ -57,6 +59,20 @@ Updated 2026-11-15 (session 10: plan section 23, first part). Plan: BUILD_PLAN.m
   `Blind Test vs DxO.bat`: as before. `studio develop` also takes `--microcontrast 0.6 --sharpen --fix-lens --rotate`,
   `--look "Warm film"`, `--smart-lighting 40`, `--highlights rebuild --dehaze 30 --texture 20 --grain 15
   --profile NAME.dcp --sharpen-for screen`, and now `--dust-map` (heal the camera's learnt dust in every photo).
+
+**Session 11 adds** (Phase 4b, all in the Library of `Start Studio.bat`):
+* **Import from card...** (top right): the first time it asks where your photos should be kept (pick a drive or a
+  folder). Then: the card, what to copy (raws only by default), the folder names (the date, or type after it), and
+  Import. Try it with a real card in the reader; a second import of the same card copies nothing.
+* **Review** (or Space on a photo): Left / Right, 0-5 / P / X / U, Z or a click for 100%, C to compare two, Enter to
+  develop, Esc or Space back. "Show" picks Camera preview or From the raw.
+* **Process picks...**: export your picks in one go (or the selected photos, or all shown).
+* The filter row (rating, camera, lens, ISO, date, Not rated yet, file name), the sort, the Size slider, Include
+  subfolders (above the folder tree), Recent and pinned folders (right-click to pin), the **Photos** button, the
+  right-click menu on photos, and **Tools** (Tag lens, Paste settings, Learn dust map, Measure lens glow, Photos
+  folder, Keep this folder's ratings on this PC, Clear thumbnail cache).
+* `Library Speed Test.bat` (new): drag a big folder from your archive drive onto it to measure how fast it opens.
+* `studio-cli import F:\ --to E:\Photos [--name "Kelly candlelight"] [--jpegs] [--second F:\Backup] [--dry-run]`.
 
 **Session 10 adds** (all in `Start Studio.bat`, Develop):
 * **Detail** group: Preset, **Judge in black and white**, **Amount**, **Balance (tonal - crisp)**, the meter, the
@@ -347,3 +363,48 @@ Updated 2026-11-15 (session 10: plan section 23, first part). Plan: BUILD_PLAN.m
   commit (it shows every file first).
 * Session 10 was built and tested on the Linux build machine (342 tests pass, 3 skipped) and copied into the
   folder; `Run Tests.bat` on Bill's PC is still the acceptance check, and `push.bat` still does the commit.
+
+64. **Builder's defaults of 24.2, as written** (Bill may flip any of them): the folder date is the day the photos were
+    taken, a new day starts at 04:00 (a setting in the import dialog), folders are grouped by year (a tick). Import is
+    a button in the Library, not a ninth sidebar section.
+65. **The Library has two bars**: buttons on top (Import from card, Review, Process picks, Open folder, Tools) and a
+    filter row under it (rating, camera, lens, ISO, date, Not rated yet, file name, sort, size). 24.7 C put filter,
+    sort and size in the top bar; with the new filters it would not fit at 1366 x 768. "Include subfolders" sits above
+    the folder tree. The Library's minimum width is 1050 px (the test checks it fits beside the 240 px sidebar).
+66. **Found, not fixed (outside 4b):** the whole window cannot shrink below 1521 x 862 because the Develop panel needs
+    1281 px and the Help page 840 px of height; that was already so before this session. The plan's 1366 x 768 aim
+    (6.1) needs those two pages reworked (a scroll area for Help, a narrower Develop panel).
+67. **Card found notice never keeps an archive drive spinning**: card readers (removable drives) are looked at every
+    2 s, fixed disks only when a new drive letter appears (a CFexpress reader that mounts as a fixed disk). Cards
+    already in when the Studio starts are not announced. The import dialog itself checks every drive every 2 s.
+68. **Capture times come from the first 256 KB of each photo** (`read_capture_time`, the same EXIF field as
+    `read_metadata(...).datetime`): the full reader reads 24 MB per file, far too much for a card.
+69. **Checking a copy past the Windows file cache** is used only after it proves itself on a test file at the start
+    of each import (so a fault in it can never fail good copies); otherwise the read-back after fsync, and the log
+    says which. Matching the record allows 2 s between a file time and an EXIF time (FAT keeps file times to 2 s).
+70. **Make it good moved into the engine** (`engine/presets/auto.py`, rule 2.2): Develop's button and Process picks
+    run the same code. Process picks saves the Make it good edit into each photo's sidecar (so Develop shows what it
+    did); photos with an edit of their own keep it. Process uses master edits (virtual copies: Export).
+71. **Ratings are written in the background, one after another**, and the grid updates at once. The engine now
+    takes a lock around every sidecar read-modify-write, so a rating saved by the Library and an edit saved by
+    Develop at the same moment cannot undo each other.
+72. **Read-only folders**: the first rating that cannot be saved shows a message (once per folder) offering "Keep
+    them on this PC". That switches the folder to central sidecars (`settings\sidecars\<id>\`, private), and every
+    read and write follows (Develop, Export, Process, the Library), not just ratings; sidecars already beside the photos
+    are copied in once. Tools > "Keep this folder's ratings and edits on this PC" turns it on or off by hand.
+73. **Review**: "Go to the next photo after rating" is on in Review (remembered), never in the grid. Compare shows
+    the two selected photos if exactly two are selected, otherwise the current and the next. The Dual Pixel and
+    exposure badges in the info strip wait for those detectors (Phases 7 and 8); the focus-check overlay stays in
+    its own phase, as 24.7 A says.
+74. **Thumbnails**: 320 px JPEGs in `cache\thumbs` (per 24.7 B); at the largest Size (400 px) they are upscaled a
+    little. Up to 900 are kept in memory; the rest come back from the disk cache in a few milliseconds.
+75. **Shared code left main.py** (24.8): `app/common.py` (jobs, settings, small widgets, the lens picker),
+    `app/exporting.py` (Export dialog), `app/library.py`, `app/review.py`, `app/importer.py`, `app/process.py`.
+    `main.py` re-exports the old names, so nothing that used them changed.
+76. **RCD is the default demosaic for new edits** (plan 23.8), measured ahead of Menon everywhere (RESULTS). Our RCD
+    uses Hamilton-Adams' additive green correction instead of RCD's ratio (the ratio measured worse on detail).
+    Sidecars store the algorithm, so photos edited (or rated) before keep Menon exactly.
+77. **LMMSE is offered, not switched on automatically at high ISO**: with noise added, RCD still scored higher on all
+    three test files. Bill's eye on real high-ISO files (maze patterns, smoothness) may change that.
+78. **Green equilibration** is a per-photo tick (off by default) applied to the mosaic right before demosaicing; it
+    corrects only where the two greens' local ratio is within 8 % of 1, so real detail is left alone.

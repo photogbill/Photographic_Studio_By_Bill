@@ -54,6 +54,7 @@ QPushButton:checked {{ background: #0f2c3d; border-color: {CYAN}; }}
 QPushButton:disabled {{ color: #4a5672; border-color: #151f36; }}
 QPushButton#primary {{ background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #0891b2, stop:1 #7c3aed);
                       border: none; font-weight: 600; padding: 9px 18px; }}
+QPushButton#primary:disabled {{ background: #172036; color: #4a5672; }}
 QPushButton#primary:hover {{ background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #06b6d4, stop:1 #8b5cf6); }}
 QPushButton#group {{ text-align: left; font-weight: 600; background: transparent; border: none;
                     border-bottom: 1px solid {LINE}; border-radius: 0; padding: 10px 4px; }}
@@ -77,6 +78,16 @@ QTreeView, QListWidget {{ background: {BG2}; border: 1px solid {LINE}; border-ra
 QTreeView::item {{ padding: 4px; }}
 QTreeView::item:selected, QListWidget::item:selected {{ background: #12324a; border-radius: 6px; }}
 QListWidget#grid::item {{ border-radius: 10px; padding: 6px; margin: 4px; }}
+QListView#grid, QListView {{ background: {BG2}; border: 1px solid {LINE}; border-radius: 10px; outline: none; }}
+QToolButton {{ background: {PANEL2}; border: 1px solid {LINE}; border-radius: 8px; padding: 7px 14px; }}
+QToolButton:hover {{ border-color: {CYAN}; }}
+QToolButton::menu-indicator {{ image: none; width: 0; }}
+QMenu {{ background: {PANEL2}; border: 1px solid {LINE}; padding: 4px; }}
+QMenu::item {{ padding: 6px 18px; border-radius: 6px; }}
+QMenu::item:selected {{ background: #12324a; }}
+QMenu::separator {{ height: 1px; background: {LINE}; margin: 4px 8px; }}
+QRadioButton::indicator {{ width: 14px; height: 14px; border-radius: 7px; border: 1px solid {LINE}; background: {BG2}; }}
+QRadioButton::indicator:checked {{ background: {CYAN}; border-color: {CYAN}; }}
 QListWidget#grid::item:selected {{ background: #12324a; border: 1px solid {CYAN}; }}
 QProgressBar {{ background: {BG2}; border: 1px solid {LINE}; border-radius: 6px; height: 10px; text-align: center; }}
 QProgressBar::chunk {{ background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #0891b2, stop:1 #7c3aed);

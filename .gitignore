@@ -119,6 +119,8 @@
 /cache/
 /settings/
 /calibration_local/
+/Photos/
+/photos/
 /.pytest_cache/
 *.partial
 __pycache__/
@@ -143,3 +145,9 @@ node_modules/
 .env
 *.env
 *secret*
+
+# 6. Per-photo sidecars (edits, ratings, lens tags: NAME.EXT.psb.json). They sit beside the raws, so they
+#    turn up wherever photos are, including the sample raws in this folder. They belong to the photographer
+#    and are never shared. (/Photos/ above is the default Photos folder beside the app, build plan section 24.)
+*.psb.json
+*.PSB.JSON

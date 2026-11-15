@@ -6,7 +6,6 @@ Super-Res Stack, Lenses, Cameras, Export, Help. The interface talks to the engin
 """
 from __future__ import annotations
 
-import io
 import json
 import math
 import os
@@ -15,166 +14,34 @@ import time
 import traceback
 
 import numpy as np
-from PySide6.QtCore import QObject, QPointF, QRectF, QRunnable, QSize, Qt, QThreadPool, QTimer, QUrl, Signal
-from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QIcon, QImage, QKeySequence,
-                           QLinearGradient, QPainter, QPainterPath, QPainterPathStroker, QPen, QPixmap,
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QImage, QKeySequence,
+                           QLinearGradient, QPainter, QPainterPath, QPainterPathStroker, QPen,
                            QShortcut)
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
-                               QFileDialog, QFileSystemModel, QFrame, QInputDialog,
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
+                               QFileDialog, QFrame, QInputDialog,
                                QGridLayout, QHBoxLayout, QLabel, QListView, QListWidget, QListWidgetItem, QMainWindow,
-                               QMessageBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox,
-                               QSplitter, QStackedWidget, QTreeView, QVBoxLayout, QWidget)
+                               QMessageBox, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox,
+                               QStackedWidget, QVBoxLayout, QWidget)
 
 from .. import __version__, log as slog, paths
 from . import theme as T
 from .widgets import (CurveEditor, DetailMeter, FilmicPlot, GradeWheel, GroupDialog, HueRing, SwatchRow, oklch_colour,
                       srgb8_hue)
 
+from .common import (GLOW_HOWTO, POOL, STARS, _LIVE, Job, LensDialog, Settings, _Sig, card, chip,  # noqa: F401
+                     dot_icon, hbox, label, load_thumb, qalpha, run_bg, tag_lens, to_qimage)
+from .common import display8  # noqa: F401
+from .exporting import ExportDialog, QLineEdit_, version_export_path  # noqa: F401
+from .library import LibraryPage  # noqa: F401  (section 24: the Library lives in its own file)
+
 log = slog.get("app")
-POOL = QThreadPool.globalInstance()
-_LIVE: set = set()
-
-
-# ============================================================================================ background jobs
-class _Sig(QObject):
-    done = Signal(object, object)
-    failed = Signal(object, str)
-
-
-class Job(QRunnable):
-    def __init__(self, fn, token=None, on_done=None, on_fail=None):
-        super().__init__()
-        self.fn, self.token, self.sig = fn, token, _Sig()
-        if on_done:
-            self.sig.done.connect(on_done)
-        if on_fail:
-            self.sig.failed.connect(on_fail)
-        _LIVE.add(self)
-
-    def run(self):
-        try:
-            r = self.fn()
-            self.sig.done.emit(self.token, r)
-        except Exception as e:                       # every exception is logged with its traceback (rule 0.3.5)
-            slog.log_exception("background job failed", log)
-            self.sig.failed.emit(self.token, str(e))
-        finally:
-            QTimer.singleShot(0, lambda: _LIVE.discard(self))
-
-
-def run_bg(fn, token=None, on_done=None, on_fail=None):
-    POOL.start(Job(fn, token, on_done, on_fail))
-
-
-def to_qimage(a: np.ndarray) -> QImage:
-    a = np.ascontiguousarray(a)
-    h, w = a.shape[:2]
-    return QImage(a.data, w, h, 3 * w, QImage.Format.Format_RGB888).copy()
-
-
-def display8(arr_pp: np.ndarray) -> np.ndarray:
-    from ..engine.io.export import ExportSpec, to_output
-    return to_output(arr_pp, ExportSpec(format="jpeg", space="srgb", bits=8))
 
 
 def bw8(a8: np.ndarray) -> np.ndarray:
     """A display image as black and white (view only: "Judge in black and white" in Detail by scale)."""
     y = (a8[..., 0].astype(np.float32) * 0.2126 + a8[..., 1] * 0.7152 + a8[..., 2] * 0.0722 + 0.5).astype(np.uint8)
     return np.ascontiguousarray(np.repeat(y[..., None], 3, axis=2))
-
-
-def load_thumb(path: str, size: int = 260) -> np.ndarray:
-    """Embedded camera preview, oriented, reduced (Library and filmstrip: opens folders instantly)."""
-    import rawpy
-    from PIL import Image
-    from ..engine.pipeline.pipeline import apply_orientation
-    with rawpy.imread(path) as r:
-        flip = r.sizes.flip
-        th = r.extract_thumb()
-    if th.format == rawpy.ThumbFormat.JPEG:
-        im = Image.open(io.BytesIO(th.data))
-        im.draft("RGB", (size * 2, size * 2))
-        im = im.convert("RGB")
-    else:
-        im = Image.fromarray(th.data)
-    im.thumbnail((size, size))
-    return np.ascontiguousarray(apply_orientation(np.asarray(im), flip))
-
-
-# ============================================================================================ settings
-class Settings:
-    def __init__(self):
-        self.path = paths.get("SETTINGS") / "app.json"
-        try:
-            self.d = json.loads(self.path.read_text(encoding="utf-8"))
-        except Exception:
-            self.d = {}
-
-    def get(self, k, default=None):
-        return self.d.get(k, default)
-
-    def set(self, k, v):
-        self.d[k] = v
-        try:
-            self.path.write_text(json.dumps(self.d, indent=2), encoding="utf-8")
-        except OSError:
-            pass
-
-
-# ============================================================================================ small widgets
-def label(text, name=None, wrap=False):
-    lb = QLabel(text)
-    if name:
-        lb.setObjectName(name)
-    lb.setWordWrap(wrap)
-    return lb
-
-
-def chip(text, colour=T.DIM):
-    lb = QLabel(text)
-    lb.setObjectName("chip")
-    lb.setStyleSheet(f"color:{colour}; border-color:{T.alpha(colour, 0.33)};")
-    return lb
-
-
-def qalpha(colour: str, a: float) -> QColor:
-    """'#rrggbb' with opacity as a QColor (QColor does not read the style-sheet 'rgba(...)' form)."""
-    c = QColor(colour)
-    c.setAlphaF(a)
-    return c
-
-
-def card():
-    f = QFrame()
-    f.setObjectName("card")
-    return f
-
-
-def dot_icon(colour: str, size: int = 12) -> QIcon:
-    pm = QPixmap(size, size)
-    pm.fill(Qt.GlobalColor.transparent)
-    p = QPainter(pm)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(QColor(colour))
-    p.drawEllipse(1, 1, size - 2, size - 2)
-    p.end()
-    return QIcon(pm)
-
-
-def hbox(*widgets, stretch=True) -> QWidget:
-    """A row of widgets as one widget (for Group.add)."""
-    w = QWidget()
-    lay = QHBoxLayout(w)
-    lay.setContentsMargins(0, 0, 0, 0)
-    for x in widgets:
-        if isinstance(x, tuple):
-            lay.addWidget(*x)
-        else:
-            lay.addWidget(x)
-    if stretch:
-        lay.addStretch(1)
-    return w
 
 
 def changed_keys(a, b) -> frozenset:
@@ -194,6 +61,18 @@ def changed_keys(a, b) -> frozenset:
 
 # Copied settings, shared by Develop and the Library (Copy in one, Paste in either)
 CLIP: dict = {"edit": None, "groups": [], "source": ""}
+# Demosaic methods (plan 23.8, rule 23.1: each with what it is best for and weak at; measured in RESULTS.md)
+DEMOSAICS = [
+    ("rcd", "RCD (default)", "Best for: fine detail and round edges, and it held up best with noise added in our "
+                             "tests. Weak at: nothing measured so far; on very noisy skies try Dual."),
+    ("menon", "Menon", "The Studio's first default (edits made before 2026-11-15 use it). Best for: clean "
+                       "low-ISO detail. Weak at: a little behind RCD everywhere we measured."),
+    ("lmmse", "LMMSE", "Best for: smooth, quiet results in noise; fewest maze patterns. Weak at: slightly softer "
+                       "fine detail."),
+    ("dual", "Dual (RCD + LMMSE)", "Best for: high ISO with both detail and big flat areas: RCD where there is "
+                                   "detail, LMMSE in skies and skin. Weak at: about twice as slow."),
+    ("mhc", "MHC (fast)", "Best for: speed. Weak at: zipper edges and colour fringes on fine detail."),
+]
 RANGE_DEFAULT = {"hue": 25.0, "width": 40.0, "falloff": 25.0, "shift": 0.0, "sat": 0.0, "lum": 0.0}
 
 
@@ -313,18 +192,6 @@ class Histogram(QWidget):
             p.setFont(QFont("Segoe UI", 8))
             p.drawText(r.adjusted(8, 4, -8, -4), Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight,
                        f"highlights clipped {100 * self.clip[0]:.1f}%   shadows {100 * self.clip[1]:.1f}%")
-
-
-GLOW_HOWTO = ("Measure your lens's glow once (per lens, and per aperture if you change it):\n\n"
-              "1. In a dark room, put one small light in the middle of the frame: a small LED torch pointed at the "
-              "camera 3-5 metres away (a candle works if it is far enough to look small). Nothing else bright in "
-              "view.\n"
-              "2. Camera on a tripod, manual exposure, the aperture you use with this lens.\n"
-              "3. Shoot a bracket without moving anything: start where the light is NOT blown at all (it looks "
-              "like a dim dot), then 2 stops longer each time, 6-8 frames, the last one many stops over.\n"
-              "4. In the Library select those frames and press Measure lens glow.\n\n"
-              "From then on, 'measure from lens glow' reads how bright and what colour each blown light was from the "
-              "glow around it. The profile is kept on this PC only (settings\\glow).")
 
 
 class Viewer(QWidget):
@@ -1061,329 +928,6 @@ class Viewer(QWidget):
             self.crop_changed.emit(tuple(round(v, 5) for v in self.crop))
 
 
-# ============================================================================================ lens tagging
-class LensDialog(QDialog):
-    """Pick (or add) the lens for photos taken with contactless glass. Writes nothing itself: the caller stores
-    the choice in each photo's sidecar."""
-
-    def __init__(self, parent=None, current: str = "", count: int = 1):
-        super().__init__(parent)
-        from PySide6.QtWidgets import QDoubleSpinBox, QLineEdit
-        from ..engine.lens import library as lib
-        self.setWindowTitle("Which lens?")
-        self.setMinimumWidth(480)
-        v = QVBoxLayout(self)
-        v.addWidget(label(f"Lens for {count} photo{'s' if count != 1 else ''}", "h2"))
-        v.addWidget(label("Adapted vintage lenses tell the camera nothing. Pick the lens once for the shoot: it is "
-                          "kept in each photo's sidecar and written into exported files.", "dim", wrap=True))
-        self.combo = QComboBox()
-        self.combo.addItem("(none: use what the camera recorded)", "")
-        for e in lib.list_lenses():
-            self.combo.addItem(e.label(), e.name)
-        i = self.combo.findData(current)
-        self.combo.setCurrentIndex(max(i, 0))
-        v.addWidget(self.combo)
-        v.addSpacing(8)
-        v.addWidget(label("Or add a lens of your own (kept private on this PC):", "dim"))
-        grid = QGridLayout()
-        self.name = QLineEdit()
-        self.name.setPlaceholderText("e.g. Voigtlander Heliar 15cm f/4.5")
-        self.focal = QDoubleSpinBox()
-        self.focal.setRange(0, 2000)
-        self.focal.setSuffix(" mm")
-        self.focal.setSpecialValueText("focal length unknown")
-        self.aperture = QDoubleSpinBox()
-        self.aperture.setRange(0, 64)
-        self.aperture.setPrefix("f/")
-        self.aperture.setSpecialValueText("widest aperture unknown")
-        self.character = QCheckBox("Character lens (its softness or glow is the point: no automatic sharpening)")
-        for r, (n, w) in enumerate((("Name", self.name), ("Focal length", self.focal), ("Widest", self.aperture))):
-            grid.addWidget(label(n, "dim"), r, 0)
-            grid.addWidget(w, r, 1)
-        v.addLayout(grid)
-        v.addWidget(self.character)
-        row = QHBoxLayout()
-        row.addStretch(1)
-        cancel = QPushButton("Cancel")
-        cancel.clicked.connect(self.reject)
-        ok = QPushButton("Use this lens")
-        ok.setObjectName("primary")
-        ok.clicked.connect(self._ok)
-        row.addWidget(cancel)
-        row.addWidget(ok)
-        v.addLayout(row)
-        self.choice = current
-
-    def _ok(self):
-        from ..engine.lens import library as lib
-        name = self.name.text().strip()
-        if name:
-            lib.add_lens(lib.LensEntry(name=name, focal_mm=self.focal.value() or None,
-                                       max_aperture=self.aperture.value() or None,
-                                       character=self.character.isChecked()))
-            self.choice = name
-        else:
-            self.choice = self.combo.currentData() or ""
-        self.accept()
-
-
-def tag_lens(files: list, lens: str) -> int:
-    """Store a lens tag in each photo's sidecar. Returns how many were written."""
-    from .. import engine as E
-    n = 0
-    for f in files:
-        try:
-            e = E.load_edit(f)
-            e.lens.tag = lens
-            E.save_edit(f, e)
-            n += 1
-        except OSError as err:
-            log.warning("could not tag %s (read-only drive?): %s", f, err)
-    return n
-
-
-# ============================================================================================ Library
-STARS = ["", "★", "★★", "★★★", "★★★★", "★★★★★"]
-
-
-class LibraryPage(QWidget):
-    open_photo = Signal(str)
-    lens_tagged = Signal(list, str)
-    paste_requested = Signal(list)
-
-    def __init__(self, settings: Settings):
-        super().__init__()
-        self.settings = settings
-        self.files: list = []
-        self.items: dict = {}
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        top = QFrame()
-        top.setObjectName("topbar")
-        tl = QHBoxLayout(top)
-        tl.setContentsMargins(18, 10, 18, 10)
-        self.title = label("Library", "h1")
-        self.path_lbl = label("", "dim")
-        self.filter = QComboBox()
-        self.filter.addItems(["All photos", "★ and up", "★★ and up", "★★★ and up", "★★★★ and up", "★★★★★",
-                              "Picks only", "Hide rejects"])
-        self.filter.currentIndexChanged.connect(self.apply_filter)
-        open_btn = QPushButton("Open folder...")
-        open_btn.clicked.connect(self.choose_folder)
-        lens_btn = QPushButton("◎ Tag lens...")
-        lens_btn.setToolTip("Tell the Studio which (contactless) lens the selected photos were taken with")
-        lens_btn.clicked.connect(self.tag_selected)
-        paste_btn = QPushButton("Paste settings")
-        paste_btn.setToolTip("Paste the settings you copied in Develop onto every selected photo (their master "
-                             "edits). Ctrl+Shift+V")
-        paste_btn.clicked.connect(lambda: self.paste_requested.emit(self.selected_files()))
-        dust_btn = QPushButton("Learn dust map")
-        dust_btn.setToolTip("Find the dust that sits on this camera's sensor, from the selected photos (5-20 "
-                            "different scenes; sky or a plain wall at f/11 or smaller is ideal). Kept privately on "
-                            "this PC; Develop > Retouch > Dust map then heals it in any photo.")
-        dust_btn.clicked.connect(self.learn_dust)
-        glow_btn = QPushButton("Measure lens glow")
-        glow_btn.setToolTip("Measure a lens's glow from a bracket of one small light in the dark (select the "
-                            "frames first). Develop > Light > 'measure from lens glow' then uses it to read how "
-                            "bright blown lights really were.")
-        glow_btn.clicked.connect(self.measure_glow)
-        QShortcut(QKeySequence("Ctrl+Shift+V"), self, activated=lambda: self.paste_requested.emit(
-            self.selected_files()))
-        self.count = chip("0 photos", T.CYAN)
-        tl.addWidget(self.title)
-        tl.addSpacing(16)
-        tl.addWidget(self.path_lbl, 1)
-        tl.addWidget(self.count)
-        tl.addWidget(self.filter)
-        tl.addWidget(lens_btn)
-        tl.addWidget(paste_btn)
-        tl.addWidget(dust_btn)
-        tl.addWidget(glow_btn)
-        tl.addWidget(open_btn)
-        root.addWidget(top)
-        split = QSplitter()
-        self.model = QFileSystemModel()
-        self.model.setRootPath("")
-        from PySide6.QtCore import QDir
-        self.model.setFilter(QDir.Filter.AllDirs | QDir.Filter.NoDotAndDotDot | QDir.Filter.Drives)
-        self.tree = QTreeView()
-        self.tree.setModel(self.model)
-        for c in (1, 2, 3):
-            self.tree.hideColumn(c)
-        self.tree.setHeaderHidden(True)
-        self.tree.clicked.connect(lambda idx: self.load_folder(self.model.filePath(idx)))
-        self.grid = QListWidget()
-        self.grid.setObjectName("grid")
-        self.grid.setViewMode(QListView.ViewMode.IconMode)
-        self.grid.setIconSize(QSize(240, 170))
-        self.grid.setGridSize(QSize(268, 236))
-        self.grid.setResizeMode(QListView.ResizeMode.Adjust)
-        self.grid.setMovement(QListView.Movement.Static)
-        self.grid.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.grid.setUniformItemSizes(True)
-        self.grid.itemDoubleClicked.connect(lambda it: self.open_photo.emit(it.data(Qt.ItemDataRole.UserRole)))
-        split.addWidget(self.tree)
-        split.addWidget(self.grid)
-        split.setSizes([260, 1200])
-        root.addWidget(split, 1)
-        hint = label("Double-click to develop.  Keys: 0-5 rate, P pick, X reject, U clear flag.  "
-                     "Ratings and lens tags are kept in the sidecar beside each raw, never in a catalogue.", "dim")
-        hint.setContentsMargins(18, 6, 18, 8)
-        root.addWidget(hint)
-        self.placeholder = to_qimage(np.full((170, 240, 3), 20, np.uint8))
-
-    def choose_folder(self):
-        d = QFileDialog.getExistingDirectory(self, "Choose a folder of raw files", self.settings.get("folder", ""))
-        if d:
-            self.load_folder(d)
-
-    def load_folder(self, folder: str):
-        from ..cli import collect
-        from ..engine import load_library_meta
-        self.files = collect([folder])
-        self.settings.set("folder", folder)
-        self.path_lbl.setText(folder)
-        self.grid.clear()
-        self.items.clear()
-        for f in self.files:
-            it = QListWidgetItem(QIcon(QPixmap.fromImage(self.placeholder)), "")
-            it.setData(Qt.ItemDataRole.UserRole, f)
-            it.setData(Qt.ItemDataRole.UserRole + 1, load_library_meta(f))
-            self._caption(it)
-            self.grid.addItem(it)
-            self.items[f] = it
-            run_bg(lambda f=f: load_thumb(f), f, self._thumb_ready)
-        self.count.setText(f"{len(self.files)} photos")
-        idx = self.model.index(folder)
-        if idx.isValid():
-            self.tree.setCurrentIndex(idx)
-            self.tree.scrollTo(idx)
-        self.apply_filter()
-
-    def _thumb_ready(self, f, arr):
-        it = self.items.get(f)
-        if it is not None:
-            it.setIcon(QIcon(QPixmap.fromImage(to_qimage(arr))))
-
-    def _caption(self, it):
-        m = it.data(Qt.ItemDataRole.UserRole + 1)
-        flag = {1: "  ✔ pick", -1: "  ✖ reject"}.get(m["pick"], "")
-        it.setText(f"{os.path.basename(it.data(Qt.ItemDataRole.UserRole))}\n{STARS[m['rating']] or '·'}{flag}")
-
-    def apply_filter(self):
-        k = self.filter.currentIndex()
-        for it in self.items.values():
-            m = it.data(Qt.ItemDataRole.UserRole + 1)
-            show = True
-            if 1 <= k <= 5:
-                show = m["rating"] >= k
-            elif k == 6:
-                show = m["pick"] == 1
-            elif k == 7:
-                show = m["pick"] != -1
-            it.setHidden(not show)
-
-    def selected_files(self) -> list:
-        return [it.data(Qt.ItemDataRole.UserRole) for it in self.grid.selectedItems()]
-
-    def tag_selected(self):
-        files = self.selected_files()
-        if not files:
-            QMessageBox.information(self, "Tag lens", "Select the photos taken with that lens first "
-                                    "(click, Shift-click or Ctrl+A).")
-            return
-        from .. import engine as E
-        current = E.load_edit(files[0]).lens.tag
-        dlg = LensDialog(self, current, len(files))
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            n = tag_lens(files, dlg.choice)
-            self.settings.set("last_lens", dlg.choice)
-            self.lens_tagged.emit(files, dlg.choice)
-            QMessageBox.information(self, "Tag lens", f"{n} photo{'s' if n != 1 else ''} tagged: "
-                                    f"{dlg.choice or 'camera record'}.")
-
-    def measure_glow(self):
-        files = self.selected_files()
-        if len(files) < 3:
-            QMessageBox.information(self, "Measure lens glow", GLOW_HOWTO)
-            return
-        from .. import engine as E
-        lens = ""
-        try:
-            from ..engine.io.metadata import read_metadata
-            lens = read_metadata(files[0]).lens or ""
-        except Exception:                                    # noqa: BLE001  (a name is only a suggestion)
-            lens = ""
-        lens, ok = QInputDialog.getText(self, "Measure lens glow", "Which lens is this? (the name your photos "
-                                        "will be matched by)", text=lens)
-        if not ok:
-            return
-
-        def done(_, rep):
-            if rep.get("ok"):
-                msg = (f"Glow profile '{rep['name']}' saved: {rep['frames']} frames, {rep['stops']:.0f} stops "
-                       f"measured, glow holds {100 * max(rep['wing']):.1f}% of the light.\n\nIn Develop pick "
-                       f"Light > Clipped highlights: measure from lens glow.")
-            else:
-                msg = f"No profile made: {rep.get('reason', 'unknown problem')}."
-            if rep.get("skipped"):
-                msg += "\n\nSkipped: " + "; ".join(f"{os.path.basename(p)} ({why})" for p, why in rep["skipped"][:8])
-            QMessageBox.information(self, "Measure lens glow", msg)
-        run_bg(lambda: E.measure_glow_profile(files, lens.strip()), "glow", done,
-               lambda _, err: QMessageBox.warning(self, "Measure lens glow", f"Problem: {err}"))
-
-    def learn_dust(self):
-        files = self.selected_files()
-        if len(files) < 3:
-            QMessageBox.information(self, "Learn dust map", "Select at least 3 photos (5-20 is better) from one "
-                                    "camera, of different scenes. Dust shows best in plain sky or a plain wall shot "
-                                    "at f/11 or smaller; frames of the same scene (a focus stack) count once.")
-            return
-        from .. import engine as E
-        self.dust_files = files
-
-        def done(_, rep):
-            if rep.get("ok"):
-                msg = (f"Dust map for {rep['camera']}: {rep['spots']} spot{'s' if rep['spots'] != 1 else ''} found "
-                       f"in the same place in at least {rep['min_seen']} of {rep['photos']} photos.\n\nSaved on this "
-                       f"PC only (calibration_local). In Develop, Retouch > Dust map heals them in any photo.")
-            else:
-                msg = f"No dust map made: {rep.get('reason', 'unknown problem')}."
-            if rep.get("skipped"):
-                msg += "\n\nSkipped: " + "; ".join(f"{os.path.basename(p)} ({why})" for p, why in rep["skipped"][:8])
-            QMessageBox.information(self, "Learn dust map", msg)
-        QMessageBox.information(self, "Learn dust map", f"Learning from {len(files)} photos in the background "
-                                "(about 2-4 seconds each). A message appears when it is done.")
-        run_bg(lambda: E.learn_dust_map(files), "dust", done,
-               lambda _, err: QMessageBox.warning(self, "Learn dust map", f"Problem: {err}"))
-
-    def keyPressEvent(self, e):
-        from ..engine import save_library_meta
-        key = e.text().lower()
-        its = self.grid.selectedItems()
-        if not its or not key:
-            return super().keyPressEvent(e)
-        for it in its:
-            m = dict(it.data(Qt.ItemDataRole.UserRole + 1))
-            if key in "012345":
-                m["rating"] = int(key)
-            elif key == "p":
-                m["pick"] = 1
-            elif key == "x":
-                m["pick"] = -1
-            elif key == "u":
-                m["pick"] = 0
-            else:
-                return super().keyPressEvent(e)
-            it.setData(Qt.ItemDataRole.UserRole + 1, m)
-            self._caption(it)
-            try:
-                save_library_meta(it.data(Qt.ItemDataRole.UserRole), m)
-            except OSError as err:
-                log.warning("could not save rating (read-only drive?): %s", err)
-        self.apply_filter()
-
-
 # ============================================================================================ Develop
 class DevelopPage(QWidget):
     status = Signal(str)
@@ -2036,9 +1580,17 @@ class DevelopPage(QWidget):
         self.f_gsize = g.add(ValueSlider("  grain size", 0.5, 3.0, 1.0, 0.05, "{:.2f} px"))
         self.f_grough = g.add(ValueSlider("  roughness", 0, 100, 50, 1, "{:.0f}"))
         self.f_gcol = g.add(QCheckBox("  colour grain (like colour film)"))
+        g.add(label("Demosaic (how each pixel's colour is worked out):", "dim", wrap=True))
         self.dem = g.add(QComboBox())
-        self.dem.addItems(["menon", "mhc"])
-        self.dem.setToolTip("Demosaic: Menon 2007 (best measured) or MHC 2004 (fast)")
+        for key, name, text in DEMOSAICS:
+            self.dem.addItem(name, key)
+            self.dem.setItemData(self.dem.count() - 1, text, Qt.ItemDataRole.ToolTipRole)
+        self.dem_text = g.add(label(DEMOSAICS[0][2], "dim", wrap=True))
+        self.dem.currentIndexChanged.connect(lambda i: self.dem_text.setText(DEMOSAICS[i][2]))
+        self.geq = g.add(QCheckBox("Even out the two greens"))
+        self.geq.setToolTip("Some sensors read the two green pixels of each 2x2 group slightly differently, which "
+                            "shows as a fine maze in skies and walls. This evens them out only where they nearly "
+                            "agree, so real detail is left alone. Off by default.")
         self.detail_group = g
         bl.addWidget(g)
         # Masks (local adjustments)
@@ -2219,7 +1771,7 @@ class DevelopPage(QWidget):
         bl.addWidget(g)
         self.full_only += [self.dist_m, self.vig_s, self.vert, self.horiz, self.constrain, self.mc_sh, self.mc_mid,
                            self.mc_hi, self.mc_sc, self.ds_methods_box, self.hdr_engine, self.hdr_engine_text,
-                           self.dem, self.dfr_s, self.tone, self.mcb, self.lut_combo,
+                           self.dem, self.dem_text, self.geq, self.dfr_s, self.tone, self.mcb, self.lut_combo,
                            self.lut_amt, self.curve_group, self.wheel_group, self.hsl_group, self.grade_group,
                            self.hl_mode, self.prof_combo, self.f_gsize, self.f_grough, self.f_gcol, self.glow_combo]
         bl.addStretch(1)
@@ -2256,6 +1808,7 @@ class DevelopPage(QWidget):
         for w in (self.t_toe, self.t_shoulder, self.con, self.l_wh):
             w.changed.connect(lambda *_: self._update_filmic())
         self.c_bw.toggled.connect(lambda _: self._bw_visibility())
+        self.geq.toggled.connect(self.controls_changed)
         for w in (self.dn_m, self.tone, self.wb, self.dem, self.hl_mode):
             w.currentIndexChanged.connect(self.controls_changed)
         self.hl_mode.currentIndexChanged.connect(self._hl_mode_changed)
@@ -2310,7 +1863,8 @@ class DevelopPage(QWidget):
             e.white_balance.mode = "as_shot"
         e.white_balance.temperature = round(self.temp.value())
         e.white_balance.tint = round(self.tint.value())
-        e.demosaic = self.dem.currentText()
+        e.demosaic = self.dem.currentData() or "rcd"
+        e.green_eq = self.geq.isChecked()
         e.lens.auto_ca = self.ca.isChecked()
         e.lens.defringe = self.dfr.isChecked()
         e.lens.defringe_strength = round(self.dfr_s.value(), 3)
@@ -2401,7 +1955,7 @@ class DevelopPage(QWidget):
               self.band, self.mcb, self.dn_m, self.tone, self.wb, self.dem, self.ca, self.dfr, self.dfr_s,
               self.dist, self.dist_m, self.vig, self.vig_s, self.rot, self.vert, self.horiz, self.constrain,
               self.mc, self.mc_sh, self.mc_mid, self.mc_hi, self.mc_sc, self.sh_on, self.sh_s, self.lens_combo,
-              self.aspect, self.c_bw, self.lut_combo, self.hl_mode, self.prof_combo, self.f_gcol]
+              self.aspect, self.c_bw, self.lut_combo, self.hl_mode, self.prof_combo, self.f_gcol, self.geq]
         for w in ws:
             w.blockSignals(True)
         self.dn_on.setChecked(e.denoise.enabled)
@@ -2423,7 +1977,9 @@ class DevelopPage(QWidget):
             e.white_balance.mode, 0))
         self.temp.set_value(e.white_balance.temperature, emit=False)
         self.tint.set_value(e.white_balance.tint, emit=False)
-        self.dem.setCurrentText(e.demosaic if e.demosaic in ("menon", "mhc") else "menon")
+        i = self.dem.findData(e.demosaic)
+        self.dem.setCurrentIndex(i if i >= 0 else self.dem.findData("rcd"))
+        self.geq.setChecked(bool(getattr(e, "green_eq", False)))
         self.ca.setChecked(e.lens.auto_ca)
         self.dfr.setChecked(e.lens.defringe)
         self.dfr_s.set_value(e.lens.defringe_strength, emit=False)
@@ -5087,27 +4643,12 @@ class DevelopPage(QWidget):
 
     def make_it_good(self):
         """Automatic clean-up: noise for the ISO, lens fixes, conservative capture sharpening (not for character
-        lenses). Never touches brightness (Bill's rule)."""
+        lenses). Never touches brightness (Bill's rule). The settings come from the engine (presets/auto.py), which
+        the Library's Process picks uses too."""
         if self.image is None:
             return
-        from ..engine.lens.library import effective_lens, is_character
-        iso = self.image.meta.iso or 100
-        e = self.edit_from_controls()
-        if iso >= 800:
-            e.denoise.enabled = True
-            s = min(1.6, max(0.6, 0.6 + 0.25 * math.log2(iso / 800.0)))
-            from ..engine.pipeline.edit import Denoise
-            e.denoise.method, e.denoise.luma, e.denoise.chroma = "hybrid", round(Denoise().luma * s, 2), \
-                round(Denoise().chroma * s, 2)
-        e.banding = True
-        e.gamut_compress = True
-        lens, _ = effective_lens(self.image.meta, e)
-        character = is_character(lens)
-        if not character:
-            e.sharpen.enabled = True
-            # when Crisp has already raised the finest scale, sharpen less: noise is not sharpened twice (23.11)
-            crisp = 0.0 if "crisp" in (e.detail.off or ()) else max(0.0, e.detail.crisp) / 100.0
-            e.sharpen.amount = round(0.4 * (1.0 - 0.5 * crisp), 2)
+        from ..engine.presets.auto import make_it_good_settings
+        e, character = make_it_good_settings(self.image.meta, self.edit_from_controls())
         self.commit(e, label="Make it good")
         note = "character lens: sharpening left off" if character else "gentle capture sharpening"
         self.status.emit(f"Make it good: noise set for {self.image.meta.iso_label}, {note}, fixing the lens...; "
@@ -5146,141 +4687,6 @@ class DevelopPage(QWidget):
 
 
 # ============================================================================================ Export
-class ExportDialog(QDialog):
-    def __init__(self, files: list, settings: Settings, parent=None):
-        super().__init__(parent)
-        self.files, self.settings = files, settings
-        self.setWindowTitle("Export")
-        self.setMinimumWidth(460)
-        v = QVBoxLayout(self)
-        v.addWidget(label(f"Export {len(files)} photo{'s' if len(files) != 1 else ''}", "h2"))
-        prow = QHBoxLayout()
-        self.preset = QComboBox()
-        self.preset.setToolTip("Export presets: the built-in ones, then yours (kept in settings\\app.json)")
-        self.preset.activated.connect(self._preset_picked)
-        save_p = QPushButton("Save preset...")
-        save_p.clicked.connect(self._save_preset)
-        prow.addWidget(self.preset, 1)
-        prow.addWidget(save_p)
-        v.addLayout(prow)
-        grid = QGridLayout()
-        self.fmt = QComboBox()
-        self.fmt.addItems(["16-bit TIFF", "16-bit PNG", "8-bit PNG", "JPEG"])
-        self.space = QComboBox()
-        self.space.addItems(["Adobe RGB", "sRGB", "ProPhoto RGB", "Display P3"])
-        self.size = QSpinBox()
-        self.size.setRange(0, 20000)
-        self.size.setSpecialValueText("Full size")
-        self.size.setSuffix(" px long edge")
-        self.dest = QLineEdit_(settings.get("export_dir", str(paths.get("OUTPUTS") / "export")))
-        browse = QPushButton("...")
-        browse.clicked.connect(self.browse)
-        self.osh = QComboBox()
-        self.osh.addItems(["None", "Screen", "Glossy paper", "Matte paper"])
-        self.osh.setToolTip("Output sharpening, done after resizing, sized for where the picture will be seen")
-        self.osh_amt = QComboBox()
-        self.osh_amt.addItems(["Low", "Standard", "High"])
-        self.osh_amt.setCurrentIndex(1)
-        for r, (name, w) in enumerate([("Format", self.fmt), ("Colour space", self.space), ("Size", self.size)]):
-            grid.addWidget(label(name, "dim"), r, 0)
-            grid.addWidget(w, r, 1, 1, 2)
-        grid.addWidget(label("Sharpen for", "dim"), 3, 0)
-        grid.addWidget(self.osh, 3, 1)
-        grid.addWidget(self.osh_amt, 3, 2)
-        grid.addWidget(label("Folder", "dim"), 4, 0)
-        grid.addWidget(self.dest, 4, 1)
-        grid.addWidget(browse, 4, 2)
-        v.addLayout(grid)
-        v.addWidget(label("Edits come from each photo's sidecar. Serial numbers and GPS are never written.", "dim",
-                          wrap=True))
-        self._fill_presets(settings.get("export_preset", ""))
-        self._preset_picked(self.preset.currentIndex())
-        for w in (self.fmt, self.space, self.osh, self.osh_amt):
-            w.activated.connect(lambda _: self.preset.setCurrentIndex(0))
-        self.size.editingFinished.connect(lambda: self.preset.setCurrentIndex(0)
-                                          if self.size.value() != self._preset_size else None)
-        row = QHBoxLayout()
-        row.addStretch(1)
-        cancel = QPushButton("Cancel")
-        cancel.clicked.connect(self.reject)
-        go = QPushButton("Export")
-        go.setObjectName("primary")
-        go.clicked.connect(self.accept)
-        row.addWidget(cancel)
-        row.addWidget(go)
-        v.addLayout(row)
-
-    # (format index, colour space index, long edge 0 = full size, sharpen-for index, sharpen amount index)
-    PRESETS = {"Archive: 16-bit TIFF, Adobe RGB, full size": (0, 0, 0, 0, 1),
-               "Print: 16-bit TIFF, ProPhoto RGB, full size": (0, 2, 0, 2, 1),
-               "Web: JPEG, sRGB, 2048 px": (3, 1, 2048, 1, 1),
-               "Social: JPEG, sRGB, 1080 px": (3, 1, 1080, 1, 1)}
-
-    def _fill_presets(self, current=""):
-        self.preset.clear()
-        self.preset.addItem("Custom (as set below)", None)
-        for name, val in self.PRESETS.items():
-            self.preset.addItem(dot_icon(T.VIOLET), name, list(val))
-        for name, val in (self.settings.get("export_presets") or {}).items():
-            self.preset.addItem(dot_icon(T.CYAN), name, list(val))
-        self.preset.setCurrentIndex(max(0, self.preset.findText(current)))
-
-    def _preset_picked(self, idx):
-        val = self.preset.itemData(idx)
-        self._preset_size = self.size.value()
-        if val:
-            val = list(val) + [0, 1][len(val) - 3:] if len(val) < 5 else list(val)
-            self.fmt.setCurrentIndex(int(val[0]))
-            self.space.setCurrentIndex(int(val[1]))
-            self.size.setValue(int(val[2]))
-            self.osh.setCurrentIndex(int(val[3]))
-            self.osh_amt.setCurrentIndex(int(val[4]))
-            self._preset_size = int(val[2])
-
-    def _save_preset(self):
-        name, ok = QInputDialog.getText(self, "Save export preset", "Name:",
-                                        text=f"{self.fmt.currentText()}, {self.space.currentText()}")
-        if not ok or not name.strip():
-            return
-        presets = dict(self.settings.get("export_presets") or {})
-        presets[name.strip()] = [self.fmt.currentIndex(), self.space.currentIndex(), self.size.value(),
-                                 self.osh.currentIndex(), self.osh_amt.currentIndex()]
-        self.settings.set("export_presets", presets)
-        self._fill_presets(name.strip())
-        self._preset_picked(self.preset.currentIndex())
-
-    def browse(self):
-        d = QFileDialog.getExistingDirectory(self, "Export folder", self.dest.text())
-        if d:
-            self.dest.setText(d)
-
-    def spec(self):
-        from ..engine import ExportSpec
-        fmt, bits = [("tiff", 16), ("png", 16), ("png", 8), ("jpeg", 8)][self.fmt.currentIndex()]
-        space = ["adobergb", "srgb", "prophoto", "displayp3"][self.space.currentIndex()]
-        self.settings.set("export_dir", self.dest.text())
-        self.settings.set("export_preset", self.preset.currentText() if self.preset.currentIndex() > 0 else "")
-        return ExportSpec(format=fmt, bits=bits, space=space, long_edge=self.size.value() or None,
-                          sharpen_for=["none", "screen", "glossy", "matte"][self.osh.currentIndex()],
-                          sharpen_amount=["low", "standard", "high"][self.osh_amt.currentIndex()])
-
-
-def QLineEdit_(text):
-    from PySide6.QtWidgets import QLineEdit
-    w = QLineEdit(text)
-    return w
-
-
-def version_export_path(raw_path: str, version: int, spec, dest: str) -> str:
-    """File name for exporting a virtual copy: IMG_0001_Dark_one.tif beside IMG_0001.tif (the master)."""
-    import re
-    from .. import engine as E
-    from ..engine.io.export import EXT
-    tag = re.sub(r"[^\w\-]+", "_", E.list_versions(raw_path)[version]).strip("_") or f"copy{version}"
-    return os.path.join(dest, os.path.splitext(os.path.basename(raw_path))[0] + "_" + tag + spec.suffix +
-                        EXT[spec.format])
-
-
 # ============================================================================================ other workspaces
 class InfoPage(QWidget):
     def __init__(self, title, subtitle, phase=None, bullets=(), colour=T.CYAN):
@@ -5445,7 +4851,21 @@ class HelpPage(InfoPage):
     def __init__(self):
         super().__init__("Help", f"Photographic Studio By Bill {__version__}. Free forever, GPL-3.0. Your photos "
                          "never leave this PC.", None, [
-                             ("Library", "Double-click a photo to develop it. 0-5 rate, P pick, X reject, U clear."),
+                             ("Library", "Point it at a folder (the tree, Open folder, or drop a folder on the "
+                                         "window). Double-click or Enter develops. 0-5 rate, P pick, X reject, U "
+                                         "clear. Filter by rating, camera, lens, ISO, date or name; sort by time, "
+                                         "name, rating or ISO."),
+                             ("Import from card", "Copies the photos from a card into your Photos folder, one "
+                                                  "folder per shooting day (named by the date, or your own name). "
+                                                  "Raws only unless you tick JPEGs or Videos. Every file is "
+                                                  "checked; the card is never changed; a second import copies "
+                                                  "only what is new."),
+                             ("Review", "Space opens the photo large. Left / Right move, 0-5 / P / X / U rate (and "
+                                        "go on to the next), Z or a click is 100%, C compares two side by side, "
+                                        "Enter develops, Space or Esc goes back. Show: Camera preview (instant) or "
+                                        "From the raw (true noise and detail)."),
+                             ("Process picks", "Exports your picks (or the selected photos) in the background, each "
+                                               "with its own edit, or Make it good on photos not edited yet."),
                              ("Develop", "B before/after, click the photo for a 100% loupe, Esc closes it, "
                                          "Ctrl+Z / Ctrl+Y undo and redo, double-click a slider to reset it."),
                              ("Colours mean something", "Cyan = measured on your camera. Violet = shared profile. "
@@ -5632,10 +5052,13 @@ class MainWindow(QMainWindow):
         h.addWidget(self.stack, 1)
         self.setCentralWidget(root)
         self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
+        self.nav.currentRowChanged.connect(self._nav_changed)
         self.nav.setCurrentRow(0)
         self.library.open_photo.connect(self.open_in_develop)
         self.library.lens_tagged.connect(self._lens_tagged)
         self.library.paste_requested.connect(self.paste_to_files)
+        self.library.export_requested.connect(self.export)
+        self.library.save_open_edit = self.develop.save_sidecar
         self.develop.status.connect(lambda t: self.statusBar().showMessage(t, 6000))
         self.develop.export_requested.connect(self.export)
         self.cameras.status.connect(lambda t: self.statusBar().showMessage(t, 6000))
@@ -5649,10 +5072,12 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Ready. Photos never leave this PC.")
         self.tick = QTimer(self, interval=500, timeout=self._jobs)
         self.tick.start()
-        folder = self.settings.get("folder") or str(paths.APP_ROOT)
+        # the last folder; if none, the Photos folder (section 24.3); else the app folder (its sample raws)
+        folder = self.settings.get("folder") or self.settings.get("photos_dir") or str(paths.APP_ROOT)
         if os.path.isdir(folder):
             QTimer.singleShot(50, lambda: self.library.load_folder(folder))
         QTimer.singleShot(1500, self._updates_start)
+        QTimer.singleShot(2500, self.library.start_card_watch)
 
     # ------------------------------------------------------------------------------------ updates
     def _upd_show(self, text, buttons=()):
@@ -5806,14 +5231,20 @@ class MainWindow(QMainWindow):
                 bad.append(os.path.basename(f))
         if self.develop.path in files and self.develop.version == 0 and self.develop.image is not None:
             self.develop.commit(E.load_edit(self.develop.path), label="Paste settings (Library)")
+        self.library.refresh_paths(files)
         msg = f"Settings from {CLIP['source']} pasted onto {n} photo{'s' if n != 1 else ''}."
         if bad:
             msg += f" Could not write: {', '.join(bad[:5])}{'...' if len(bad) > 5 else ''} (read-only drive?)."
         self.statusBar().showMessage(msg, 10000)
 
+    def _nav_changed(self, row):
+        """Back in the Library: the photo just edited shows its new badges (edited, lens tag)."""
+        if row == 0 and getattr(self, "develop", None) is not None and self.develop.path:
+            self.develop.save_sidecar()
+            self.library.refresh_paths([self.develop.path])
+
     def open_in_develop(self, path):
-        thumbs = {f: it.icon() for f, it in self.library.items.items()}
-        self.develop.set_strip(self.library.files, thumbs)
+        self.develop.set_strip(self.library.files, self.library.icons())
         self.nav.setCurrentRow(1)
         self.develop.open(path)
 
@@ -5851,6 +5282,9 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e):
         self.develop.save_sidecar()
+        self.library.meta.stop()
+        self.library.loader.reset()
+        self.library.writer.wait(5000)                 # ratings typed just before closing are saved
         if self.upd_msi is not None:                  # an MSI update downloaded earlier goes in as the Studio closes
             from .. import updates as U
             U.run_msi(self.upd_msi)
@@ -5883,6 +5317,11 @@ def run(argv=None) -> int:
 
 def finish_jobs(timeout_ms: int = 30000) -> None:
     """Let background work end before Python shuts down (a job still running then can crash the exit)."""
+    from .library import EXTRA_POOLS
     POOL.clear()                                   # jobs not started yet are dropped
+    for p in EXTRA_POOLS:
+        p.clear()
     if not POOL.waitForDone(timeout_ms):
         log.warning("background work still running at exit")
+    for p in EXTRA_POOLS:
+        p.waitForDone(5000)

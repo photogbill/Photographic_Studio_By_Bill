@@ -134,11 +134,12 @@ def resolve_iso(candidates: dict) -> tuple[float | None, str]:
     return None, ""
 
 
-def read_metadata(path: str, libraw_iso: float | None = None) -> Metadata:
-    """Read camera metadata. Never raises for a readable file: unknown fields stay empty."""
+def read_metadata(path: str, libraw_iso: float | None = None, head_bytes: int = 24 * 1024 * 1024) -> Metadata:
+    """Read camera metadata. Never raises for a readable file: unknown fields stay empty. ``head_bytes``: how much
+    of the file's start is read (the Library reads 512 KB per photo; CR2/CR3 keep all of it near the start)."""
     md = Metadata()
     try:
-        tm = read_tiff_meta(path)
+        tm = read_tiff_meta(path, head_bytes=head_bytes)
     except Exception as e:                       # unknown container: LibRaw values only
         log.warning("metadata: could not parse TIFF structure of %s (%s); using LibRaw values only", path, e)
         tm = None
@@ -183,3 +184,46 @@ def read_metadata(path: str, libraw_iso: float | None = None) -> Metadata:
     log.debug("metadata %s: %s %s %s (from %s) %s s f/%s", path, md.make, md.model, md.iso_label, md.iso_source,
               md.exposure_s, md.fnumber)
     return md
+
+
+# ------------------------------------------------------------------------------------------ capture time (fast)
+def _jpeg_exif_tiff(buf: bytes):
+    """Find the EXIF TIFF stream inside a JPEG's APP1 segment. Returns (TiffReader, base) or None."""
+    from .tiffmeta import TiffReader
+    if buf[:2] != b"\xff\xd8":
+        return None
+    pos = 2
+    while pos + 4 <= len(buf):
+        if buf[pos] != 0xFF:
+            return None
+        marker = buf[pos + 1]
+        if marker in (0xD9, 0xDA):                      # end of image / start of scan: no EXIF before it
+            return None
+        size = int.from_bytes(buf[pos + 2:pos + 4], "big")
+        if marker == 0xE1 and buf[pos + 4:pos + 10] == b"Exif\x00\x00":
+            return TiffReader(buf, pos + 10)
+        pos += 2 + size
+    return None
+
+
+def read_capture_time(path: str, head_bytes: int = 256 * 1024) -> str:
+    """The capture time a photo records (EXIF DateTimeOriginal, else DateTime), as 'YYYY:MM:DD HH:MM:SS' in camera
+    local time, or '' when it has none. The same field ``read_metadata(...).datetime`` returns, but read from the
+    first 256 KB only (card import reads hundreds of files from a slow card; the full reader reads 24 MB). Works for
+    CR2, CR3 and other TIFF-based raws (NEF, ARW, PEF, DNG, ORF...) and for JPEGs. Never raises."""
+    from .tiffmeta import EXIF_IFD
+    try:
+        with open(path, "rb") as fh:
+            buf = fh.read(head_bytes)
+    except OSError:
+        return ""
+    try:
+        r = _jpeg_exif_tiff(buf)
+        if r is not None:
+            ifd0, _ = r.read_ifd(r.ifd0_offset)
+            exif = r.read_ifd(int(ifd0.tags[EXIF_IFD]))[0].tags if EXIF_IFD in ifd0.tags else {}
+            return str(exif.get(T_DTO, "") or ifd0.tags.get(T_DATETIME, "") or "").strip("\x00 ")
+        tm = read_tiff_meta(path, head_bytes=head_bytes)
+        return str(tm.exif.get(T_DTO, "") or tm.ifd0.get(T_DATETIME, "") or "").strip("\x00 ")
+    except Exception:                                    # noqa: BLE001  (unknown container: caller uses file time)
+        return ""

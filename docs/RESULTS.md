@@ -629,3 +629,78 @@ Numbers for the kept version (synthetic, flat tone weights, 6000 px frame; gain 
   11-12 degrees apart: reported as "they disagree: check by eye". UV-lit violet: 1 degree apart, both far from any
   real light and pulled back to the band. This is the honest behaviour: the agreement is the confidence.
 * **Not built:** the mixed-light blend and the skin-based estimate.
+
+## 2026-11-15 (session 11): Phase 4b, Library and Import from card (plan section 24)
+
+### Library speed on a 2,000-raw folder (tools/bench_library.py, `Library Speed Test.bat`)
+Measured on the Linux test machine (SSD), offscreen, window 1126 x 708 (the Library's share of 1366 x 768). The test
+folder is 2,000 hard links of the two sample raws (CR2 6D and CR3 R5), so after the first few files the operating
+system's own file cache is warm: "cold" here means no thumbnail cache and no index yet, not a first read from a disk.
+
+| Aim (24.7 B) | Cold | Second visit |
+|---|---|---|
+| Window answers within 0.5 s | 0.22 s (first import of the engine) | 0.001 s |
+| First screen of thumbnails: 2 s SSD / 5 s USB HDD cold, 0.5 s cached | 0.64 s | 0.19 s |
+| Ratings and details for all 2,000 | 0.44 s | 0.00 s (all from the index) |
+| Longest wait for the window while loading | 46 ms | 78 ms |
+| Scrolling never stalls (2,000 photos, a screen at a time) | longest stall 30 ms | |
+
+Not measured yet: Bill's USB hard drive with a real, cold folder. Drag a folder from the archive drive onto
+`Library Speed Test.bat` after a restart; the numbers land in outputs\bench_library\results.txt. The number of
+thumbnail readers follows the drive: 2 on a spinning drive (Windows' seek-penalty query), up to 4 on an SSD.
+
+### Card import (engine/io/ingest.py)
+* All 14 named tests of 24.9 pass, plus 12 more (cancel, a copy that does not match, videos outside DCIM, JPEG
+  capture times, the CLI, the record travelling with a moved Photos folder, source inside the destination refused).
+* Capture times are read from the first 256 KB of each file (CR3 and CR2 keep their EXIF in the first 64 KB on all
+  sample files), so scanning a 400-file card reads about 100 MB instead of the 9.6 GB the full metadata reader
+  (24 MB per file) would have read.
+* Check after copying: on Windows the read-back goes past the Windows file cache (FILE_FLAG_NO_BUFFERING), but only
+  after it has proved itself on a 3 MB test file in the destination at the start of each import; if that test
+  fails, the read-back after fsync is used and the log says which kind of check was done. Not yet run on Windows
+  by me: the Windows-only test (`test_uncached_read_back_on_windows`) is the first proof.
+* Raw files compared at the same name and size are hashed before anything is written: an identical photo already
+  there costs one read of each, never a write.
+
+### Review (app/review.py)
+* Camera preview: the 6D and R5 embed full-size JPEGs (5472 x 3648 and 8192 x 5464), so 100% is real camera-JPEG
+  pixels. The fitted view decodes a 2560 px copy in JPEG draft mode (fast); the full size only when zoomed, at most
+  two kept in memory.
+* From the raw on the 6D sample: 4.3 s to the first fitted render on the test machine; 100% windows render on
+  demand like Develop's zoom.
+
+### Demosaic picker (raw/demosaic.py, plan 23.8)
+Harness: the camera's own embedded JPEG, halved (Lanczos) to suppress JPEG artefacts, made roughly linear (^2.2),
+re-mosaicked (RGGB) and demosaicked; PSNR against it. "Noise" adds signal-dependent Gaussian noise of 0.01 / 0.03
+at mid grey (high-ISO-like). Crops: the centre 1200 x 1800 of 3C9A6311 (R5, ISO 125, the earlier harness), and the
+most detailed 800 x 800 of each file. (Absolute numbers differ from the Phase 1 table above: different linearisation.)
+
+| Crop | Noise | MHC | Menon | RCD, ratio (RCD's own) | **RCD, additive (shipped)** | LMMSE |
+|---|---|---|---|---|---|---|
+| 3C9A6311 centre | 0 | 43.60 | 46.83 | 46.33 | **47.30** | 46.60 |
+| 3C9A6311 centre | 0.01 | 41.05 | 42.08 | 42.23 | **42.58** | 42.29 |
+| 3C9A6311 detailed | 0 | 39.32 | 43.60 | 42.41 | **43.80** | 43.29 |
+| 3C9A6311 detailed | 0.01 | 38.12 | 40.59 | 40.16 | **40.92** | 40.62 |
+| 3C9A6311 detailed | 0.03 | 33.56 | 33.78 | 34.05 | **34.23** | 34.17 |
+| 3C9A6198 detailed (soft) | 0 | **49.62** | 49.01 | 49.44 | 49.43 | 49.00 |
+| 3C9A6198 detailed | 0.01 | 36.19 | 35.85 | **36.68** | 36.59 | 36.32 |
+| 3C9A6198 detailed | 0.03 | 27.07 | 26.76 | **27.61** | 27.52 | 27.25 |
+| IMG_3001 detailed (6D, soft) | 0 | **41.02** | 39.43 | 40.36 | 40.49 | 39.77 |
+| IMG_3001 detailed | 0.01 | 36.51 | 35.67 | **36.56** | 36.54 | 36.11 |
+| IMG_3001 detailed | 0.03 | 28.62 | 28.21 | **29.06** | 28.99 | 28.71 |
+| Synthetic scene (unit test) | 0 | 40.45 | 51.62 | 53.71 | **55.15** | 51.14 |
+
+Decisions from this table:
+* **RCD (additive) is the new default** for new edits: ahead of Menon on every crop, clean and noisy, and twice as
+  fast (full 45 MP frame on the 2-core test machine: Menon 8.4 s, RCD 4.2 s, LMMSE 5.0 s, Dual 11.7 s). Sidecars store
+  their algorithm, so every edit made before keeps Menon and renders exactly as before.
+* **Negative result:** RCD's own low-pass *ratio* correction lost 1.2-1.4 dB on the detailed R5 crop (it amplifies
+  errors at colour edges); it won by a hair only on the soft, noisy crops. Replaced by Hamilton-Adams' additive
+  correction; the rest of RCD's method (refined directional discrimination, inverse-gradient weights, colour
+  differences on the diagonals) is kept.
+* **LMMSE is not chosen automatically at high ISO** (plan 23.8 suggested it): RCD scored higher than LMMSE with noise
+  on all three files. LMMSE stays in the picker for its look (smoother, fewer maze patterns), as does Dual.
+* MHC "wins" the two soft crops because the truth there is a smooth, camera-processed JPEG; it loses badly on detail.
+* PSNR does not see maze patterns or zipper edges; the picker's texts say what each is for, and Bill's eye decides.
+* Not done: the **PDAF line filter** for Sony and Nikon Z striping needs a raw that shows the striping (the first
+  outside tester's Sony files) to be built and tested against; green equilibration is in (off by default).

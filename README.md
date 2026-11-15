@@ -25,6 +25,7 @@ One raw file in, one finished file out. Your photos never leave your PC.
 | | Feature | What it means for you |
 |:-:|---|---|
 | ✅ | **Raw Analyzer** | Measures your camera's noise, banding and hot pixels from any raw file, and shows it all in a visual report. |
+| 🧪 | **Import from card and the Library** | Copy a card into your own Photos folder, a folder per shooting day named by the date (or your name for the shoot), every file checked, the card never changed. Then look through the raws, rate and pick with the keyboard, check focus at 100%, compare two side by side, and export your picks in one go, without opening Windows Explorer. |
 | ✅ | **Develop engine** | Turns CR2 and CR3 files into 16-bit Adobe RGB TIFFs, and builds a page comparing each result with your camera's own JPEG. |
 | 🎨 | **Calibration wizard** | Teach the tool your camera: print a checklist, shoot about 120 frames, drop them in. |
 | 🎨 | **Lens wizard** | Teach it your lenses, including vintage lenses with no electronic contacts. |

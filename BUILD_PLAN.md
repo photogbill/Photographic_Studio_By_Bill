@@ -1,6 +1,6 @@
 # Photographic Studio By Bill — Master Build Plan
 
-Version 1.9 · 2026-11-15 · Owner: Bill (photogbill) · Written for the coding agent that builds it
+Version 2.0 · 2026-11-15 · Owner: Bill (photogbill) · Written for the coding agent that builds it
 
 This is the single source of truth for building the software. Read all of it before writing code.
 Build it phase by phase, in order. Do not start a phase until the one before it passes its acceptance tests.
@@ -52,6 +52,7 @@ Build it phase by phase, in order. Do not start a phase until the one before it 
 | Calibration | A wizard: printable checklist → drop files in step by step → calibration runs. ISO 100 up to max and back down (cold pass, hot pass), plus long exposures. No artificial warm-up. Separate lens wizard. |
 | Exposure latitude | Calibration also measures ETTR and ETTL behaviour per body (7.1): how much a frame can be pushed or pulled, and what shadow noise and highlight behaviour result. The wizard must be easy for non-technical users (7.2). |
 | Integrations | Send to Photoshop, Send to PhotoCraft (github.com/storytold/photocraft), a Photoshop UXP panel, and a home inside ATK's Digital Forensics Workshop. |
+| Library and card import | The Library is where the photographer decides what to process, with no need for Windows Explorer. **Import from card** copies photos from a card into the photographer's own Photos folder (they choose it: internal or external drive), always into a subfolder they can name, the shoot date by default. Raws only by default. Section 24. |
 
 ### 0.5 How to work
 - Keep `docs/PROGRESS.md` current: phase, what passed, what is open.
@@ -68,7 +69,7 @@ One application, eight workspaces, each a sidebar section:
 
 | # | Workspace | What it does |
 |---|---|---|
-| 1 | **Library** | Browse folders, cull, rate, compare, filter. No import step, no catalogue lock-in. |
+| 1 | **Library** | Browse folders, cull, rate, compare, filter. No import required, no catalogue lock-in. Optional **Import from card** (section 24). |
 | 2 | **Develop** | The raw editor: denoise, lens fixes, tone, colour, microcontrast, masks, retouch, crop. |
 | 3 | **Dual Pixel Lab** | Everything Dual Pixel RAW can do (section 11). |
 | 4 | **Focus Stack** | Merge a focus bracket into one sharp image (section 12). |
@@ -228,6 +229,7 @@ Order matters. Each stage sits where the physics says it should. Stages 1–9 ar
 - Auto-group brackets and bursts (same second, same settings, changing focus distance or handheld burst) and offer "Send to Focus Stack / Super-Res Stack".
 - **Lens tagging for contactless lenses:** pick the lens once per shoot (or let the app suggest it from the measured rendering signature); it is written into the sidecar and into export metadata.
 - Thumbnail and preview cache inside the app folder, size-capped, with a "clear cache" button.
+- **Added 2026-11-15: see section 24** for what exists today, the Review view, speed on big folders, Process picks, card import and the Photos folder.
 
 ---
 
@@ -568,6 +570,7 @@ Method for each test: implement on a branch → run the benchmark harness → bl
 - **Benchmark harness (`tools/bench`)**: runs every denoiser candidate on (a) synthetic noise from each camera profile added to clean ISO-100 raws, reporting PSNR / SSIM / a perceptual metric / residual-structure score (is anything but noise being removed?), and (b) Bill's real high-ISO files with his DxO JPEGs alongside (`Voigtlander/`, `Zeiss/`, `high iso raw/` — local only). Produces a flashy HTML report with zoomable crops.
 - **Blind test tool for Bill:** shows two unlabeled results side by side at 100%, he clicks the better one, the tool tallies. This is the final judge for denoise, microcontrast, stacking and signatures.
 - **Named tests that must always pass:** candle flame survives hot-pixel removal · catchlights survive · purple flower survives defringe · low-key portrait stays low-key under Auto · no banding introduced on a clean frame · no halos from microcontrast at maximum · sidecar from version N renders identically in version N+1.
+- **Named tests for card import (24.9, in `tests/test_ingest.py`):** the card is never written to (whole tree hashed before and after, once read-only) · a second import copies nothing · same name with different content keeps both · a `.partial` left by a crash is cleaned and copied again · a read error on one file does not stop the others · a card pulled mid-copy leaves no half-written file · too little space blocks the start · raws-only leaves the JPEG of a pair behind and says so · a card with no raws says so · several days make several folders and 02:00 belongs to the day before · unsafe folder names are made safe · a deleted photo is not imported again unless asked · the second copy is identical · no serial number in the log or the import record.
 - **Performance budget** on Bill's PC, tracked per release: open-to-first-view under 1 s (embedded preview), slider response under 50 ms, 45 MP full denoise + export under 30 s on GPU and under 3 min on CPU, 8 GB RAM machine never crashes.
 - **`Run Tests.bat`** runs the lot and prints a green/red summary.
 
@@ -584,6 +587,7 @@ Each phase ends with a double-clickable deliverable and its acceptance test. Do 
 | **2. Calibration engine** | Camera profile builder from the checklist frames (headless), including Quick (dark-frame-only) profiles and Part G exposure latitude; profile format; analyzer upgraded to read/write profiles. | Bill's three bodies profiled; noise curves plotted; profile predicts measured noise on held-out frames within 5%. |
 | **3. Denoiser v1** | Stages 3–7 with candidates a–c, benchmark harness, blind test tool. | Beats the BM3D baseline on the harness; Bill prefers it over his DxO output on at least half of ten blind pairs. If not, iterate here before moving on. |
 | **4. Studio shell** | PySide6 app: Library (browse, rate, cull, compare), Develop viewport with loupe and before/after, sidecars, history, Clean + Light + basic Colour panels, Export. Simple/Full switch. | Bill edits and exports a real shoot end to end without help. |
+| **4b. Library + card import** (added 2026-11-15, **do next**) | Section 24, in four steps (24.9): card import with the Photos folder and dated subfolders, Library speed, Review view, Process picks. | Bill goes from card to exported picks without opening Windows Explorer; the card is never changed; a 2,000-raw folder opens without stalling. |
 | **5. Lens** | Automatic CA and defringe, lensfun bridge, distortion/falloff/perspective/crop (stages 8, 13, 14), lens tagging. | Fringing on Bill's vintage-lens files fixed by one button with no colour damage; named tests pass. |
 | **6. Full develop** | Complete Light and Colour (9.1, 9.2), microcontrast (9.3), detail (9.4), presets/looks, copy/sync, virtual copies, batch export. | Microcontrast passes Bill's blind test against DxO's; "Bill's Candlelight" look ships. |
 | **7. Wizards** | Calibration wizard (7.2 requirements, three levels) and lens wizard in the GUI, Exposure Advisor card (7.1), printable checklists, profile browser, share flow, capture sharpening from PSF (10.5). | A non-technical tester calibrates a camera from the printed checklist with no help. |
@@ -621,6 +625,7 @@ After Phase 4 the app is usable daily. After Phase 6 it replaces a paid raw edit
 4. Phase 10: which focus-stacking software do you use now (the comparison yardstick), and may the builder read the 90mm Voigtländer folder?
 5. Phase 11: do you shoot the moon as stills, video, or both?
 6. Phase 14: where should group members download releases and submit profiles (GitHub only, or something simpler)?
+7. Phase 4b: three builder's defaults in 24.2 stand unless Bill says otherwise: the folder date is the day the photos were taken, a new day starts at 04:00, and folders are grouped by year.
 
 ---
 
@@ -900,3 +905,177 @@ Sources read (definitions only, no code): Hogan, "What is Micro Contrast?" (dslr
 - **Candidate**: "Learning to See Everything in Ultra-High Dynamic Range" (arXiv 2510.07741): one short raw exposure, highlights kept, shadows rebuilt by a denoising network. Same idea as exposing for highlights and letting our calibrated denoiser rebuild the shadows (Bill's ETTL calibration). Test their network against our pipeline; check licence.
 - **Lab only (generative)**: Intrinsic Single-Image HDR (2409.13803); single-shot HDR via a video diffusion prior (2605.11628).
 - **Not used, recorded so they are not re-investigated**: HDRUNet (2105.13084; for developed 8-bit images, not raw); the extreme-dark Mamba network (2508.03336) and latent-space Retinex transformer (2603.15131) (developed-image low-light networks that tend to invent texture); solar CNN denoising (1908.02815; same family as Zero-Shot N2N, nothing new); cloud-shadow removal for solar images (2407.13379) and NeRF relighting of satellite images (NASA NTRS 20230005357; needs many views of one scene).
+
+---
+
+## 24. Library upgrade and card import (Bill's decisions, 2026-11-15)
+
+**Do this next, as Phase 4b (24.9).** Section 6.2 still stands. This section says what exists, what to build now and in what order, and adds card import and the Photos folder.
+
+### 24.1 What Bill asked for, and what exists today
+
+Bill's words: a photo browse tab "where someone can look at all of the raw images and make decisions on which to process, without having to utilize Windows Explorer. Just point it at the folder." And an "import from card option, where it copies all images from an SD card into a folder."
+
+**Exists (do not rebuild):** `LibraryPage` in `studio/app/main.py`: folder tree, thumbnail grid from the embedded camera previews, stars 0–5, pick / reject / clear (P, X, U), a rating filter, double-click to Develop, Tag lens, Paste settings, Learn dust map, Measure lens glow. Ratings live in the sidecar. Exporting a selection exists.
+
+**Missing (this section):**
+1. **No big view.** Thumbnails are 240 px wide, so focus cannot be judged. Nobody can decide what to process from that.
+2. **It will not survive a big folder.** Every folder open extracts every thumbnail from its raw again (nothing is cached on disk) and reads every sidecar before the window answers. Bill's archive is on external drives.
+3. **No card import and no Photos folder.**
+4. **No obvious step from "these are my picks" to "process them".**
+5. No sorting, no filter by camera / lens / ISO / date, no thumbnail size control.
+6. A rating that cannot be saved (read-only drive) only writes a log line. The photographer is not told.
+
+Browsing in place stays: the Library opens any folder as it is, and nothing has to be imported first. Import is an extra, for getting photos off a card.
+
+### 24.2 Decisions
+
+**Bill's own words (do not reopen without asking):**
+- The Library is where the photographer decides what to process. No Windows Explorer needed. "Just point it at the folder."
+- **Import from card** copies the photos from a card into a folder.
+- Imports always go into subfolders: "it should automatically have a sub folder arrangement, not just dump into the same folder."
+- "Give the photographer the option of naming the folder or default it to that day's date."
+- "Allow the photographer to set the default folder, so they can decide for external or internal drives."
+- "Raws only by default."
+
+**Builder's defaults (build as written; Bill has not ruled on these and may flip them, ask in chat):**
+- "That day's date" is the day the photos were **taken**, not the day of the import. Several shooting days on one card make several folders.
+- A new day starts at 04:00, so a night shoot stays in one folder.
+- Folders are grouped by year.
+- Import is a button in the Library, not a ninth sidebar section. It is one action that ends with the new folder open in the Library; rule 0.3.12 is about areas, and this is not one.
+
+Everything else in this section was proposed to Bill in chat on 2026-11-15 and accepted as a whole ("put everything in a build plan").
+
+### 24.3 The Photos folder (where imports go)
+
+- One setting, `photos_dir`, in `settings/app.json`. **The photographer chooses it.** It is not set, and no folder is created, until they confirm it.
+- **First import (or the first press of "Photos folder..."):** a small dialog, "Where should your photos be kept?", with:
+  - a suggestion already filled in: `Photos` beside the app (`paths.PHOTOS = DATA_ROOT / "Photos"`, override `STUDIO_PHOTOS_DIR`). On a portable or git copy that is inside the app folder, which keeps rule 0.3.3. On an MSI install it follows the MSI exception already in `studio/paths.py`.
+  - one quick-pick button per connected drive, with its name and free space ("E: My Passport · 1.2 TB free"). Pressing one proposes `<drive>:\Photos`.
+  - "Choose a folder..." for anything else, and one line of plain text: "An external drive is fine. Raw files are large: about 20 to 60 MB each."
+  - the free space of the chosen drive, always visible.
+- Changing the Photos folder later never moves or copies existing photos. Say so in the dialog.
+- **If the Photos folder is on a drive that is not connected,** say which drive, and offer "Try again" and "Use another folder for this import only". Never fall back to another drive silently.
+- **OneDrive warning (verify):** if the chosen folder is inside a folder that OneDrive syncs (compare against the `OneDrive`, `OneDriveConsumer` and `OneDriveCommercial` environment variables), warn once that raw files will fill cloud storage quickly. Do not block.
+- `paths.get()` creates a folder when it is called. Do not call it for `PHOTOS` before the photographer has confirmed.
+- The Library gets a **Photos** shortcut at the top of the folder tree that jumps to this folder. On start the Library reopens the last folder, as today; if there is none and a Photos folder is set, it opens that.
+- `.gitignore` already ignores `/Photos/` and every `*.psb.json` sidecar wherever it sits (done 2026-11-15; before that, a sidecar beside a sample raw in the project folder would have been committed by `push.bat`). Add a test that `git check-ignore` hides both; skip it when the folder is not a git copy.
+
+### 24.4 Folder arrangement (never one big pile)
+
+- **Layout:** `<Photos folder>\<year>\<folder name>\`, for example `E:\Photos\2026\2026-11-14 Kelly candlelight\`.
+- **Folder name:** a text box that already holds the shoot date as `YYYY-MM-DD`. The photographer may leave it (the default), type after it, or replace it. Whatever is in the box is the folder name. Year-month-day order is fixed, so folders sort by time.
+- **The date is the day the photos were taken** (default), read from each photo. A card emptied the next morning still lands under the right date.
+- **A card with several shooting days** (default): one folder per day, each with its own name box. A tick, "Put everything in one folder", collapses them to one box, pre-filled with the first day's date.
+- **Night shoots** (default): a "day" changes at 04:00, not at midnight, so a shoot that runs past midnight stays in one folder under the date it started. One setting, "A new day starts at", default 04:00. Bill shoots candlelight and night sky; a midnight split would cut his sessions in two.
+- **Year level** (default): on. A setting, "Group folders by year", turns it off. The year is the year of the folder's date.
+- **Capture time** comes from the engine's metadata (`read_metadata(...).datetime`), in camera local time, with no time-zone conversion. If a file has none, use its modified time (cameras set it to the capture time). If neither is usable, the folder is `Undated`.
+- **Names are made safe for Windows:** strip `\ / : * ? " < > |` and control characters, trim trailing dots and spaces, refuse reserved names (CON, PRN, AUX, NUL, COM1–9, LPT1–9), cap at 80 characters. If the box ends up empty, use the date. Show the full path that will be used, live, under the box. Warn if a full file path would pass 240 characters.
+- **A folder that already exists is added to,** never replaced and never duplicated as "(2)". That is how a second import from the same card works.
+- File names stay exactly as the camera wrote them. No renaming in this version.
+
+### 24.5 Import from card: one dialog
+
+Opened by **Import from card...** in the Library (the primary button). One screen:
+
+```text
+ Import from card
+
+ Card         [ EOS_DIGITAL (F:)  ·  412 photos  ·  38 new      v ]   [ Choose a folder instead... ]
+ Copy         [x] Raw files     [ ] JPEGs     [ ] Videos
+              214 JPEGs and 3 videos stay on the card.
+ Into         E:\Photos   [ Change... ]            1.2 TB free  ·  this import needs 1.9 GB
+ Folders      [x] 2026-11-14   26 new   ->   [ 2026-11-14 Kelly candlelight ]
+              [x] 2026-11-15   12 new   ->   [ 2026-11-15                   ]
+              [ ] Put everything in one folder
+              Saved as:  E:\Photos\2026\2026-11-14 Kelly candlelight\
+ Second copy  [ ] Also copy to a second drive   [ ...................... ]   [ Choose... ]
+
+                                                         [ Cancel ]   [ Import 38 photos ]
+```
+
+- **Finding the card:** a "card" is any drive with a `DCIM` folder at its root, whatever Windows calls the drive type. Do not test for "removable": many CFexpress readers (the R5's card) show up as fixed disks. List every candidate with its label, letter, photo count and how many are new. Check again every 2 seconds while the dialog is open. "Choose a folder instead..." imports from any folder, with the same engine and the same rules.
+- **Card found notice:** when a new card appears while the Studio is open, show a quiet card in the Library ("Card found: 412 photos, 38 new. Import..."). Never start copying without a press.
+- **A camera plugged in by USB cable** usually has no drive letter (it speaks MTP). Not supported in this version. When no card is found, say "Put the card in a card reader."
+- **Scan:** walk everything under `DCIM`. Fill the dialog at once from the directory listing (name, size, modified time), then confirm capture times from metadata in the background, one reader on the card at a time. Sort files into raws (`RAW_EXTENSIONS`), JPEG/HEIF, videos, other.
+- **What to copy:** three ticks. Raw files on, JPEGs off, Videos off. The choice is remembered. With raws only, the JPEG of a RAW+JPEG pair stays on the card. Videos may sit outside `DCIM` (for example Sony's `PRIVATE\M4ROOT`; verify per brand) and are looked for only when Videos is ticked. "Other" files are never copied in this version.
+- **Always say what is being left behind,** in the dialog and again in the finish summary: "214 JPEGs and 3 videos stay on the card." Someone who formats the card afterwards must have been told.
+- **A card with no raw files:** do not import nothing in silence. Say "This card has no raw files, only JPEGs" and offer to tick JPEGs.
+- **Days:** one row per shooting day, with a tick, the count of new files, and the folder-name box (24.4). No thumbnail picker in this version: the photographer imports, then chooses in the Library, which is what the Library is for.
+- **Space check before starting:** needed bytes against free bytes on the destination (and on the second-copy drive), keeping 2 GB or 5% free, whichever is larger. If it does not fit, the Import button is off and the line turns red with the shortfall.
+- **Second copy** ("Also copy to a second drive"): off by default, path remembered. Same folder arrangement, written and checked the same way. If the second copy fails, the first still counts; report it in amber.
+- **While it runs:** file count, bytes, speed, time left, the current file name, Cancel. It runs in the background and the Studio stays usable. Keep the PC awake until it ends (verify: `SetThreadExecutionState`).
+- **Finish summary:** copied; already imported (skipped); same-name clashes kept under a new name; failed, each with its reason; left on the card by choice. Then, only if every copied file was checked: "All photos are copied and checked. You can take the card out. The Studio wrote nothing to the card." Buttons: **Open in Library** (default) and View log.
+- "Open in Library" shows the new folder (the first one, if several) with the filter on All photos.
+
+### 24.6 Copy rules (never break these)
+
+One lost shoot in a group of 150,000 is the story everyone hears. Each rule has a named test (24.9).
+
+1. **The card is never changed.** Source files are opened read-only. The Studio never writes, renames, moves or deletes anything on the source, and never formats it. There is no "delete after import" option and none is to be added. The camera formats the card.
+2. **Copy, check, then name.** Write to `<name>.partial` in the destination, flush and `fsync`, check it (rule 3), set the file's modified time to the source's, then rename it to the final name. A crash can only leave `.partial` files; the next import removes the ones it finds in the folders it writes to. (`*.partial` is already in `.gitignore`.)
+3. **Every file is checked.** Hash the bytes while reading the card (one pass over the card; `hashlib.blake2b`, no new dependency), then read the written file back and compare the hash and the size. On a mismatch: remove the `.partial`, try the file once more, then list it as failed. Verify whether the read-back can bypass the Windows file cache without slowing the import badly; if it cannot, keep the read-back after `fsync`, and write in the log which kind of check was done.
+4. **Never overwrite.** Same name and same content (size and hash) in the destination: skip, "already imported". Same name, different content: keep both. The new file becomes `<stem>_2<ext>` (then `_3`, and so on), is logged, and is listed in the summary. Camera counters wrap at 9999 and two bodies can share a prefix, so `IMG_0001.CR3` can be two different photographs.
+5. **Only what is new.** Keep an import record at `<Photos folder>\_studio\imports.jsonl`: one line per imported file, with its original name, size, capture time, hash, where it went and when. A card file whose name, size and capture time match a line is "already imported", even if the photographer has since moved, renamed or deleted the copy. That way deleted rejects do not come back from a card that was not formatted. A tick, "Show photos imported before", overrides it. The record travels with the Photos folder. It is a convenience: if it is missing or unreadable, import still works by looking at the destination folder (rule 4). Never store a camera or card serial number in it (rule 0.3.5).
+6. **One bad file does not stop the rest.** On a read error: retry twice, then mark the file failed and go on. If the card disappears: stop cleanly and report what was done. Starting again picks up where it left off (rules 4 and 5).
+7. **One reader on the card.** Cards do not like parallel reads. Read in 4–8 MB blocks with one thread. Writing the main copy and the second copy may run in parallel from the same blocks.
+8. **Everything is logged** (rule 0.3.5): `logs/import_<date>_<time>.log`, one line per file (source, destination, bytes, hash, seconds, result), then the summary. No serial numbers, no GPS.
+9. **A dry run exists** (`plan_import`, 24.8). It decides every destination path and every skip or rename without touching a disk, and the dialog shows exactly what it returns.
+
+### 24.7 Library: decide what to process, without Explorer
+
+**A. Review view** (6.2's "Cull mode"; the button says **Review**, the wording is Bill's call). This is the main gap.
+- **Space** opens the selected photo large, with the filmstrip below. **Esc** or Space returns to the grid at the same photo. **Left / Right** move. **0–5, P, X, U** work as in the grid. A tick, "Go to the next photo after rating", is on here (off in the grid). **Enter** opens the photo in Develop.
+- **Z** or a click switches between fit and 100% at the pointer; drag to move around. The zoom and position stay when moving to the next photo, so the same eye can be compared across a burst.
+- **C:** two photos side by side (the current one and the next, or the two selected), with zoom and position locked together. Four-up: later.
+- **What is shown is a picker under rule 23.1,** with its plain text beside each option:
+  - *Camera preview* (default): the JPEG the camera embedded in the raw. Best for: speed, it is instant. Weak at: it carries the camera's own sharpening and noise reduction, so it is not the raw. Chip: amber, "Camera preview".
+  - *From the raw*: a quick render by the Studio's own engine, with the photo's saved edit or default settings. Best for: judging noise and real detail. Weak at: slower; the camera preview is shown until it is ready. Chip: cyan, "From the raw".
+  - Verify, per brand, which embedded preview `rawpy` returns and how large it is, and take the largest the file holds. Where that is under about 2,000 px on the long side, 100% must switch to "From the raw" by itself and say so.
+- **Info strip:** file name, date and time, camera, lens (or its tag), ISO, shutter, aperture, focal length; the Dual Pixel badge and the exposure badge (7.1) where they apply.
+- Load the next two photos and the previous one in advance, so the arrow keys never wait.
+- The focus-check overlay and the front/back-focus readout (6.2; section 11, item 6) stay in their own phases.
+
+**B. Speed on big folders.**
+- **Thumbnail cache on disk** (already called for in 6.2): `cache/thumbs/`, keyed on the full path, size and modified time; small JPEGs, about 320 px on the long side. Size-capped (default 1 GB, least recently used removed first), with a "Clear cache" button. It lives in the app's cache folder, never beside the photos, so read-only drives work.
+- **Only what is on screen:** ask for thumbnails for the visible rows plus one screen ahead; drop the requests when the view scrolls on or the folder changes. Replace the `QListWidget` with a `QListView`, a list model and a delegate that paints the stars, flags and badges.
+- **Nothing slow on the window's own thread:** sidecar ratings and metadata are read in the background. Keep them in a small index (`cache/library_index.sqlite`, Python's own `sqlite3`), keyed on path, size and modified time. The sidecar stays the truth; the index can be deleted at any time.
+- Use few workers on a spinning drive (2) and more on an SSD. Measure.
+- **Aims** (measure on a 2,000-raw folder and write the numbers in `docs/RESULTS.md`): the window answers within half a second whatever the folder size; a first screen of thumbnails within 2 s from an SSD and 5 s from a USB hard drive when cold, and within half a second when cached; scrolling never stalls.
+
+**C. Choosing and sending on.**
+- **Process picks...** (and "Process selected..."): one dialog. Which photos (picks / selected / everything shown), what to apply ("each photo's own edit" or "Make it good on photos that have no edit yet"), the export preset and the destination. It runs in the background with a progress bar and Cancel (6.1). This is the step from "decided" to "processed". If "Make it good" lives in the interface code today, move it into the engine first (rule 2.2).
+- **Sort** by capture time (default), file name, rating, ISO. **Filter** by camera, lens, ISO range, date, "not rated yet", and a text box for file names, on top of today's rating filter.
+- **Thumbnail size** slider (about 120 to 400 px).
+- A count chip that tells the story: "412 photos · 38 picks · 12 rejects".
+- **Include subfolders** tick. `collect(recursive=True)` skips folders named `outputs`, `logs`, `cache`, `reports` and the like wherever they are; that is right inside the app folder and wrong inside a photographer's own tree. For the Library, skip only `_studio` and hidden or system folders.
+- Right-click menu: Open in Develop, Process, Tag lens, Paste settings, Show in Explorer, Copy path.
+- Drop a folder on the window to open it. Keep a short list of recent and pinned folders above the tree.
+- **Tidy the top bar:** it holds nine controls today. Left: the path. Middle: filter, sort, size. Right: **Import from card...** (primary), **Review**, **Process picks...**, Open folder..., and a **Tools** menu holding Tag lens, Paste settings, Learn dust map and Measure lens glow. It must still fit at 1366×768 (6.1).
+- **A rating that cannot be saved must be seen:** show a message once per folder and offer the central sidecar folder (section 5).
+- Colour labels and keywords (6.2): later.
+- No deleting from the Library in this version.
+
+### 24.8 Code layout
+
+- `studio/engine/io/ingest.py`, no GUI imports (rule 2.2): `find_cards()`, `scan_source(path)`, `plan_import(files, options)` (pure, no disk writes: the dry run) and `run_import(plan, on_progress, cancel)`, which returns a report. The drive listing sits behind one small function, so tests can fake cards on any system (`STUDIO_CARD_ROOTS` for the Linux test machine).
+- `studio-cli import <source> [--to DIR] [--name TEXT] [--jpegs] [--videos] [--second DIR] [--dry-run]` wraps the same calls, for tests.
+- **New interface code goes in new files:** `studio/app/library.py` (move `LibraryPage` there first, with the tests green), `studio/app/review.py`, `studio/app/importer.py`. `studio/app/main.py` is about 5,900 lines; do not add these to it.
+- `studio/paths.py`: `PHOTOS`, with its override.
+
+### 24.9 Build order, tests and acceptance (Phase 4b)
+
+| Step | Deliverable | Acceptance |
+|---|---|---|
+| **4b-1 Card import** | The copy engine first, with its tests; then the import dialog, the Photos folder dialog and the card-found notice. | Bill puts a card from a real shoot in the reader, presses Import from card, names the folder or leaves the date, and ends in the Library looking at the photos, without opening Explorer. No file on the card has changed. A second import of the same card copies nothing. |
+| **4b-2 Library speed** | Thumbnail cache, on-screen-only loading, background ratings and metadata, the index. | The aims in 24.7 B, measured and recorded. |
+| **4b-3 Review view** | 24.7 A. | Bill rates 200 frames with the keyboard alone and checks focus at 100% without leaving the Library. |
+| **4b-4 Choose and send on** | 24.7 C. | Bill filters to his picks and presses Process picks; the exports appear. A tester on another brand does the whole path, card to exports, with no help. |
+
+**Named tests that must always pass** (add them to the list in section 17): the source is never written to (hash the whole source tree before and after; run once with the source made read-only) · a second import copies nothing · same name with different content keeps both files · a `.partial` left by a crash is cleaned and the file copied again · a read error on one file does not stop the others · a card pulled mid-copy leaves no half-written final file · too little space blocks the start · raws-only leaves the JPEG of a pair behind and says so · a card with no raws says so · several days make several folders, and 02:00 belongs to the day before · unsafe characters in a folder name are made safe · a photo deleted after import is not imported again, and is when "Show photos imported before" is ticked · the second copy is identical to the first · no serial number appears in the log or in the import record.
+
+### 24.10 Later, and out of scope
+
+**Later:** a thumbnail picker inside the import dialog; renaming files on import; cameras over a USB cable (MTP); reading in-camera ratings into the Library (verify per brand); an Eject button; "Move rejects to a `_rejects` folder" (a move, never a delete); four-up compare.
+
+**Out of scope:** any catalogue or database that the photos depend on (section 1: no catalogue lock-in; the index and the import record can both be thrown away), tethered shooting, phone imports.

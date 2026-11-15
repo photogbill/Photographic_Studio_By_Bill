@@ -190,7 +190,9 @@ class Edit:
                                      # glow (measured from the lens glow, raw/glow.py) | none
     glow_profile: str = ""           # lens glow profile for "glow" (settings/glow/<name>.json); "" = from the photo only
     profile: str = ""                # camera profile (.dcp file name); "" = the camera matrix (LibRaw / Adobe DNG)
-    demosaic: str = "menon"          # menon | mhc | bilinear | half
+    demosaic: str = "rcd"            # rcd (default from 2026-11-15) | menon | lmmse | dual | mhc | bilinear | half
+                                     # (sidecars store their algorithm, so older edits keep "menon")
+    green_eq: bool = False           # even out the two greens of each 2x2 quad before demosaicing (plan 23.8)
     tone: Tone = field(default_factory=Tone)
     denoise: Denoise = field(default_factory=Denoise)
     lens: LensFix = field(default_factory=LensFix)
@@ -252,7 +254,7 @@ class Edit:
     def raw_key(self) -> str:
         """Cache key for everything up to and including the camera matrix (stages 1-11)."""
         d = self.to_dict()
-        keep = {k: d[k] for k in ("white_balance", "highlight_mode", "demosaic", "use_optical_black", "denoise", "banding",
+        keep = {k: d[k] for k in ("white_balance", "highlight_mode", "demosaic", "green_eq", "use_optical_black", "denoise", "banding",
                                           "lens", "sharpen", "profile")}
         if d.get("highlight_mode") == "glow":
             keep["glow_profile"] = d.get("glow_profile", "")

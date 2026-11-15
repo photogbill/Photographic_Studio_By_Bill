@@ -328,6 +328,9 @@ def linear_rgb(image: Image, edit: Edit, region=None, half_size: bool = False, c
             with slog.stage("lens.lateral_ca", log, corner_px=round(ca.max_shift_px, 2)):
                 mos = correct_lateral_ca(mos, pat, ca, full_shape=(raw.height, raw.width), origin=(y0, x0))
     algo = "half" if half_size else edit.demosaic
+    if getattr(edit, "green_eq", False):
+        with slog.stage("green_equilibrate", log):
+            mos = dm.green_equilibrate(mos, pat)
     with slog.stage("demosaic", log, algorithm=algo, mp=round(mos.size / 1e6, 1)):
         rgb = dm.demosaic(mos, pat, algo)
     del mos

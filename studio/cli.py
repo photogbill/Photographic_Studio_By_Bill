@@ -2,6 +2,7 @@
 
     python -m studio.cli develop FILES_OR_FOLDERS... [options]   raw -> 16-bit Adobe RGB TIFF (default)
     python -m studio.cli info FILE                               metadata, true ISO, black/white levels
+    python -m studio.cli import SOURCE [--to DIR] [--name TEXT]   copy photos from a card into the Photos folder
     python -m studio.cli diag                                    diagnostic report (for bug reports)
     python -m studio.cli version
 
@@ -60,6 +61,8 @@ def apply_flags(edit, a):
         edit.exposure_ev = a.exposure
     if a.demosaic:
         edit.demosaic = a.demosaic
+    if getattr(a, "green_eq", False):
+        edit.green_eq = True
     if a.tone:
         edit.tone.mode = a.tone
     if a.match_camera_brightness:
@@ -326,6 +329,78 @@ def cmd_diag(a) -> int:
     return 0
 
 
+def _photos_dir_setting() -> str:
+    try:
+        d = json.loads((paths.get("SETTINGS") / "app.json").read_text(encoding="utf-8"))
+        return str(d.get("photos_dir") or "")
+    except (OSError, ValueError):
+        return ""
+
+
+def cmd_import(a) -> int:
+    """Import from card (plan section 24): the same engine and rules as the Studio's Import from card dialog."""
+    from .engine.io import ingest as I
+    src = a.source.strip().strip('"')
+    if not os.path.isdir(src):
+        print(f"Not found: {src}")
+        return 2
+    dest = a.to or _photos_dir_setting()
+    if not dest:
+        print("No Photos folder set yet. Use --to FOLDER, or choose it once in the Studio "
+              "(Library > Import from card).")
+        return 2
+    print(f"Looking at {src} ...")
+    scan = I.scan_source(src, videos=a.videos)
+    I.confirm_capture_times(scan)
+    opts = I.ImportOptions(dest=dest, raws=not a.no_raws, jpegs=a.jpegs, videos=a.videos, second=a.second or "",
+                           show_imported_before=a.show_imported, by_year=not a.no_year, day_start=a.day_start)
+    if a.name:
+        opts.one_folder, opts.names = True, {"*": a.name}
+    plan = I.plan_import(scan, opts)
+    print(f"{scan.photos} photos on the source ({scan.count(I.RAW)} raw, {scan.count(I.JPEG)} JPEG/HEIF, "
+          f"{scan.count(I.VIDEO)} video).")
+    for g in plan.groups:
+        print(f"  {g.key}: {g.new} new of {g.total}  ->  {g.folder}")
+    if plan.imported_before:
+        print(f"  {plan.imported_before} imported before (skipped; --show-imported copies them again)")
+    if plan.left_text():
+        print("  " + plan.left_text())
+    if plan.no_raws:
+        print("  This card has no raw files, only JPEGs (add --jpegs to copy them).")
+    print(f"Needs {I.human_bytes(plan.bytes_needed)}; free on the destination: {I.human_bytes(plan.free)}.")
+    for w in plan.warnings:
+        print("  Note: " + w)
+    if plan.problem:
+        print("Cannot import: " + plan.problem)
+        return 1
+    if not plan.fits or not plan.second_fits:
+        print(f"Not enough free space: {I.human_bytes(plan.shortfall or plan.second_shortfall)} short "
+              f"(the Studio keeps 2 GB or 5% of the drive free).")
+        return 1
+    if a.dry_run:
+        for it in plan.items:
+            where = it.dest or ""
+            extra = f"  (if different: {it.alt})" if it.alt else ""
+            print(f"  {it.action:9s} {it.src.rel}  {('-> ' + where) if where else ''}{extra}")
+        print("Dry run: nothing was copied.")
+        return 0
+    if not plan.to_copy:
+        print("Nothing new to copy.")
+        return 0
+
+    def progress(p):
+        pct = 100.0 * p["bytes_done"] / p["bytes_total"] if p["bytes_total"] else 100.0
+        print(f"\r  {p['done']}/{p['total']} files  {pct:5.1f}%  {p['current'][:40]:40s}", end="", flush=True)
+    rep = I.run_import(plan, on_progress=progress)
+    print()
+    for line in rep.summary_lines():
+        print(line)
+    if rep.all_checked:
+        print("All photos are copied and checked. You can take the card out. The Studio wrote nothing to the card.")
+    print(f"Log: {rep.log_path}")
+    return 0 if rep.all_checked else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="studio-cli", description="Photographic Studio By Bill - command line")
     sub = ap.add_subparsers(dest="cmd")
@@ -339,7 +414,9 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--long-edge", type=int, default=None)
     d.add_argument("--compression", default="none", choices=["none", "zip"])
     d.add_argument("--exposure", type=float, default=None, help="exposure in EV")
-    d.add_argument("--demosaic", choices=["menon", "mhc", "bilinear", "half"])
+    d.add_argument("--demosaic", choices=["rcd", "menon", "lmmse", "dual", "mhc", "bilinear", "half"],
+                   help="demosaic method (default rcd; edits made before 2026-11-15 keep menon)")
+    d.add_argument("--green-eq", action="store_true", help="even out the two greens before demosaicing")
     d.add_argument("--tone", choices=["standard", "camera_match", "linear"])
     d.add_argument("--match-camera-brightness", action="store_true",
                    help="optional: shift brightness per camera body to match the camera JPEG (off by default)")
@@ -395,6 +472,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--microcontrast", type=float, default=0.8)
     p.add_argument("--sharpen", type=float, default=0.6)
     p.add_argument("--no-open", action="store_true")
+    m = sub.add_parser("import", help="copy photos from a card (or a folder) into your Photos folder, checked")
+    m.add_argument("source", help="the card (e.g. F:\\) or a folder")
+    m.add_argument("--to", default=None, help="the Photos folder (default: the one chosen in the Studio)")
+    m.add_argument("--name", default=None, help="put everything in one folder with this name (default: one "
+                   "folder per shooting day, named by its date)")
+    m.add_argument("--jpegs", action="store_true", help="also copy JPEG/HEIF files")
+    m.add_argument("--videos", action="store_true", help="also copy videos")
+    m.add_argument("--no-raws", action="store_true", help="do not copy raw files")
+    m.add_argument("--second", default=None, help="also copy to a second drive (same folders)")
+    m.add_argument("--show-imported", action="store_true", help="copy photos imported before again")
+    m.add_argument("--no-year", action="store_true", help="no year level (Photos\\2026-11-14, not "
+                   "Photos\\2026\\2026-11-14)")
+    m.add_argument("--day-start", default="04:00", help="a new day starts at this time (default 04:00)")
+    m.add_argument("--dry-run", action="store_true", help="show what would happen; copy nothing")
     sub.add_parser("diag", help="write the diagnostic report")
     sub.add_parser("version")
     return ap
@@ -418,6 +509,8 @@ def main(argv=None) -> int:
             return cmd_blindtest(a)
         if a.cmd == "detail-preview":
             return cmd_detail_preview(a)
+        if a.cmd == "import":
+            return cmd_import(a)
         if a.cmd == "diag":
             return cmd_diag(a)
         if a.cmd == "version":

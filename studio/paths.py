@@ -39,6 +39,7 @@ SETTINGS = DATA_ROOT / "settings"
 OUTPUTS = DATA_ROOT / "outputs"
 PROFILES = APP_ROOT / "profiles"                       # shared profiles ship with the app
 CALIBRATION_LOCAL = DATA_ROOT / "calibration_local"   # never shared: hot-pixel, PRNU, dust maps, darks
+PHOTOS = DATA_ROOT / "Photos"                         # the suggested Photos folder for card imports (section 24.3)
 
 # Environment overrides exist for tests and for users who move the cache; the defaults stay beside the app.
 _OVERRIDES = {
@@ -47,6 +48,7 @@ _OVERRIDES = {
     "OUTPUTS": "STUDIO_OUTPUT_DIR",
     "CALIBRATION_LOCAL": "STUDIO_CALIB_DIR",
     "SETTINGS": "STUDIO_SETTINGS_DIR",
+    "PHOTOS": "STUDIO_PHOTOS_DIR",
 }
 
 
@@ -56,6 +58,13 @@ def get(name: str) -> Path:
     p = Path(os.environ[env]) if env and os.environ.get(env) else globals()[name]
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def photos_dir() -> Path:
+    """The suggested Photos folder (``Photos`` beside the app; STUDIO_PHOTOS_DIR overrides). Unlike ``get`` this
+    never creates it: the photographer chooses and confirms where photos are kept first (section 24.3)."""
+    env = os.environ.get(_OVERRIDES["PHOTOS"])
+    return Path(env) if env else PHOTOS
 
 
 def temp_dir() -> Path:

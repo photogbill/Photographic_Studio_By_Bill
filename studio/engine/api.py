@@ -10,8 +10,10 @@ sidecar's edit if one exists, else defaults. ``save_edit`` writes it (atomically
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
+import threading
 
 from .. import __version__, log as slog
 from .io.export import EXT, ExportSpec, write
@@ -21,6 +23,17 @@ from .pipeline.pipeline import Image, open_image, output_size, render, render_vi
 log = slog.get("engine.api")
 
 SIDECAR_SUFFIX = ".psb.json"
+# One sidecar write at a time: the Library saves ratings in the background while Develop saves edits, and each is a
+# read-modify-write of the same file (without this, one could undo the other).
+_SIDECAR_LOCK = threading.RLock()
+
+
+def _locked(fn):
+    @functools.wraps(fn)
+    def wrapper(*a, **k):
+        with _SIDECAR_LOCK:
+            return fn(*a, **k)
+    return wrapper
 
 
 def open(path: str) -> Image:          # noqa: A001 - the plan names this call open()
@@ -28,8 +41,80 @@ def open(path: str) -> Image:          # noqa: A001 - the plan names this call o
 
 
 def sidecar_path(raw_path: str, central_dir: str | None = None) -> str:
+    """Where a photo's sidecar lives: beside the raw, or in the central sidecar folder when the photo's folder was
+    switched to it (a read-only drive, plan section 5 / 24.7 C), or in ``central_dir`` when one is given."""
     name = os.path.basename(raw_path) + SIDECAR_SUFFIX
-    return os.path.join(central_dir, name) if central_dir else raw_path + SIDECAR_SUFFIX
+    if central_dir:
+        return os.path.join(central_dir, name)
+    c = central_folder_for(os.path.dirname(os.path.abspath(raw_path)))
+    return os.path.join(c, name) if c else raw_path + SIDECAR_SUFFIX
+
+
+# ------------------------------------------------------------------------------------------ central sidecars
+# Folders whose sidecars are kept on this PC instead of beside the photos (read-only drives, plan section 5).
+# settings/sidecar_folders.json maps each such folder to settings/sidecars/<id>/. Private, never shared.
+_CENTRAL: dict | None = None
+
+
+def _central_file() -> str:
+    from .. import paths
+    return str(paths.get("SETTINGS") / "sidecar_folders.json")
+
+
+def _central_map() -> dict:
+    global _CENTRAL
+    if _CENTRAL is None:
+        try:
+            with open_text(_central_file()) as fh:
+                _CENTRAL = {os.path.normcase(os.path.abspath(k)): v for k, v in json.load(fh).items()}
+        except (OSError, ValueError):
+            _CENTRAL = {}
+    return _CENTRAL
+
+
+def central_folder_for(folder: str) -> str:
+    """The central sidecar folder used for photos in ``folder`` ('' when their sidecars sit beside them)."""
+    m = _central_map()
+    return m.get(os.path.normcase(os.path.abspath(folder)), "") if m else ""
+
+
+def use_central_sidecars(folder: str, on: bool = True) -> str:
+    """Keep the sidecars of photos in ``folder`` on this PC (settings/sidecars/<id>/) from now on, or stop doing so.
+    Sidecars already beside the photos are copied in once, so ratings and edits made earlier are not lost.
+    Returns the central folder ('' when switched off)."""
+    import hashlib
+    import shutil
+    from .. import paths
+    key = os.path.normcase(os.path.abspath(folder))
+    m = dict(_central_map())
+    if on:
+        cid = hashlib.sha1(key.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+        c = str(paths.get("SETTINGS") / "sidecars" / cid)
+        os.makedirs(c, exist_ok=True)
+        with open_text(os.path.join(c, "_folder.txt"), "w") as fh:
+            fh.write(os.path.abspath(folder) + "\n")
+        try:
+            for n in os.listdir(folder):
+                if n.endswith(SIDECAR_SUFFIX) and not os.path.exists(os.path.join(c, n)):
+                    shutil.copy2(os.path.join(folder, n), os.path.join(c, n))
+        except OSError:
+            pass
+        m[key] = c
+    else:
+        m.pop(key, None)
+        c = ""
+    global _CENTRAL
+    _CENTRAL = m
+    tmp = _central_file() + ".partial"
+    with open_text(tmp, "w") as fh:
+        json.dump({k: v for k, v in m.items()}, fh, indent=2)
+    os.replace(tmp, _central_file())
+    return c
+
+
+def reload_central_sidecars() -> None:
+    global _CENTRAL
+    _CENTRAL = None
 
 
 def load_edit(raw_path: str, central_dir: str | None = None) -> Edit:
@@ -61,12 +146,29 @@ def load_library_meta(raw_path: str, central_dir: str | None = None) -> dict:
     return {"rating": int(m.get("rating", 0)), "pick": int(m.get("pick", 0)), "label": m.get("label", "")}
 
 
+def edit_is_default(edit_dict: dict | None) -> bool:
+    """True when a sidecar's edit is missing or holds only default settings (the photo has no edit yet)."""
+    if not edit_dict:
+        return True
+    try:
+        return Edit.from_dict(edit_dict).to_dict() == Edit().to_dict()
+    except Exception:                                    # noqa: BLE001  (unreadable: treat as edited, leave it be)
+        return False
+
+
+def has_edit(raw_path: str, central_dir: str | None = None) -> bool:
+    """Has this photo been edited (anything but the default settings in its master edit)?"""
+    return not edit_is_default(load_doc(raw_path, central_dir).get("edit"))
+
+
+@_locked
 def save_library_meta(raw_path: str, meta: dict, central_dir: str | None = None) -> str:
     doc = load_doc(raw_path, central_dir)
     edit = Edit.from_dict(doc.get("edit", {})) if doc.get("edit") else Edit()
     return save_edit(raw_path, edit, central_dir, library=meta)
 
 
+@_locked
 def save_edit(raw_path: str, edit: Edit, central_dir: str | None = None, library: dict | None = None) -> str:
     """Write the master edit. Everything else already in the sidecar (ratings, virtual copies, snapshots,
     history) is kept."""
@@ -78,6 +180,7 @@ def save_edit(raw_path: str, edit: Edit, central_dir: str | None = None, library
     return write_doc(raw_path, doc, central_dir)
 
 
+@_locked
 def write_doc(raw_path: str, doc: dict, central_dir: str | None = None) -> str:
     p = sidecar_path(raw_path, central_dir)
     doc.setdefault("app", "Photographic Studio By Bill")
@@ -104,6 +207,7 @@ def load_version(raw_path: str, index: int, central_dir: str | None = None) -> E
     return Edit.from_dict(v[index - 1].get("edit", {}))
 
 
+@_locked
 def save_version(raw_path: str, index: int, edit: Edit, central_dir: str | None = None) -> str:
     if index == 0:
         return save_edit(raw_path, edit, central_dir)
@@ -112,6 +216,7 @@ def save_version(raw_path: str, index: int, edit: Edit, central_dir: str | None 
     return write_doc(raw_path, doc, central_dir)
 
 
+@_locked
 def add_version(raw_path: str, edit: Edit, name: str | None = None, central_dir: str | None = None) -> int:
     """New virtual copy (starting from ``edit``). Returns its index."""
     doc = load_doc(raw_path, central_dir)
@@ -123,6 +228,7 @@ def add_version(raw_path: str, edit: Edit, name: str | None = None, central_dir:
     return len(vs)
 
 
+@_locked
 def delete_version(raw_path: str, index: int, central_dir: str | None = None) -> None:
     if index <= 0:
         raise ValueError("the master edit cannot be deleted (use Reset all instead)")
@@ -136,6 +242,7 @@ def list_snapshots(raw_path: str, central_dir: str | None = None) -> list:
     return load_doc(raw_path, central_dir).get("snapshots", [])
 
 
+@_locked
 def add_snapshot(raw_path: str, name: str, edit: Edit, central_dir: str | None = None) -> None:
     import datetime as _dt
     doc = load_doc(raw_path, central_dir)
@@ -144,6 +251,7 @@ def add_snapshot(raw_path: str, name: str, edit: Edit, central_dir: str | None =
     write_doc(raw_path, doc, central_dir)
 
 
+@_locked
 def delete_snapshot(raw_path: str, index: int, central_dir: str | None = None) -> None:
     doc = load_doc(raw_path, central_dir)
     doc.get("snapshots", []).pop(index)
@@ -153,6 +261,7 @@ def delete_snapshot(raw_path: str, index: int, central_dir: str | None = None) -
 HISTORY_KEEP = 40
 
 
+@_locked
 def save_history(raw_path: str, version: int, steps: list, central_dir: str | None = None) -> None:
     """Undo history for one version: [(label, Edit), ...], oldest first, the last HISTORY_KEEP kept."""
     doc = load_doc(raw_path, central_dir)
