@@ -1,0 +1,78 @@
+# Builds the Windows installer (MSI) on GitHub's own Windows computers and publishes a release.
+# Started by Release.bat, which sends a version tag (v1.2.3). Nothing to do by hand: watch it on the Actions tab.
+# The release gets two downloads with fixed names, so README links and the Studio's updater always find them:
+#   Photographic-Studio.msi            the classic installer (Briefcase + WiX)
+#   Install-Photographic-Studio.bat    the small installer that downloads everything into one folder
+name: Release (Windows installer)
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:          # "Run workflow" on the Actions tab builds a test MSI without publishing it
+
+permissions:
+  contents: write             # to publish the release
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check the version matches the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}".TrimStart("v")
+          $code = python tools/set_version.py --show
+          if ($tag -ne $code) { Write-Error "Tag v$tag but studio/__init__.py says $code"; exit 1 }
+
+      - name: Install Briefcase
+        run: python -m pip install --upgrade pip briefcase
+
+      - name: Put the licence notes inside the app
+        shell: pwsh
+        run: |
+          Copy-Item LICENSE photographic_studio/LICENSE.txt
+          Copy-Item THIRD_PARTY.md photographic_studio/THIRD_PARTY.md
+
+      - name: Build the MSI
+        run: |
+          briefcase create windows --no-input
+          briefcase build windows --no-input
+          briefcase package windows --adhoc-sign --no-input
+
+      - name: Collect the downloads
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release | Out-Null
+          $msi = Get-ChildItem dist -Filter *.msi | Select-Object -First 1
+          if (-not $msi) { Write-Error "No MSI was made"; exit 1 }
+          Copy-Item $msi.FullName release/Photographic-Studio.msi
+          Copy-Item "Install Photographic Studio.bat" release/Install-Photographic-Studio.bat
+          Get-ChildItem release | Format-Table Name, Length
+
+      - name: Keep the MSI with this run (for test builds)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Photographic-Studio-msi
+          path: release/
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          gh release view $tag 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag release/Photographic-Studio.msi release/Install-Photographic-Studio.bat --clobber
+          } else {
+            gh release create $tag release/Photographic-Studio.msi release/Install-Photographic-Studio.bat --title "Photographic Studio $($tag.TrimStart('v'))" --generate-notes
+          }
