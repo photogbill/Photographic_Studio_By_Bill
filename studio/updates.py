@@ -6,9 +6,10 @@ GitHub sees what any web page visit shows it (the PC's internet address and a Us
 version). Every check and download is logged in logs/studio.log.
 
 How a copy is updated depends on how it was installed (``install_kind``):
-    "bat"     Install Photographic Studio.bat (private Python in python/), or "folder": any other non-git copy.
-              The new version is downloaded and unpacked into _update/pending; "Start Studio.bat" puts it in place
-              before the Studio next starts (tools/apply_update.bat), so no file is ever replaced while in use.
+    "bat"     Install Photographic Studio.bat (private Python in python/), "sh" install-linux.sh (Linux), or
+              "folder": any other non-git copy. The new version is downloaded and unpacked into _update/pending;
+              "Start Studio.bat" (tools/apply_update.bat) or start-studio.sh on Linux puts it in place before the
+              Studio next starts, so no file is ever replaced while in use.
               Settings, calibrations, logs and photos are untouched: a release holds only software and shared
               profiles, and nothing is deleted.
     "msi"     the MSI installer (Briefcase layout: the app in <install>/app, packages in <install>/app_packages).
@@ -65,7 +66,7 @@ def is_newer(remote, local=__version__) -> bool:
 
 # ------------------------------------------------------------------------------------------ this copy
 def install_kind(root: Path | None = None) -> str:
-    """How this copy was installed: "git", "msi", "bat" or "folder" (see the module docstring)."""
+    """How this copy was installed: "git", "msi", "bat", "sh" or "folder" (see the module docstring)."""
     root = Path(root or paths.APP_ROOT)
     if (root / ".git").exists():
         return "git"
@@ -73,7 +74,7 @@ def install_kind(root: Path | None = None) -> str:
         return "msi"
     try:
         k = (root / ".install_kind").read_text(encoding="utf-8").strip().lower()
-        if k in ("bat", "msi"):
+        if k in ("bat", "msi", "sh"):
             return k
     except OSError:
         pass
@@ -196,12 +197,25 @@ def downloaded_msi(rel: dict, root: Path | None = None) -> Path | None:
 
 
 # ------------------------------------------------------------------------------------------ handing over
+def launcher_name() -> str:
+    """The file that starts the Studio on this system, as the person sees it."""
+    return "Start Studio.bat" if sys.platform == "win32" else "start-studio.sh"
+
+
 def restart_into_update(root: Path | None = None) -> bool:
-    """Start "Start Studio.bat" on its own (it puts the staged update in place, then opens the Studio). The caller
-    closes the Studio straight after. Windows only."""
+    """Start the launcher on its own ("Start Studio.bat", or start-studio.sh on Linux): it puts the staged update in
+    place, then opens the Studio. The caller closes the Studio straight after."""
     root = Path(root or paths.APP_ROOT)
+    if sys.platform != "win32":
+        sh = root / "start-studio.sh"
+        if not sh.exists():
+            return False
+        subprocess.Popen(["bash", str(sh)], cwd=str(root), start_new_session=True, close_fds=True,  # noqa: S603,S607
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        log.info("restarting into the update (start-studio.sh)")
+        return True
     bat = root / "Start Studio.bat"
-    if sys.platform != "win32" or not bat.exists():
+    if not bat.exists():
         return False
     flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     subprocess.Popen(["cmd", "/c", str(bat)], cwd=str(root), creationflags=flags, close_fds=True)   # noqa: S603

@@ -704,3 +704,67 @@ Decisions from this table:
 * PSNR does not see maze patterns or zipper edges; the picker's texts say what each is for, and Bill's eye decides.
 * Not done: the **PDAF line filter** for Sony and Nikon Z striping needs a raw that shows the striping (the first
   outside tester's Sony files) to be built and tested against; green equilibration is in (off by default).
+
+### Eyes (local/eyes.py)
+Iris finding. Drawn eyes (scene-linear, a real face mesh's eye outline, iris radius 22-30 px):
+
+| Iris (true centre, radius) | Model alone | Classical fit alone | Shipped (model + edge search) |
+|---|---|---|---|
+| (214, 152), 28 | (216.1, 152.3), 26.5 | (215.0, 155.0), 29.4 | (215.0, 155.0), 29.1 |
+| (195, 148), 26 | (196.2, 149.7), 23.3 | (194.9, 148.3), 26.6 | (194.9, 148.3), 26.5 |
+| (228, 154), 30 | (227.1, 152.9), 27.5 | (228.4, 155.0), 29.4 | (228.4, 155.0), 30.2 |
+| (210, 150), 22 | | | (211.7, 151.7), 22.1 |
+
+Real eyes: NASA's public-domain astronaut portrait (scikit-image), irises about 4 px in radius at 512 px: model and
+fit agree to 0.4 px in the centre and 0.1 px in the radius, both on the irises (picture checked). 0.02-0.05 s per
+face with the model, 0.17 s per eye for the fit alone.
+
+Eye colour on a drawn brown iris (radius 26 px), all at amount 100, OKLCh measured on the iris's middle band:
+blue 245.0 deg / 0.20 (target 245 / 0.20), green 147.1 / 0.16 (150 / 0.16), hazel 84.6 / 0.15, grey 235.0 / 0.04,
+violet 303 / 0.17. Skin and eyelids unchanged (largest change 3e-7), pupil within 0.004, catchlight within 0.03.
+Two faults found by looking, both fixed: the colour first leaked onto the eyelids (the soft eye zone; now clipped to
+the mesh's eyelid outline) and left a thin brown rim (the edge feather; now centred on the edge). On the astronaut's
+4 px irises the colours come out weaker (the eyelid outline is coarse at that size); portraits at camera resolution
+have irises of 30-80 px.
+
+Red eye: a brown iris has red 3.4x the mean of green and blue in linear light (drawn) and about 3.8x in a typical
+brown (sRGB 100, 60, 40); a red pupil 7-45x. Detection threshold 5x and brighter than the iris; Red eye spot
+version 2 acts from 4x.
+
+### Face mesh v1 against Face Landmarker v2 (local/faces.py)
+The runner gives the same numbers as Google's own LiteRT interpreter on v2 (largest difference 2.4e-4 on outputs in
+the hundreds, 3e-5 on the face score). Test: the astronaut portrait (eye spacing 43 px) and seven damaged copies;
+each mesh starts from a deliberately off-centre, rotated, 10% too large crop, as a detector would give. No hand-made
+ground truth exists for this face, so two measures:
+
+Distance from the average of the two meshes' clean answers (mean over the 468 points, / eye spacing):
+
+| Copy | v1 all | v2 all | v1 eyes+lips | v2 eyes+lips |
+|---|---|---|---|---|
+| clean | 0.027 | 0.021 | 0.027 | 0.014 |
+| candle-dark (8% light, orange) | 0.027 | 0.020 | 0.025 | 0.013 |
+| half shadow (3 stops) | 0.028 | 0.019 | 0.026 | 0.012 |
+| noise (sigma 0.06) | 0.028 | 0.022 | 0.026 | 0.017 |
+| blur (sigma 1.6 px) | 0.027 | 0.027 | 0.024 | 0.022 |
+| rotated 20 | 0.022 | 0.021 | 0.022 | 0.017 |
+| rotated -35 | 0.027 | 0.023 | 0.024 | 0.019 |
+| small (0.4x) | 0.028 | 0.027 | 0.025 | 0.023 |
+
+Steadiness: how far each mesh moves from its own clean answer (/ eye spacing; lower is steadier), and the iris centre
+from v2's iris points against the shipped iris finder:
+
+| Copy | v1 moves | v2 moves | v2 iris points | iris finder |
+|---|---|---|---|---|
+| clean (off crop only) | 0.011 | 0.006 | 0.007 | 0.008 |
+| candle-dark | 0.014 | 0.008 | 0.003 | 0.007 |
+| half shadow | 0.014 | 0.009 | 0.003 | 0.006 |
+| noise | 0.014 | 0.010 | 0.008 | 0.008 |
+| blur | 0.013 | **0.021** | 0.011 | 0.016 |
+| rotated 20 | 0.012 | 0.005 | 0.007 | 0.007 |
+| rotated -35 | 0.011 | 0.006 | 0.005 | 0.007 |
+| small (0.4x) | 0.012 | **0.016** | 0.006 | 0.018 |
+
+v1 and v2 agree to 1.6 px on average (3.5% of the eye spacing) on the clean photo; v2's irises and the iris model's
+agree to 0.3 px in the centre and 0.1 px in the radius. Speed: v1 66 ms, v2 166 ms per face (two passes, each on the
+crop as given and an evened-out copy). Limits of this test: one real face; the damage is simulated. Shipped: v2 when
+present (decision 83).

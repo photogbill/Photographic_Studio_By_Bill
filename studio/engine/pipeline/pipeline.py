@@ -1507,8 +1507,11 @@ def face_gain(image: Image, edit: Edit, index: int):
     fc = pt.Face(faces[index], sw, sh)
     box, half, k = pt.fetch_plan(fc, sw, sh)
     amt = pt.amounts(edit.portrait)
+    from ..local.eyes import colour_settings
+    colour = colour_settings(edit.portrait)
     hits = [s for s in rt.active(edit.retouch) if rt.overlaps(s, box, sw, sh)]
     key = ("pt", edit.raw_key(), json.dumps(hits, sort_keys=True), json.dumps(faces[index]["pts"]),
+           json.dumps(faces[index].get("irises") or [], sort_keys=True), json.dumps(colour, sort_keys=True),
            json.dumps({a: round(v, 4) for a, v in amt.items() if a != "jawline"}, sort_keys=True),
            edit.stage_versions.get("portrait", 1))
     with image._lock:
@@ -1516,7 +1519,7 @@ def face_gain(image: Image, edit: Edit, index: int):
             return image._memo[key]
     with slog.stage("portrait.face", log, face=index, width=round(fc.W), half=half, k=k):
         rgb, gx, gy, q = _face_copy(image, edit, box, half, k)
-        G = pt.face_gain(rgb, gx, gy, q, fc, amt)
+        G = pt.face_gain(rgb, gx, gy, q, fc, amt, colour)
     res = (G, gx, gy, q)
     with image._lock:
         old = [kk for kk in image._memo if kk[0] == "pt"]
@@ -1663,10 +1666,81 @@ def _s_to_view_pts(image: Image, xs, ys, k: float):
     return np.stack([(np.asarray(xd) + 0.5) * k, (np.asarray(yd) + 0.5) * k], -1)
 
 
-def _face_entry(image: Image, f: dict, k: float, how: str) -> dict:
+def _face_entry(image: Image, f: dict, k: float, how: str, img: np.ndarray | None = None) -> dict:
     S = _view_pts_to_s(image, f["pts"], k)
-    return {"pts": [[round(float(x), 6), round(float(y), 6)] for x, y in S], "conf": round(float(f["conf"]), 3),
-            "how": how, "enabled": True}
+    out = {"pts": [[round(float(x), 6), round(float(y), 6)] for x, y in S], "conf": round(float(f["conf"]), 3),
+           "how": how, "enabled": True}
+    if f.get("mesh"):
+        out["mesh"] = int(f["mesh"])
+    if img is not None:
+        out["irises"] = _iris_entries(image, img, np.asarray(f["pts"], float), k, f.get("iris"))
+    return out
+
+
+def _iris_entries(image: Image, img: np.ndarray, P: np.ndarray, k: float, iris10=None) -> list:
+    """Both irises of a face (eyes.find_irises on the face view), stored as S fractions: centre and an edge point."""
+    from ..local import eyes as ey
+    out = []
+    try:
+        found = ey.find_irises(img, P, iris10)
+    except Exception:                                    # noqa: BLE001  (a face without irises still works)
+        slog.log_exception("iris finding failed", log)
+        return out
+    for e in found:
+        cx, cy = e["c"]
+        Q = np.array([[cx, cy], [cx + e["r"], cy]], float)
+        S = _view_pts_to_s(image, Q, k)
+        out.append({"side": e["side"], "c": [round(float(S[0, 0]), 6), round(float(S[0, 1]), 6)],
+                    "e": [round(float(S[1, 0]), 6), round(float(S[1, 1]), 6)], "how": e["how"]})
+    return out
+
+
+def add_irises(image: Image, edit: Edit) -> list:
+    """The edit's faces with their irises found where they have none yet (faces mapped before the eye tools)."""
+    faces = [dict(f) for f in (edit.portrait or {}).get("faces") or []]
+    if not any(not f.get("irises") for f in faces):
+        return faces
+    img, k = _face_view(image, edit)
+    for f in faces:
+        P = np.asarray(f.get("pts") or [], float)
+        if f.get("irises") or P.shape != (468, 2):
+            continue
+        V = _s_to_view_pts(image, P[:, 0], P[:, 1], k)
+        f["irises"] = _iris_entries(image, img, V, k)
+    return faces
+
+
+def find_red_eyes(image: Image, edit: Edit) -> dict:
+    """Red pupils and blown-out pupils in every face's irises, as Red eye / Pupil spots (auto = "redeye"). Spots
+    already in the edit near a pupil are kept and not added twice. {"spots", "red", "blown", "faces"}."""
+    from ..local import eyes as ey
+    from ..local import portrait as pt
+    from ..local import retouch as rt
+    _, _, sw, sh = image.raw.crop
+    long = float(max(sw, sh))
+    have = [s for s in rt.active(edit.retouch) if s.get("kind") in ("redeye", "pupil")]
+    spots, red, blown = [], 0, 0
+    faces = pt.faces_of(edit.portrait)
+    for f in faces:
+        fc = pt.Face(f, sw, sh)
+        if not fc.irises:
+            continue
+        box = fc.window(0.05, sw, sh)
+        half = fc.W > 1600
+        with slog.stage("eyes.red", log, width=round(fc.W)):
+            rgb, gx, gy, q = _face_copy(image, edit, box, half)
+            from ..local import faces as fz
+            found = ey.find_red_pupils(rgb, gx, gy, q, fc.irises, {"r": fc.P[fz.RIGHT_EYE], "l": fc.P[fz.LEFT_EYE]})
+        for b in found:
+            if any(math.hypot(b["x"] - s["pts"][0][0] * sw, b["y"] - s["pts"][0][1] * sh) < b["r"] for s in have):
+                continue
+            spots.append({"kind": b["kind"], "pts": [[round(b["x"] / sw, 6), round(b["y"] / sh, 6)]],
+                          "size": round(b["r"] / long, 6), "feather": rt.DEFAULT_FEATHER[b["kind"]], "opacity": 100,
+                          "src": [0.0, 0.0], "enabled": True, "auto": "redeye", "v": 2})
+            red += b["kind"] == "redeye"
+            blown += b["kind"] == "pupil"
+    log.info("red eye: %d red, %d blown pupil(s) on %d face(s)", red, blown, len(faces))
+    return {"spots": spots, "red": red, "blown": blown, "faces": len(faces)}
 
 
 def find_faces(image: Image, edit: Edit) -> list:
@@ -1676,7 +1750,7 @@ def find_faces(image: Image, edit: Edit) -> list:
         img, k = _face_view(image, edit)
         found = fz.find(img)
     log.info("faces: %d found (%s)", len(found), ", ".join(f"{f['conf']:.2f} via {f['variant']}" for f in found))
-    return [_face_entry(image, f, k, "found") for f in found]
+    return [_face_entry(image, f, k, "found", img) for f in found]
 
 
 def face_from_eyes(image: Image, edit: Edit, u1: float, v1: float, u2: float, v2: float) -> dict | None:
@@ -1695,7 +1769,7 @@ def face_from_eyes(image: Image, edit: Edit, u1: float, v1: float, u2: float, v2
     log.info("face from eyes: mesh confidence %.2f", best["conf"])
     if best["conf"] < 0.2:
         return None
-    return _face_entry(image, best, k, "eyes")
+    return _face_entry(image, best, k, "eyes", img)
 
 
 def face_outlines(image: Image, edit: Edit) -> list:
@@ -1709,6 +1783,12 @@ def face_outlines(image: Image, edit: Edit) -> list:
         lines = []
         for idx in (fz.FACE_OVAL, fz.RIGHT_EYE, fz.LEFT_EYE, fz.RIGHT_BROW, fz.LEFT_BROW, fz.LIPS_OUTER):
             u, v = s_to_view(image, edit, P[idx + idx[:1], 0], P[idx + idx[:1], 1])
+            lines.append([(float(a), float(b)) for a, b in zip(u, v)])
+        _, _, sw, sh = image.raw.crop
+        from ..local.eyes import iris_list
+        for _, cx, cy, r, _ in iris_list(f, sw, sh):            # the irises, as circles
+            t = np.linspace(0, 2 * np.pi, 33)
+            u, v = s_to_view(image, edit, (cx + r * np.cos(t)) / sw, (cy + r * np.sin(t)) / sh)
             lines.append([(float(a), float(b)) for a, b in zip(u, v)])
         out.append({"lines": lines, "how": f.get("how", "found"), "enabled": f.get("enabled", True),
                     "conf": f.get("conf", 0)})

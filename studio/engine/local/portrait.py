@@ -14,6 +14,10 @@ the jawline, and subtle body sculpting. Everything is stored in the edit as plai
                                  Younger: it reshapes, so it is only ever asked for on its own
       "eyes": 0..100,            brighter whites, fewer red veins, crisper iris
       "teeth": 0..100,           whiter (towards the eye whites' colour, so a warm photo stays warm), a little brighter
+      "iris_light", "iris_clarity", "iris_colour", "ring", "catch": 0..100   the eye tools (local/eyes.py), each
+                                 needing the irises found in the face entry ("irises"); not part of Younger
+      "eye_colour": {"preset": "blue" | "green" | ... | "custom", "hue", "sat", "light", "amount": 0..100,
+                     "which": "both" | "right" | "left"}
       "sculpt": [...]            body sculpting: brush strokes and shape tools (see below)
     }
 
@@ -61,7 +65,8 @@ from . import faces as fz
 log = slog.get("engine.portrait")
 
 LUMA = np.array([0.2880, 0.7119, 0.0001], np.float32)
-FACE_KEYS = ("younger", "lines", "under_eyes", "smile_lines", "even_skin", "jawline", "double_chin", "eyes", "teeth")
+FACE_KEYS = ("younger", "lines", "under_eyes", "smile_lines", "even_skin", "jawline", "double_chin", "eyes", "teeth",
+             "iris_light", "iris_clarity", "iris_colour", "ring", "catch")
 WORK_FACE_PX = 640                    # the face's width on the copy the changes are worked out on (at most)
 SHAPE_TOOLS = ("breast", "butt", "waist", "tummy", "arm", "thigh")
 LIFT_TOOLS = ("breast", "butt")
@@ -74,7 +79,8 @@ def amounts(p: dict | None) -> dict:
     p = p or {}
     y = min(max(float(p.get("younger", 0)), 0.0), 100.0) / 100.0
     share = {"lines": 1.0, "under_eyes": 0.85, "smile_lines": 0.6, "even_skin": 0.4, "jawline": 0.5, "eyes": 0.4,
-             "teeth": 0.3, "double_chin": 0.0}
+             "teeth": 0.3, "double_chin": 0.0, "iris_light": 0.0, "iris_clarity": 0.0, "iris_colour": 0.0,
+             "ring": 0.0, "catch": 0.0}
     out = {}
     for k, s in share.items():
         v = min(max(float(p.get(k, 0)), 0.0), 100.0) / 100.0
@@ -87,8 +93,9 @@ def faces_of(p: dict | None) -> list:
 
 
 def face_active(p: dict | None) -> bool:
+    from .eyes import colour_settings
     a = amounts(p)
-    return bool(faces_of(p)) and any(a[k] > 1e-4 for k in a if k != "jawline")
+    return bool(faces_of(p)) and (any(a[k] > 1e-4 for k in a if k != "jawline") or colour_settings(p) is not None)
 
 
 def sculpt_active(p: dict | None) -> bool:
@@ -112,6 +119,8 @@ class Face:
         self.up = n                                   # towards the forehead
         self.x0, self.y0 = self.P.min(axis=0)
         self.x1, self.y1 = self.P.max(axis=0)
+        from .eyes import iris_list
+        self.irises = iris_list(f, sw, sh)
 
     def window(self, margin: float, sw: int, sh: int):
         m = margin * self.W
@@ -340,7 +349,8 @@ def line_layers(fine: np.ndarray, n: int):
     return dark.astype(np.float32), bright.astype(np.float32)
 
 
-def face_gain(rgb: np.ndarray, gx: float, gy: float, q: float, face: Face, amt: dict) -> np.ndarray:
+def face_gain(rgb: np.ndarray, gx: float, gy: float, q: float, face: Face, amt: dict, colour: dict | None = None
+              ) -> np.ndarray:
     """The gain map (h, w, 3) for one face, on a scene-linear copy ``rgb`` whose pixel (0, 0) is centred at S
     (gx + (q - 1) / 2, gy + (q - 1) / 2), pixels q S-pixels apart. Multiply the photo by it (sampled at each
     pixel's S position) to apply the face effects."""
@@ -444,12 +454,28 @@ def face_gain(rgb: np.ndarray, gx: float, gy: float, q: float, face: Face, amt: 
         lab2[..., 2] = (rb - np.float32(0.75 * at) * wt * np.maximum(rb - ref, 0.0)) * Ll
         lab2[..., 0] *= np.exp2(np.float32(0.2 * at) * wt / 3.0)
         changed = True
+    from . import eyes as ey
+    wide = None                                      # where an eye colour may move channels far (brown to blue)
+    if face.irises and (ey.eye_active(None, amt) or colour is not None):
+        M = ey.eye_masks(face.irises, X, Y, Z["eye"], lab2[..., 0], q,
+                         {"r": face.P[fz.RIGHT_EYE], "l": face.P[fz.LEFT_EYE]})
+        wz = (Z["eye"] > 0.5) & (M["disc"] < 0.2)
+        white_L = float(np.percentile(lab2[..., 0][wz], 80)) if wz.sum() > 6 else None
+        r_work = float(np.median([ir[3] for ir in face.irises])) / q
+        if ey.apply_eyes(lab2, M, amt, colour, white_L, r_work):
+            changed = True
+        if colour is not None:
+            wide = M["disc"]
     if changed:
         out = from_oklab(lab2)
     G = np.ones_like(out)
     ok = rgb > 1e-6
+    out = np.maximum(out, 0.0)
     G[ok] = out[ok] / rgb[ok]
-    G = np.clip(G, 0.3, 3.0)
+    if wide is None:
+        G = np.clip(G, 0.3, 3.0)
+    else:
+        G = np.clip(G, (0.3 - 0.28 * wide)[..., None], (3.0 + 27.0 * wide)[..., None])
     t = np.minimum.reduce([np.arange(h)[:, None] + np.zeros((1, w)), (h - 1 - np.arange(h))[:, None] + np.zeros((1, w)),
                            np.arange(w)[None, :] + np.zeros((h, 1)), (w - 1 - np.arange(w))[None, :] + np.zeros((h, 1))])
     taper = np.clip(t / 4.0, 0.0, 1.0).astype(np.float32)[..., None]

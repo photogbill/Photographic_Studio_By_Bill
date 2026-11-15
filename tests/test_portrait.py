@@ -95,6 +95,38 @@ def test_faces_found_on_a_real_portrait_and_from_two_eye_clicks():
     assert g["conf"] > 0.9 and np.mean(np.hypot(*(g["pts"] - P).T)) < 3.0
 
 
+def test_newer_mesh_runs_agrees_and_falls_back(monkeypatch):
+    """Face Landmarker v2 (478 points, irises included) is used when its file is there; the runner matches
+    TensorFlow Lite's own interpreter on it (ai-edge-litert agreed to 3e-4 when this reference was made); it lands
+    where the older mesh does; and STUDIO_FACE_MESH_V1 (or a missing file) brings the older mesh back."""
+    skimage = pytest.importorskip("skimage")
+    from studio.engine.local import faces as fz
+    from studio.engine.local.tinynet import Model
+    if not fz.available() or not os.path.isfile(os.path.join(fz.model_dir(), fz.MESH_V2)):
+        pytest.skip("face models not installed")
+    y = (np.sin(np.linspace(0, 40, 256 * 256 * 3, dtype=np.float32)).reshape(1, 256, 256, 3) * 0.5 + 0.5)
+    out = Model(os.path.join(fz.model_dir(), fz.MESH_V2))(y.astype(np.float32))
+    lm = [v for v in out.values() if v.size == 1434][0]
+    assert math.isclose(float(lm.sum()), 118292.14, rel_tol=1e-4)
+    im = skimage.data.astronaut().astype(np.float32) / 255.0
+    monkeypatch.delenv("STUDIO_FACE_MESH_V1", raising=False)
+    f2 = fz.find(im)[0]
+    assert f2["mesh"] == 2 and f2["pts"].shape == (468, 2) and f2["iris"].shape == (10, 2)
+    from studio.engine.local import eyes as ey
+    for side, q in (("r", f2["iris"][:5]), ("l", f2["iris"][5:])):        # each iris centre sits in its eye (the
+        idx = fz.RIGHT_EYE if side == "r" else fz.LEFT_EYE                  # top and bottom edge points may be
+        assert ey._polygon_mask(f2["pts"][idx], q[:1, :1], q[:1, 1:])[0, 0]  # under the lids)
+        assert 0.15 < np.mean(np.hypot(*(q[1:] - q[0]).T)) / ey.eye_roi(f2["pts"], side)[4] < 0.28
+    monkeypatch.setenv("STUDIO_FACE_MESH_V1", "1")
+    assert not fz.mesh_v2_available()
+    f1 = fz.find(im)[0]
+    assert f1["mesh"] == 1 and f1["iris"] is None
+    assert np.mean(np.hypot(*(f1["pts"] - f2["pts"]).T)) < 0.03 * fz.size_of(f2["pts"])
+    monkeypatch.delenv("STUDIO_FACE_MESH_V1")
+    monkeypatch.setattr(fz, "MESH_V2", "not_there.tflite")
+    assert not fz.mesh_v2_available() and fz.find(im)[0]["mesh"] == 1
+
+
 # ------------------------------------------------------------------------------------------ face work
 def _face_setup(h=700, w=700, width=420.0):
     from studio.engine.local import portrait as pt

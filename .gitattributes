@@ -2,5 +2,7 @@
 *.bat text eol=crlf
 *.cmd text eol=crlf
 *.ps1 text eol=crlf
+# Linux scripts keep LF line endings, or bash stops at the first line ("bad interpreter").
+*.sh text eol=lf
 # Face models are binary files.
 *.tflite binary

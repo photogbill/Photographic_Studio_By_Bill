@@ -16,6 +16,7 @@ Updated 2026-11-15 (session 11: Phase 4b, plan section 24). Plan: BUILD_PLAN.md 
 | 6. Full develop | **Built, awaiting Bill's eye** | Session 4: **Microcontrast** (stage 16) and **capture sharpening** (stage 12). Session 5: the full **Light** panel (highlights, shadows, whites, blacks in stops; **Smart lighting**, region by region with a guided filter; **Auto** that sets highlights / whites / blacks only and keeps low-key photos low-key, the named test; a point **tone curve** per channel), the **Colour** stage (OKLCh: saturation, vibrance with skin protection, **Pick white** eyedropper, **Auto** white balance (grey-edge), a **DxO-style colour wheel** with several ranges, **HSL** in 8 bands, **colour grading** wheels with balance and blending, **black & white** with a colour mixer, **.cube LUTs**), **Looks** (8 starter looks incl. a draft **"Bill's Candlelight"**, Save look), **Copy / Paste settings** (Develop, and Library for many photos), **virtual copies**, a labelled **History** with **snapshots** (kept in the sidecar), **export presets**. Session 6: **highlight rebuild** (clipped channels get the colour of the clipped area's edge), **Dehaze** (dark-channel prior), **Texture**, **film grain** (size, roughness, mono or colour), **film toe** and **highlight roll-off** with a drawn film curve, a **parametric curve** (four regions), **Auto colour** (vibrance from measured colourfulness), **B&W filter presets**, a **camera-profile picker** reading DNG camera profiles (.dcp), and **output sharpening** for screen / glossy / matte in Export. Acceptance: Bill's microcontrast blind test against DxO; "Bill's Candlelight" tuned by Bill. |
 | 6b. Plan section 23 (session 10) | **Part built, awaiting Bill's eye** | **Detail by scale** (23.11) replaces the Microcontrast and Texture sliders: six methods, each with its own switch, amount and "best for / weak at" text (Tonal, Local contrast, Crisp, Tonal separation, Veil removal, Broad), stackable under one shared budget per scale; Simple level = Amount + Balance (starts on the Tonal side) + presets (Tonal, Crisp, Both, Soft glow); **Judge in black and white**; a live meter (amber when a guard limits the stack) and the balance number; diffraction note from f/8. **Denoise safeguard** (23.12, on by default, with a count). **Auto HDR** on one raw (23.6): Light / Medium / Heavy / Highlights only / Low-key / Shadows only, Amount 0-150%, three engines (exposure fusion, local Laplacian, Multi-Scale Retinex), noise-aware lift, off until turned on. **Auto white balance** (23.9): Grayness Index beside grey edge, both shown with their agreement, two light sources reported, **Keep the mood**. Method texts on the denoise picker (23.1). **Not built yet from section 23:** 23.2 neural runtime and 23.3 learned denoisers, 23.4 highlight methods (by area, detail transfer, grain match), 23.5 Dual Pixel HDR, 23.7 stacking, 23.8 PDAF line filter (needs a Sony raw that shows striping), 23.9 mixed light and skin estimate. **Session 11 built 23.8's demosaic picker** (see the 23.8 row). Acceptance: Bill's blind test of Detail by scale, in colour and in black and white. |
 | 6c. Demosaic picker (session 11, plan 23.8) | **Built, awaiting Bill's eye** | Develop > Detail (Full): **RCD** (new default), Menon, **LMMSE**, **Dual** (RCD + LMMSE by local contrast), MHC, each with its best-for / weak-at text; **Even out the two greens** (green equilibration, off by default). RCD measured ahead of Menon on every crop, clean and noisy, and twice as fast; older edits keep Menon (their sidecars say so). Not built: the PDAF line filter. |
+| 9d. Eyes (session 11) | **Built, awaiting real portraits** | Find faces now also finds each **iris** (MediaPipe Iris model, which Bill downloaded, run by tinynet; the edge then sets the size; without the model a classical fit). Portrait: **Eye colour** (Blue, Green, Hazel, Grey, Amber, Brown, Violet or Pick a colour; amount; both eyes or one), and in Full **iris brightness, iris clarity, iris colour strength, outer ring, catchlights** (all 0 by default, not part of Younger). **Fix red eye**: red pupils become Red eye spots, pupils the flash blew out white become **Pupil** spots (amber, removable). Retouch > **Pupil**: click a blown pupil or an animal's glowing eye. Checked on NASA's public-domain astronaut portrait (irises found on real eyes, model and fit agree) and drawn eyes (colour hits its hue to within 4 degrees, skin, pupil and catchlight untouched). Not built: an iris placed by hand. |
 | 7, 8 | Not started | Wizards; Dual Pixel Lab. |
 | 9. Local + retouch | **Built (masks session 6, retouch session 7), awaiting Bill's eye** | **Masks** in Develop: Brush (feather, flow, erase, **auto mask**), Gradient, Radial, **Object** (one click selects a leaf; Alt-click takes a part away), **Colour**, **Brightness** and now **Skin** (skin tones of any complexion); shapes combine (add, subtract, only-where), invert, amount; inside each mask: exposure, contrast, highlights, shadows, whites, blacks, temperature, tint, saturation, vibrance, texture, clarity, dehaze, sharpness, noise reduction and now **Smooth skin** (softens blotches and uneven colour, keeps pores and edges). **Retouch** (its own group): **Heal**, **Clone** and **Red eye** spots, clicked or brushed along a hair, source chosen automatically and draggable; **Find dust** (one photo); **Learn dust map** in the Library (the dust on your sensor, learnt from several photos, kept on this PC) and **Dust map** in Develop to heal it in any photo (also `--dust-map` for batch develop). New **100% view** (Z, mouse wheel or the 100% button; drag to move) where every tool works. Still to do: depth and focus range masks (need Dual Pixel, Phase 8), denoise strength and microcontrast per mask, editing a drawn gradient or circle by its handles, content-aware fill for large removals. Acceptance: Bill selects one leaf in two clicks and adjusts it; dust removed automatically. |
 | 9c. Person mask | **Built (session 9), awaiting a real portrait** | Masks > **Person**: everyone in the photo selected on this PC (MediaPipe person segmentation + BlazePose 33 body points), then a **Part**: whole person, background, skin, face, hair, clothes, arms, legs, torso; snapped to the photo's edges. Also in "Refine" (+ / - / x Person). |
@@ -54,6 +55,8 @@ Updated 2026-11-15 (session 11: Phase 4b, plan section 24). Plan: BUILD_PLAN.md 
   bracket of one small light in a dark room; the Help button in the profile list explains how).
   Session 9 adds the **Portrait** group (below Retouch): Find faces or Click the eyes, Remove blemishes, Younger and
   the face sliders, and Body sculpting (brushes and shape tools). The face models are in `models\faces` (no install).
+* `install-linux.sh` (new, for Linux PCs): `bash install-linux.sh` installs or updates the Studio in one folder;
+  `start-studio.sh` (or the menu entry it offers) starts it.
 * `Detail Preview.bat` (new): drag raws or a folder on it, or double-click for the Voigtlander folder.
 * `Develop Raws.bat`, `Denoise Preview.bat`, `Run Benchmark.bat`, `Analyze Raws.bat`, `Calibrate Camera.bat`,
   `Blind Test vs DxO.bat`: as before. `studio develop` also takes `--microcontrast 0.6 --sharpen --fix-lens --rotate`,
@@ -408,3 +411,50 @@ Updated 2026-11-15 (session 11: Phase 4b, plan section 24). Plan: BUILD_PLAN.md 
     three test files. Bill's eye on real high-ISO files (maze patterns, smoothness) may change that.
 78. **Green equilibration** is a per-photo tick (off by default) applied to the mosaic right before demosaicing; it
     corrects only where the two greens' local ratio is within 8 % of 1, so real detail is left alone.
+79. **The iris is found with the face** (plan 9.7 follow-up): MediaPipe Iris on each eye's crop gives where the iris
+    is; a short search along the iris edge then sets its size (the model read radii about 8% small on drawn eyes; with
+    the edge search they are within 4%). Without the model file, the classical fit does the whole job. Faces mapped
+    before this session get their irises the first time an eye tool is used.
+80. **Eye colour moves the iris to the colour's typical lightness relative to the eye whites**, not to an absolute
+    value, so an eye in candle shadow stays in shadow; the change is capped (x0.75 to x1.35 in OKLab lightness), half
+    of the iris's own colour variation is kept (the fibres), and the pupil and catchlights are left out. The gain
+    map may move channels further inside the iris only (brown to blue needs about 10x more blue); everywhere else the
+    old 0.3x-3x safety limit stands.
+81. **Red eye, version 2**: a brown iris is red-dominant in linear light (red 3-4x the other two), so version 1 of the
+    Red eye spot could grey the iris round a pupil. New Red eye spots (clicked or from Fix red eye) act only on
+    strong red; spots in older edits keep version 1 and render as before. Fix red eye only calls a pupil red when it
+    is strongly red and brighter than the iris around it.
+82. **No "sharpen eyes" slider**: the face work is a smooth gain map (decision 45), which cannot carry fine
+    sharpening. For crisper eyes, draw a Brush mask over them and raise its Sharpness.
+83. **Face Landmarker v2 replaces the first face mesh when its file is present** (models/faces/
+    face_landmarker_v2.tflite, taken unchanged from Google's face_landmarker.task). Measured on the astronaut and seven
+    damaged copies (RESULTS): it moves about half as much under candle-dark colour, a 3-stop half shadow, noise and
+    tilts of 20-35 degrees, which is the light this Studio is for; it is less steady than the first mesh on a blurred
+    face (0.021 vs 0.013 of the eye spacing) and a face at 0.4x size (0.016 vs 0.012). It is 2.5x slower (0.17 s vs
+    0.07 s per face), small next to the rest of Find faces. Its 10 iris points are the first guess for the eye tools,
+    finished by the same edge search as the iris model's ("mesh" in the face's iris record). Without the file, or
+    with STUDIO_FACE_MESH_V1 set, everything runs as before. Faces already saved keep their points; only new finds
+    use the new mesh, and each face records which mesh made it ("mesh": 1 or 2).
+84. **Linux: `install-linux.sh`, `start-studio.sh`, `tools/ensure_env.sh`** (for a friend of Bill's). The same design
+    as the Windows installer: one file, asks for a folder (`~/Photographic-Studio`), downloads the newest release
+    (or `main` if the release predates the Linux files), copies it in without deleting anything, writes
+    `.install_kind` = "sh". Python: the PC's own 3.10+ in `.venv`; if it cannot make one (Debian/Ubuntu/Mint without
+    python3-venv) or the packages will not install, a private python-build-standalone CPython 3.12 in `python/`, its
+    file found in the release's SHA256SUMS and checked against it (no GitHub API, so no rate limit); if that fails
+    too, it offers the system packages (asked, sudo). The window's system libraries (Qt's xcb/Wayland plugins,
+    typically `libxcb-cursor0`) are found with ldd and mapped to apt/dnf/zypper/pacman packages; installing them
+    is asked first, with one `apt-get update` retry. The launcher applies a staged in-app update before starting
+    (Help > Check for updates now works on Linux: `restart_into_update` starts start-studio.sh), logs the last start
+    to `logs/launcher.log`, and when started from the menu reports failures by desktop notification. Each script
+    is read whole before it runs (`main "$@"; exit $?`) and updates write new files (`cp --remove-destination`), so a
+    script can replace itself safely. Run end to end on Ubuntu 24.04 (glibc 2.39): fresh install, update over it
+    (user files kept), git copy (Python only), the private-Python path against a stand-in for GitHub (good checksum
+    used, wrong checksum refused), the missing `libxcb-cursor0` found and installed, the window opened on a real X
+    server (Xvfb) from start-studio.sh, and an in-app update applied through start-studio.sh. Not tested: a real
+    desktop session (Wayland, HiDPI) and the live GitHub downloads, which this sandbox cannot reach.
+    Bazzite and the other Fedora Atomic systems (read-only system image; Bazzite's dnf refuses host changes): the
+    Studio lives in the home folder, so it installs the same way. The installer recognises them (/run/ostree-booted),
+    first tries the window (a Wayland session needs none of the X11 libraries; Qt falls back from Wayland to X11 by
+    itself), and only if it cannot open offers `sudo rpm-ostree install <packages>` (default no, reboot needed).
+    Tested with a stand-in rpm-ostree: window opens, nothing offered; X11 library missing, the layer is offered
+    and not run without a yes.

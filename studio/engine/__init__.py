@@ -36,6 +36,7 @@ _EXPORTS = {
     "find_faces": ".pipeline.pipeline", "face_from_eyes": ".pipeline.pipeline", "face_outlines": ".pipeline.pipeline",
     "find_blemishes": ".pipeline.pipeline", "sculpt_source": ".pipeline.pipeline", "shape_up": ".pipeline.pipeline",
     "find_people": ".pipeline.pipeline", "suggest_crops": ".pipeline.pipeline",
+    "add_irises": ".pipeline.pipeline", "find_red_eyes": ".pipeline.pipeline",
     "composition_subject": ".pipeline.pipeline",
     "detail_balance": ".pipeline.pipeline", "hdr_report": ".pipeline.pipeline",
     "AutoHDR": ".pipeline.edit",

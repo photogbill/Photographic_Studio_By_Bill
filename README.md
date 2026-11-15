@@ -56,17 +56,23 @@ Canon **CR2** and **CR3** come first. The Raw Analyzer has been run on files fro
 
 **Prefer a classic installer?** Download **[Photographic-Studio.msi](https://github.com/photogbill/Photographic_Studio_By_Bill/releases/latest/download/Photographic-Studio.msi)** from the [Releases page](../../releases/latest). It is bigger (Python and every package are inside), installs for your Windows account only, and shows up in Settings > Apps with an Uninstall button.
 
+**Linux:** download **[install-linux.sh](https://github.com/photogbill/Photographic_Studio_By_Bill/releases/latest/download/install-linux.sh)**, then in a terminal run `bash install-linux.sh`.
+- It asks where to put the Studio (`~/Photographic-Studio` unless you pick another folder) and downloads everything into that one folder. It uses your own Python 3.10 or newer, or downloads a private copy if yours is too old.
+- No root for the Studio itself. If the window needs system libraries your PC lacks (often `libxcb-cursor0`), it names them and asks before installing them with your package manager; that one step asks for your password.
+- It offers an applications-menu entry; otherwise start it with `start-studio.sh` in the folder. Run the installer again at any time to update.
+- Works on glibc Linux for x86_64 and ARM64 (Ubuntu, Mint, Debian, Fedora, openSUSE, Arch and similar), including Bazzite and other Fedora Atomic systems: everything goes in your home folder, and use Desktop Mode, not Game Mode. Not on Alpine (musl).
+
 Windows may show a blue **"Windows protected your PC"** box for either file. That is because the Studio is not code-signed (signing costs money every year, and this is a free project). Click **More info**, then **Run anyway**.
 
 **Updates:** in the Studio, **Help > Check for updates**. It is off until you turn it on. When it is on, the Studio asks GitHub for the newest version number (nothing else is sent, never a photo) and can put the new version in place for you.
 
 ## Using it
 
-- **Start Studio.bat** (or the desktop shortcut) opens the Studio.
+- **Start Studio.bat** (or the desktop shortcut) opens the Studio; on Linux, `start-studio.sh` or the menu entry.
 - Drag **CR2** or **CR3** files, or a whole folder, onto **Analyze Raws.bat** for a report on your camera's files.
 - Drag raw files onto **Develop Raws.bat** to develop them. Your TIFFs and the comparison page land in the `outputs` folder.
 
-**Developers:** clone the repository with git and double-click **Install.bat**. It uses your own Python (3.10 or newer) in a private environment inside the folder, or downloads a private copy of Python if your PC has none. Installers never overwrite a git copy.
+**Developers:** clone the repository with git and double-click **Install.bat** (on Linux: `bash install-linux.sh` inside the clone). It uses your own Python (3.10 or newer) in a private environment inside the folder, or downloads a private copy of Python if your PC has none. Installers never overwrite a git copy.
 
 ## Your photos stay yours
 

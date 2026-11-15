@@ -3,6 +3,8 @@ Face models used by Photographic Studio By Bill (Portrait section)
 face_detection_short_range.tflite   BlazeFace, short range
 face_detection_full_range.tflite    BlazeFace, full range
 face_landmark.tflite                Face Mesh (468 points)
+iris_landmark.tflite                MediaPipe Iris (iris centre and edge, eyelids), added 2026-11-15
+face_landmarker_v2.tflite           Face Landmarker v2 / FaceMesh-V2 (478 points, irises included), added 2026-11-15
 
 Copyright Google LLC. Part of MediaPipe (https://github.com/google-ai-edge/mediapipe).
 Licensed under the Apache License, Version 2.0 (the "License"); you may not use these files except in compliance
@@ -10,11 +12,18 @@ with the License. A copy of the License is in the file LICENSE in this folder.
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
 an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 
-The files are unmodified. They were taken from the MediaPipe models bundled in the Python package
+The files are unmodified. The first three were taken from the MediaPipe models bundled in the Python package
 face-detection-tflite 0.6.0 (PyPI, MIT licence for its code; the models keep Google's Apache 2.0 licence).
+iris_landmark.tflite was downloaded from Google's MediaPipe asset storage
+(https://storage.googleapis.com/mediapipe-assets/iris_landmark.tflite).
+face_landmarker_v2.tflite is face_landmarks_detector.tflite extracted unchanged from Google's face_landmarker.task
+bundle (https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task);
+only the file name was changed.
 
 Model cards:
   Bazarevsky et al., "BlazeFace: Sub-millisecond Neural Face Detection on Mobile GPUs", CVPR Workshops 2019.
   Kartynnik et al., "Real-time Facial Surface Geometry from Monocular Video on Mobile GPUs", CVPR Workshops 2019.
+  Ablavatski et al., "Real-time Pupil Tracking from Monocular Video for Digital Puppetry", CVPR Workshops 2020.
+  Google, "MediaPipe FaceMesh-V2" model card (2023), linked from the MediaPipe Face Landmarker guide.
 
 They are run by the Studio's own NumPy code (studio/engine/local/tinynet.py, GPL-3.0); TensorFlow is not used.

@@ -239,7 +239,7 @@ def _describe_masks(old: list, new: list) -> str:
 
 
 def _describe_retouch(old: list, new: list) -> str:
-    kinds = {"heal": "heal", "clone": "clone", "redeye": "red eye"}
+    kinds = {"heal": "heal", "clone": "clone", "redeye": "red eye", "pupil": "pupil"}
     if len(new) > len(old):
         added = new[len(old):]
         if len(added) > 1:

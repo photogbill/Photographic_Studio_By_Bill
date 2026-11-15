@@ -37,6 +37,26 @@ def test_install_kind(tmp_path):
     plain = tmp_path / "plain"
     plain.mkdir()
     assert U.install_kind(plain) == "folder"
+    sh = tmp_path / "sh"
+    sh.mkdir()
+    (sh / ".install_kind").write_text("sh\n")
+    assert U.install_kind(sh) == "sh"
+
+
+def test_restart_into_update_starts_the_right_launcher(tmp_path, monkeypatch):
+    """Linux: start-studio.sh is started on its own (it puts the update in place); Windows: Start Studio.bat."""
+    import subprocess
+    calls = []
+    monkeypatch.setattr(subprocess, "Popen", lambda args, **kw: calls.append((args, kw)))
+    monkeypatch.setattr(U.sys, "platform", "linux")
+    assert not U.restart_into_update(tmp_path)                    # no launcher, nothing started
+    (tmp_path / "start-studio.sh").write_text("#!/usr/bin/env bash\n")
+    assert U.restart_into_update(tmp_path)
+    args, kw = calls[-1]
+    assert args == ["bash", str(tmp_path / "start-studio.sh")] and kw["start_new_session"]
+    assert U.launcher_name() == "start-studio.sh"
+    monkeypatch.setattr(U.sys, "platform", "win32")
+    assert U.launcher_name() == "Start Studio.bat"
 
 
 class _Resp(io.BytesIO):

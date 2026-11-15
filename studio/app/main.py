@@ -61,6 +61,8 @@ def changed_keys(a, b) -> frozenset:
 
 # Copied settings, shared by Develop and the Library (Copy in one, Paste in either)
 CLIP: dict = {"edit": None, "groups": [], "source": ""}
+EYE_COLOURS = [("none", "Unchanged"), ("blue", "Blue"), ("green", "Green"), ("hazel", "Hazel"), ("grey", "Grey"),
+               ("amber", "Amber"), ("brown", "Brown"), ("violet", "Violet"), ("custom", "Pick a colour...")]
 # Demosaic methods (plan 23.8, rule 23.1: each with what it is best for and weak at; measured in RESULTS.md)
 DEMOSAICS = [
     ("rcd", "RCD (default)", "Best for: fine detail and round edges, and it held up best with noise added in our "
@@ -430,7 +432,7 @@ class Viewer(QWidget):
         for k, sp in enumerate(self.spots):
             rad = max(3.0, sp["r"] * L)
             col = QColor(T.AMBER) if sp.get("auto") else QColor(T.CYAN)
-            if sp.get("kind") == "redeye":
+            if sp.get("kind") in ("redeye", "pupil"):
                 col = QColor(239, 68, 68)
             if sp.get("sel"):
                 col = QColor(T.TEXT)
@@ -1710,7 +1712,10 @@ class DevelopPage(QWidget):
         grp.setExclusive(False)
         for kind, text, tip in (("heal", "Heal", "Repair a spot with texture from nearby, matched to its light"),
                                 ("clone", "Clone", "Copy another place exactly (for hard edges and patterns)"),
-                                ("redeye", "Red eye", "Click a red pupil")):
+                                ("redeye", "Red eye", "Click a red pupil"),
+                                ("pupil", "Pupil", "Click a pupil the flash blew out (white or golden), or an "
+                                 "animal's glowing eye (green, yellow, white): it becomes a dark pupil and keeps "
+                                 "its catchlight")):
             b = QPushButton(text)
             b.setCheckable(True)
             b.setToolTip(tip)
@@ -1769,6 +1774,7 @@ class DevelopPage(QWidget):
         self.snap_list.setFixedHeight(90)
         self.snap_list.itemDoubleClicked.connect(lambda _: self.restore_snapshot())
         bl.addWidget(g)
+        self.full_only += getattr(self, "full_only_portrait", [])
         self.full_only += [self.dist_m, self.vig_s, self.vert, self.horiz, self.constrain, self.mc_sh, self.mc_mid,
                            self.mc_hi, self.mc_sc, self.ds_methods_box, self.hdr_engine, self.hdr_engine_text,
                            self.dem, self.dem_text, self.geq, self.dfr_s, self.tone, self.mcb, self.lut_combo,
@@ -3851,6 +3857,15 @@ class DevelopPage(QWidget):
                    "and deepens the jaw's own shadow a little. Skin only: a collar or a beard under the chin stays "
                    "put. Not part of Younger."),
                   ("eyes", "Eyes", "Brighter whites, fewer red veins, a crisper iris"),
+                  ("iris_light", "  iris brightness", "Brightens the coloured part of the eye (not the pupil or the "
+                   "catchlights). Keep it gentle in candle-lit or low-key photos: a bright iris in a dark face "
+                   "looks false. Not part of Younger."),
+                  ("iris_clarity", "  iris clarity", "Brings out the fibres of the iris. Not part of Younger."),
+                  ("iris_colour", "  iris colour strength", "Richer iris colour. Not part of Younger."),
+                  ("ring", "  outer ring", "Darkens the outer edge of the iris (the limbal ring): a classic "
+                   "retouch that makes eyes look brighter and younger. Not part of Younger."),
+                  ("catch", "  catchlights", "Brightens the catchlights already in the eyes (nothing is painted "
+                   "in). Not part of Younger."),
                   ("teeth", "Teeth", "Whiter teeth, towards the colour of the eye whites (so a warm candle-lit "
                                      "photo stays warm), and a touch brighter"))
     SHAPES = (("breast", "Breast lift & size", 0.85, "Drag across one breast (do each side on its own). Lift raises "
@@ -3864,6 +3879,7 @@ class DevelopPage(QWidget):
               ("thigh", "Slim thigh", 0.4, "Drag along the thigh, hip to knee. Slim narrows it across."))
 
     def _build_portrait(self, bl):
+        self.full_only_portrait = []
         g = Group("Portrait", "Faces are found on this PC (Google's MediaPipe face models, run by the Studio "
                               "itself). Every slider starts at 0 and stays subtle at 100: the aim is the person on "
                               "a good day, not a different person. Blemishes become Heal spots in Retouch (amber), "
@@ -3905,6 +3921,35 @@ class DevelopPage(QWidget):
             sl = g.add(ValueSlider(name, 0, 100, 0, 1, "{:.0f}", tip))
             sl.changed.connect(self.controls_changed)
             self.pt_sl[key] = sl
+            if key in ("iris_light", "iris_clarity", "iris_colour", "ring", "catch"):
+                self.full_only_portrait.append(sl)
+                sl.changed.connect(lambda *_: self._ensure_irises())
+        # eye colour and red eye (need the irises, found with the faces)
+        g.add(label("Eye colour", "dim"))
+        self.ec_preset = QComboBox()
+        for key, name in EYE_COLOURS:
+            self.ec_preset.addItem(name, key)
+        self.ec_preset.setToolTip("A new colour for the iris: the fibres, the pupil and the catchlights stay. Big "
+                                  "changes (dark brown to pale blue) can look painted; smaller ones look real.")
+        self.ec_which = QComboBox()
+        for key, name in (("both", "Both eyes"), ("right", "Person's right"), ("left", "Person's left")):
+            self.ec_which.addItem(name, key)
+        g.add(self.ec_preset)
+        g.add(self.ec_which)
+        self.ec_amount = g.add(ValueSlider("  colour amount", 0, 100, 0, 1, "{:.0f}", "How far the iris moves to "
+                                           "the new colour (0 = unchanged)"))
+        self.ec_preset.activated.connect(self._eye_colour_picked)
+        self.ec_which.activated.connect(lambda _: self._portrait_changed("Portrait: eye colour"))
+        self.ec_amount.changed.connect(lambda *_: self._portrait_changed("Portrait: eye colour"))
+        self.ec_custom = None
+        self.pt_red = QPushButton("Fix red eye")
+        self.pt_red.setObjectName("primary")
+        self.pt_red.setToolTip("Finds red pupils (and pupils the flash blew out white) in the mapped eyes and fixes "
+                               "them: Red eye and Pupil spots in Retouch (amber), removable one by one. For an "
+                               "animal's glowing eyes use Retouch > Pupil.")
+        self.pt_red.clicked.connect(self.fix_red_eye)
+        self.pt_red.setStyleSheet("padding: 5px 8px;")
+        g.add(hbox(self.pt_red))
         g.add(label("Body sculpting", "dim"))
         self.sc_btn = {}
         for kind, text, tip in (("push", "Push", "Drag to move a contour gently (an arm, a waistline, a stray "
@@ -3970,17 +4015,54 @@ class DevelopPage(QWidget):
                 p[k] = v
             else:
                 p.pop(k, None)
+        ec = self._eye_colour_value() if hasattr(self, "ec_preset") else None
+        if ec:
+            p["eye_colour"] = ec
+        else:
+            p.pop("eye_colour", None)
         if not p.get("faces"):
             p.pop("faces", None)
         if not p.get("sculpt"):
             p.pop("sculpt", None)
         return p or None
 
+    def _eye_colour_value(self):
+        key = self.ec_preset.currentData() or "none"
+        amt = round(self.ec_amount.value(), 1)
+        if key == "none" or amt <= 0:
+            return None
+        d = {"preset": key, "amount": amt, "which": self.ec_which.currentData() or "both"}
+        if key == "custom" and self.ec_custom:
+            d.update(hue=round(self.ec_custom[0], 2), sat=round(self.ec_custom[1], 4), light=round(self.ec_custom[2], 4))
+        return d
+
+    def _eye_colour_picked(self, idx):
+        if self.ec_preset.itemData(idx) == "custom":
+            from PySide6.QtWidgets import QColorDialog
+            c = QColorDialog.getColor(QColor(90, 130, 180), self, "Eye colour")
+            if not c.isValid():
+                self.ec_preset.setCurrentIndex(0)
+                return
+            from ..engine.local.eyes import custom_from_srgb
+            self.ec_custom = custom_from_srgb((c.red(), c.green(), c.blue()))
+        if self.ec_amount.value() <= 0 and self.ec_preset.itemData(idx) != "none":
+            self.ec_amount.set_value(70, emit=False)
+        self._portrait_changed("Portrait: eye colour")
+
     def _portrait_from_edit(self, e):
         import copy as _copy
         self._portrait = _copy.deepcopy(e.portrait or {})
         for k, sl in self.pt_sl.items():
             sl.set_value(float(self._portrait.get(k, 0) or 0), emit=False)
+        ec = self._portrait.get("eye_colour") or {}
+        for w in (self.ec_preset, self.ec_which):
+            w.blockSignals(True)
+        self.ec_preset.setCurrentIndex(max(0, self.ec_preset.findData(ec.get("preset", "none"))))
+        self.ec_which.setCurrentIndex(max(0, self.ec_which.findData(ec.get("which", "both"))))
+        for w in (self.ec_preset, self.ec_which):
+            w.blockSignals(False)
+        self.ec_amount.set_value(float(ec.get("amount", 0) or 0), emit=False)
+        self.ec_custom = (ec["hue"], ec["sat"], ec["light"]) if ec.get("preset") == "custom" and "hue" in ec else None
         n = len(self._portrait.get("sculpt") or [])
         if not (0 <= self._shsel < n) or (self._portrait.get("sculpt") or [{}])[self._shsel].get("kind") != "shape":
             self._shsel = -1
@@ -4116,6 +4198,10 @@ class DevelopPage(QWidget):
         self.viewer.update()
 
     def _portrait_changed(self, label):
+        eye_on = any(self.pt_sl[k].value() > 0 for k in ("iris_light", "iris_clarity", "iris_colour", "ring", "catch")) \
+            or (self.ec_amount.value() > 0 and (self.ec_preset.currentData() or "none") != "none")
+        if eye_on:
+            self._ensure_irises()
         self.commit(self.edit_from_controls(), label=label)
         self._refresh_portrait_ui()
         self._refresh_portrait_view()
@@ -4224,6 +4310,64 @@ class DevelopPage(QWidget):
                              f"a circle with the Heal tool to bring one back.")
         run_bg(lambda: E.find_blemishes(img, e), path, done,
                lambda _, err: (setattr(self.viewer, "busy", False), self.status.emit(f"Blemish problem: {err}")))
+
+    def fix_red_eye(self):
+        """Red pupils and blown-out pupils in the mapped eyes become Red eye / Pupil spots (amber)."""
+        from .. import engine as E
+        if self.image is None or not self._faces():
+            self.status.emit("Fix red eye: find the faces first (Find faces, or Click the eyes).")
+            return
+        img, path = self.image, self.path
+        self.viewer.busy = True
+        self.viewer.update()
+        self.status.emit("Looking for red eyes...")
+
+        def work():
+            e = self.edit_from_controls()
+            faces = E.add_irises(img, e)
+            e.portrait = dict(e.portrait or {}, faces=faces)
+            return faces, E.find_red_eyes(img, e)
+
+        def done(p, res):
+            if p != self.path:
+                return
+            self.viewer.busy = False
+            faces, found = res
+            self._portrait["faces"] = faces
+            spots = found.get("spots") or []
+            if not spots:
+                self.status.emit("Fix red eye: no red or blown-out pupils found in the mapped eyes. For one that was "
+                                 "missed, or an animal's eye, use Retouch > Red eye or Pupil and click it.")
+                self._portrait_changed("Portrait: irises found")
+                return
+            self._spots += spots
+            self._ssel = -1
+            self.rt_show.setChecked(True)
+            self._spots_changed(f"Retouch: {len(spots)} red eye fix{'es' if len(spots) != 1 else ''}")
+            self.status.emit(f"Fix red eye: {found['red']} red, {found['blown']} blown-out pupil(s) fixed (red "
+                             f"circles in Retouch; Alt-click one with a Retouch tool to undo it).")
+        run_bg(work, path, done,
+               lambda _, err: (setattr(self.viewer, "busy", False), self.status.emit(f"Red eye problem: {err}")))
+
+    def _ensure_irises(self):
+        """Faces mapped before the eye tools have no irises: find them once, in the background, when an eye tool
+        is first used."""
+        from .. import engine as E
+        if self.image is None or getattr(self, "_iris_job", False):
+            return
+        faces = self._faces()
+        if not faces or all(f.get("irises") for f in faces):
+            return
+        self._iris_job = True
+        img, path, e = self.image, self.path, self.edit_from_controls()
+
+        def done(p, res):
+            self._iris_job = False
+            if p != self.path:
+                return
+            self._portrait["faces"] = res
+            self._portrait_changed("Portrait: irises found")
+        run_bg(lambda: E.add_irises(img, e), path, done, lambda *_: setattr(self, "_iris_job", False))
 
     # sculpting
     def _sculpt_stroke(self, uvs):
@@ -4368,7 +4512,7 @@ class DevelopPage(QWidget):
             self.viewer.brush_frac = self.rt_size.value() / 100.0
             self.viewer.setCursor(Qt.CursorShape.BlankCursor)
             if self._ssel < 0:
-                self.rt_feather.set_value(25 if kind == "heal" else 50 if kind == "clone" else 30, emit=False)
+                self.rt_feather.set_value({"heal": 25, "clone": 50, "pupil": 25}.get(kind, 30), emit=False)
             if self.zoom_c is None:
                 self.status.emit("Retouch: zoom to 100% (Z or the mouse wheel) to see small dust spots.")
         elif self.viewer.tool == "spot":
@@ -4424,7 +4568,7 @@ class DevelopPage(QWidget):
             u, v = E.s_to_view(self.image, e, pts[:, 0], pts[:, 1])
             d = {"pts": list(zip(np.atleast_1d(u), np.atleast_1d(v))), "r": float(sp.get("size", 0.008)) / bs,
                  "kind": sp.get("kind"), "sel": k == self._ssel, "auto": sp.get("auto")}
-            if sp.get("kind") != "redeye":
+            if sp.get("kind") not in ("redeye", "pupil"):
                 su, sv = E.s_to_view(self.image, e, pts[:, 0] + dx, pts[:, 1] + dy)
                 d["src"] = list(zip(np.atleast_1d(su), np.atleast_1d(sv)))
             out.append(d)
@@ -4453,7 +4597,7 @@ class DevelopPage(QWidget):
         if len(pts) > 1 and keep[-1] != pts[-1]:
             keep.append(pts[-1])
         spot = {"kind": self.rt_kind, "pts": keep, "size": size, "feather": round(self.rt_feather.value() / 100.0, 3),
-                "opacity": round(self.rt_opacity.value(), 1), "src": [0.0, 0.0], "enabled": True, "auto": ""}
+                "opacity": round(self.rt_opacity.value(), 1), "src": [0.0, 0.0], "enabled": True, "auto": "", "v": 2}
 
         path = self.path
 
@@ -4464,8 +4608,9 @@ class DevelopPage(QWidget):
             self._spots.append(spot)
             self._ssel = len(self._spots) - 1
             self.viewer.busy = False
-            self._spots_changed({"heal": "Heal spot", "clone": "Clone spot", "redeye": "Red eye"}[spot["kind"]])
-        if spot["kind"] == "redeye":
+            self._spots_changed({"heal": "Heal spot", "clone": "Clone spot", "redeye": "Red eye",
+                                 "pupil": "Pupil"}[spot["kind"]])
+        if spot["kind"] in ("redeye", "pupil"):
             add(None, [0.0, 0.0])
             return
         img, e, others = self.image, self.edit_from_controls(), [dict(x) for x in self._spots]
@@ -4497,7 +4642,7 @@ class DevelopPage(QWidget):
             sp["src"] = [dx - mx, dy - my]
         else:
             sp["src"] = [dx + mx, dy + my]
-        if sp.get("kind") != "redeye":
+        if sp.get("kind") not in ("redeye", "pupil"):
             sp["src"] = rt.clamp_source(sp, sw, sh)
         sp["auto"] = sp.get("auto", "")
         self._ssel = k
@@ -4891,6 +5036,11 @@ class HelpPage(InfoPage):
                              ("Lens glow", "Light > Clipped highlights: measure from lens glow reads how bright a "
                                            "blown light really was from the glow around it. Measure each lens once: "
                                            "Library > Measure lens glow (a bracket of a small light in the dark)."),
+                             ("Eyes", "After Find faces, each iris is found too (Show faces draws it). Portrait: "
+                                      "Eye colour (a preset or Pick a colour, then its amount; both eyes or one), and "
+                                      "in Full the iris brightness, clarity, colour strength, outer ring and "
+                                      "catchlights. Fix red eye fixes red pupils and pupils the flash blew out white; "
+                                      "for an animal's glowing eyes use Retouch > Pupil and click each."),
                              ("Retouch", "Heal, Clone, Red eye: click a spot or brush along a hair; drag a circle "
                                          "or its dashed source to move it; Alt-click removes. Find dust looks in one "
                                          "photo; Learn dust map (Library) learns your sensor's dust from several."),
@@ -4947,6 +5097,7 @@ class HelpPage(InfoPage):
                       "with git yourself.",
                "msi": "Installed with the MSI: an update downloads the new MSI and Windows Installer puts it in.",
                "bat": "Installed with Install Photographic Studio.bat: updates go in when the Studio restarts.",
+               "sh": "Installed with install-linux.sh: updates go in when the Studio restarts.",
                "folder": "Updates go in when the Studio restarts."}.get(kind, "")
         self.upd_info.setText(how)
 
@@ -5104,7 +5255,7 @@ class MainWindow(QMainWindow):
         mode = self.settings.get("updates")
         self.help.set_update_state(mode or "off", self.upd_kind)
         st = U.staged()
-        if st and self.upd_kind in ("bat", "folder"):
+        if st and self.upd_kind in ("bat", "sh", "folder"):
             self._upd_show(f"Update {st} is downloaded. It goes in when the Studio restarts.",
                            [("Restart now", self._upd_restart, True), ("Later", lambda: self._upd_show(""), False)])
             return
@@ -5188,7 +5339,7 @@ class MainWindow(QMainWindow):
         if U.restart_into_update():
             self.close()
         else:
-            self._upd_show("Close the Studio and start it again (Start Studio.bat) to finish the update.")
+            self._upd_show(f"Close the Studio and start it again ({U.launcher_name()}) to finish the update.")
 
     def _upd_install_msi(self):
         from .. import updates as U

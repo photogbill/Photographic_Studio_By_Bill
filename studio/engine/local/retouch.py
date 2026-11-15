@@ -3,7 +3,7 @@
 Spots are plain data in the edit, attached to the photo like masks (fractions of the camera-crop frame before
 rotation, the "S frame"), so straightening or cropping later does not move them:
 
-    {"kind": "heal" | "clone" | "redeye", "pts": [[x, y], ...], "size": radius (fraction of the S long edge),
+    {"kind": "heal" | "clone" | "redeye" | "pupil", "pts": [[x, y], ...], "size": radius (fraction of the S long edge),
      "feather": 0..1, "opacity": 0..100, "src": [dx, dy] (where the source is, as an offset in S fractions),
      "enabled": true, "auto": "" | "dust" | "map"}
 
@@ -18,6 +18,8 @@ One point is a round spot; several points are a brushed stroke. The source has t
   hides the difference).
 * Clone is a feathered copy of the source.
 * Red eye pulls red down to the other two channels where red dominates, and darkens the pupil a little.
+* Pupil rebuilds a pupil the flash blew out (white or golden, no red left to pull down) or an animal's eye glow
+  (green, yellow, white): a dark neutral pupil, with the catchlight kept (eyes.pupil_fix).
 
 Sources are always read from the photo before retouching, so the order of spots does not matter and a 100% region
 renders exactly like the full photo. Every patch is computed from its own small reads (``fetch``) and cached by the
@@ -39,8 +41,9 @@ log = slog.get("engine.retouch")
 LUMA = np.array([0.2880, 0.7119, 0.0001], np.float32)
 EPS = 2e-3                     # log offset (scene-linear, 1 = clip): about 9 stops below white
 MAX_UNKNOWNS = 160_000         # membrane solved exactly up to this many pixels, on a reduced grid above
-KINDS = ("heal", "clone", "redeye")
-DEFAULT_FEATHER = {"heal": 0.25, "clone": 0.5, "redeye": 0.3}
+KINDS = ("heal", "clone", "redeye", "pupil")
+DEFAULT_FEATHER = {"heal": 0.25, "clone": 0.5, "redeye": 0.3, "pupil": 0.25}
+NO_SOURCE = ("redeye", "pupil")                # spots that work on the destination alone
 
 
 def active(spots) -> list:
@@ -223,11 +226,17 @@ def heal(D: np.ndarray, S: np.ndarray, inside: np.ndarray, step: int = 1) -> np.
     return np.where(inside[..., None], H, D).astype(np.float32)
 
 
-def redeye(D: np.ndarray) -> np.ndarray:
+def redeye(D: np.ndarray, version: int = 1) -> np.ndarray:
+    """Version 2 (spots made from session 11 on) acts only on strong red: a brown iris is red-dominant in linear
+    light (red about 3-4 x the other two) and version 1 could grey the iris round a pupil. Version 1 stays for
+    spots in older edits, so they render as they did."""
     r, g, b = D[..., 0], D[..., 1], D[..., 2]
     gb = 0.5 * (g + b)
     red = r / np.maximum(gb, 1e-5)
-    w = _smooth((red - 1.5) / 1.0) * _smooth(r / 0.002)
+    if version >= 2:
+        w = _smooth((red - 4.0) / 3.0) * _smooth(r / 0.002)
+    else:
+        w = _smooth((red - 1.5) / 1.0) * _smooth(r / 0.002)
     out = D.copy()
     out[..., 0] = r + w * (gb - r)
     out *= (1.0 - 0.25 * w)[..., None]
@@ -249,7 +258,7 @@ def patch(spot: dict, fetch, sw: int, sh: int, step: int = 1, parity=(0, 0)):
     x1, y1 = min(x1, sw - ((sw - x0) % step)), min(y1, sh - ((sh - y0) % step))
     if x1 - x0 < step or y1 - y0 < step:
         return None
-    if shp.kind != "redeye":
+    if shp.kind not in NO_SOURCE:
         if not shp.source_inside_frame(4.0 * step):
             spot = dict(spot, src=clamp_source(spot, sw, sh))
             shp = Shape(spot, sw, sh, step)
@@ -257,7 +266,7 @@ def patch(spot: dict, fetch, sw: int, sh: int, step: int = 1, parity=(0, 0)):
         if sx0 < 0 or sy0 < 0 or sx1 > sw or sy1 > sh:
             return None
     nh, nw = (y1 - y0) // step, (x1 - x0) // step
-    if shp.kind != "redeye":
+    if shp.kind not in NO_SOURCE:
         ux0, uy0 = min(x0, sx0), min(y0, sy0)
         ux1, uy1 = max(x1, sx1), max(y1, sy1)
         area = (ux1 - ux0) * (uy1 - uy0)
@@ -282,8 +291,12 @@ def patch(spot: dict, fetch, sw: int, sh: int, step: int = 1, parity=(0, 0)):
         H = heal(D, S, inside, step)
     elif shp.kind == "clone":
         H = S.astype(np.float32)
+    elif shp.kind == "pupil":
+        from .eyes import pupil_fix
+        d = shp.distance(X, Y) / shp.R
+        H = pupil_fix(D, d < 0.85, (d > 1.05) & (d < 1.6))
     else:
-        H = redeye(D)
+        H = redeye(D, int(spot.get("v", 1) or 1))
     return H, (a * shp.opacity).astype(np.float32), x0, y0
 
 

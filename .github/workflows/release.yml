@@ -3,6 +3,7 @@
 # The release gets two downloads with fixed names, so README links and the Studio's updater always find them:
 #   Photographic-Studio.msi            the classic installer (Briefcase + WiX)
 #   Install-Photographic-Studio.bat    the small installer that downloads everything into one folder
+#   install-linux.sh                   the same small installer for Linux
 name: Release (Windows installer)
 
 on:
@@ -55,6 +56,7 @@ jobs:
           if (-not $msi) { Write-Error "No MSI was made"; exit 1 }
           Copy-Item $msi.FullName release/Photographic-Studio.msi
           Copy-Item "Install Photographic Studio.bat" release/Install-Photographic-Studio.bat
+          Copy-Item install-linux.sh release/install-linux.sh
           Get-ChildItem release | Format-Table Name, Length
 
       - name: Keep the MSI with this run (for test builds)
@@ -72,7 +74,7 @@ jobs:
           $tag = "${{ github.ref_name }}"
           gh release view $tag 2>$null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag release/Photographic-Studio.msi release/Install-Photographic-Studio.bat --clobber
+            gh release upload $tag release/Photographic-Studio.msi release/Install-Photographic-Studio.bat release/install-linux.sh --clobber
           } else {
-            gh release create $tag release/Photographic-Studio.msi release/Install-Photographic-Studio.bat --title "Photographic Studio $($tag.TrimStart('v'))" --generate-notes
+            gh release create $tag release/Photographic-Studio.msi release/Install-Photographic-Studio.bat release/install-linux.sh --title "Photographic Studio $($tag.TrimStart('v'))" --generate-notes
           }

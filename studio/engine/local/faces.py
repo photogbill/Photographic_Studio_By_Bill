@@ -28,6 +28,11 @@ log = slog.get("engine.faces")
 
 MODEL_FILES = {"short": "face_detection_short_range.tflite", "full": "face_detection_full_range.tflite",
                "mesh": "face_landmark.tflite"}
+# The newer face mesh (MediaPipe Face Landmarker v2, "FaceMesh-V2": 478 points, the last 10 the two irises, 256 x 256
+# input), taken unmodified from Google's face_landmarker.task bundle. Used when present (it held about twice as steady
+# as the first mesh on dark, half-shadowed, noisy and tilted faces: docs/RESULTS.md, session 11); the first mesh is
+# the fallback.
+MESH_V2 = "face_landmarker_v2.tflite"
 _MODELS: dict = {}
 _LOCK = threading.Lock()
 
@@ -60,14 +65,21 @@ def available() -> bool:
     return all(os.path.isfile(os.path.join(d, f)) for f in MODEL_FILES.values())
 
 
+def mesh_v2_available() -> bool:
+    """The newer face mesh (Face Landmarker v2, irises included) is used when its file is in models/faces, unless
+    STUDIO_FACE_MESH_V1 is set (then the first mesh, as before)."""
+    return os.path.isfile(os.path.join(model_dir(), MESH_V2)) and not os.environ.get("STUDIO_FACE_MESH_V1")
+
+
 def _model(key: str):
     with _LOCK:
         if key not in _MODELS:
             from .tinynet import Model
-            path = os.path.join(model_dir(), MODEL_FILES[key])
+            path = os.path.join(model_dir(), MESH_V2 if key == "mesh2" else MODEL_FILES[key])
             if not os.path.isfile(path):
                 raise FileNotFoundError(f"face model missing: {path} (run setup again, or copy models/faces back)")
             _MODELS[key] = Model(path)
+            log.info("face model loaded: %s (%s)", key, os.path.basename(path))
         return _MODELS[key]
 
 
@@ -234,26 +246,40 @@ def _normalise_crop(c: np.ndarray) -> np.ndarray:
     return g.astype(np.float32)
 
 
-def mesh(img: np.ndarray, roi, refine: int = 1):
-    """468 face points (image pixels, (468, 2)) and the model's confidence that it saw a face (0..1). One
-    refinement: the crop is re-centred on the first answer, as MediaPipe does when it tracks a face."""
+def mesh(img: np.ndarray, roi, refine: int = 1, version: int | None = None):
+    """The face points (image pixels) and the model's confidence that it saw a face (0..1). With the newer mesh
+    (when its file is there) the points are (478, 2): the first 468 are the same face points as the first mesh's,
+    the last 10 the irises (468-472 the person's right iris: centre, then four points on its edge; 473-477 the left).
+    The first mesh gives (468, 2). One refinement: the crop is re-centred on the first answer, as MediaPipe does when
+    it tracks a face."""
+    v2 = (version == 2) or (version is None and mesh_v2_available())
+    n, key, size = (478, "mesh2", 256) if v2 else (468, "mesh", 192)
     best = None
     for it in range(refine + 1):
         trials = []
-        c = crop(img, roi)
+        c = crop(img, roi, size)
         for cc in (c, _normalise_crop(c)):
-            out = _model("mesh")(cc[None])
-            pts = next(v for k, v in out.items() if v.size == 1404).reshape(468, 3)
-            logit = float(next(v for k, v in out.items() if v.size == 1).ravel()[0])
+            out = _model(key)(cc[None])
+            pts = next(v for k, v in out.items() if v.size == n * 3).reshape(n, 3)
+            if v2:                                   # the face score (the other single value is not about faces)
+                logit = float(next(v for v in out.values() if v.size == 1 and v.ndim == 4).ravel()[0])
+            else:
+                logit = float(next(v for v in out.values() if v.size == 1).ravel()[0])
             conf = 1.0 / (1.0 + math.exp(-max(-50.0, min(50.0, logit))))
-            X, Y = _roi_points(roi, pts[:, 0] / 192.0, pts[:, 1] / 192.0)
+            X, Y = _roi_points(roi, pts[:, 0] / float(size), pts[:, 1] / float(size))
             trials.append((conf, np.stack([X, Y], -1)))
         conf, P = max(trials, key=lambda t: t[0])
         if best is None or conf >= best[0] - 0.05:
             best = (conf, P)
         if it < refine:
-            roi = roi_from_points(best[1])
+            roi = roi_from_points(best[1][:468])
+    log.debug("face mesh v%d: confidence %.3f", 2 if v2 else 1, best[0])
     return best[1], best[0]
+
+
+def _split(P: np.ndarray) -> tuple:
+    """(468 face points, 10 iris points or None)."""
+    return (P[:468], P[468:478]) if len(P) >= 478 else (P, None)
 
 
 def roi_from_points(P: np.ndarray, scale: float = 1.5):
@@ -289,7 +315,9 @@ def find(img: np.ndarray, min_conf: float = 0.5) -> list:
         if conf < min_conf:
             log.info("face at %s: mesh not sure (%.2f), skipped", np.round(d["box"]).astype(int).tolist(), conf)
             continue
-        faces.append({"pts": P, "conf": conf, "score": d["score"], "variant": d.get("variant", "")})
+        P, iris = _split(P)
+        faces.append({"pts": P, "conf": conf, "score": d["score"], "variant": d.get("variant", ""), "iris": iris,
+                      "mesh": 2 if iris is not None else 1})
     # one face, one entry: two finds of the same face (detector variants) keep the surer mesh
     kept = []
     for f in sorted(faces, key=lambda f: -f["conf"]):
@@ -304,7 +332,8 @@ def find(img: np.ndarray, min_conf: float = 0.5) -> list:
 def from_eyes(img: np.ndarray, right_eye, left_eye) -> dict:
     """A face from two clicked eyes (image pixels): the mesh run on the crop the eyes imply."""
     P, conf = mesh(img, roi_from_eyes(right_eye, left_eye), refine=1)
-    return {"pts": P, "conf": conf, "score": 0.0, "variant": "eyes"}
+    P, iris = _split(P)
+    return {"pts": P, "conf": conf, "score": 0.0, "variant": "eyes", "iris": iris, "mesh": 2 if iris is not None else 1}
 
 
 def size_of(P: np.ndarray) -> float:
