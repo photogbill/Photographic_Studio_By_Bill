@@ -33,6 +33,14 @@ def embedded_info(path: str) -> dict:
     decoding it fully. rawpy (LibRaw) returns the largest preview the file holds."""
     import rawpy
     from PIL import Image
+    from .scanfile import is_scan, scan_preview
+    if is_scan(path):                            # a scan is its own preview
+        h, w = scan_preview(path, 64).shape[:2]
+        with Image.open(path) as im:
+            W, H = im.size
+        if (w > h) != (W > H):
+            W, H = H, W
+        return {"format": "scan", "width": int(W), "height": int(H), "flip": 0}
     with rawpy.imread(path) as r:
         flip = r.sizes.flip
         th = r.extract_thumb()
@@ -53,6 +61,9 @@ def embedded_preview(path: str, max_side: int | None = None) -> np.ndarray:
     (JPEG draft mode); None gives the full size the file holds."""
     import rawpy
     from PIL import Image
+    from .scanfile import is_scan, scan_preview
+    if is_scan(path):
+        return scan_preview(path, max_side)
     with rawpy.imread(path) as r:
         flip = r.sizes.flip
         th = r.extract_thumb()

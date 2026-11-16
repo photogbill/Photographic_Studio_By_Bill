@@ -34,10 +34,11 @@ def _skip_dir(name: str) -> bool:
 
 
 def list_photos(folder: str, recursive: bool = False) -> list:
-    """[{path, name, size, mtime, side_mtime}] for the raws in ``folder`` (sorted by name within each folder).
+    """[{path, name, size, mtime, side_mtime}] for the raws and scans (TIFF / JPEG / PNG) in ``folder`` (sorted by name within each folder).
     ``side_mtime`` is the sidecar's modified time, 0 when there is none. Reads the listing only."""
     from .. import api
     from .rawfile import RAW_EXTENSIONS
+    from .scanfile import SCAN_EXTENSIONS
     out = []
     todo = [folder]
     while todo:
@@ -70,11 +71,15 @@ def list_photos(folder: str, recursive: bool = False) -> list:
                 low = n.lower()
                 if not central and low.endswith(SIDECAR_SUFFIX):
                     sides[low[:-len(SIDECAR_SUFFIX)]] = e.stat().st_mtime
-                elif low.endswith(RAW_EXTENSIONS) and not n.startswith("._"):
+                elif low.endswith(RAW_EXTENSIONS + SCAN_EXTENSIONS) and not n.startswith("._"):
                     st = e.stat()
                     raws.append({"path": e.path, "name": n, "size": int(st.st_size), "mtime": float(st.st_mtime)})
             except OSError:
                 continue
+        # a camera's JPEG (or a TIFF made from the raw) beside its raw is the same photo: show the raw only
+        stems = {os.path.splitext(r["name"])[0].lower() for r in raws if r["name"].lower().endswith(RAW_EXTENSIONS)}
+        raws = [r for r in raws if r["name"].lower().endswith(RAW_EXTENSIONS)
+                or os.path.splitext(r["name"])[0].lower() not in stems]
         for r in raws:
             r["side_mtime"] = float(sides.get(r["name"].lower(), 0.0))
         out += raws

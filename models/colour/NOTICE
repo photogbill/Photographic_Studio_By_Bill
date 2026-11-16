@@ -1,0 +1,17 @@
+Colour model used by Photographic Studio By Bill (Develop > Old photo and film > Colourize)
+
+ddcolor.npz    DDColor, "paper tiny" (ConvNeXt-T encoder), as exported to ONNX by Qualcomm AI Hub
+
+DDColor: Xiaoyang Kang, Tao Yang, Wenqi Ouyang, Peiran Ren, Lingzhi Li, Xuansong Xie, "DDColor: Towards
+Photo-Realistic Image Colorization via Dual Decoders", ICCV 2023. Code and weights: https://github.com/piddnad/DDColor
+(weights ddcolor_paper_tiny), licensed under the Apache License, Version 2.0; a copy is in the file LICENSE in this
+folder. Unless required by applicable law or agreed to in writing, the model is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
+
+Source of this file: Qualcomm AI Hub's ONNX export (ddcolor-onnx-float.zip, linked from
+https://huggingface.co/qualcomm/DDColor, model card licence Apache-2.0; the export code is BSD-3-Clause).
+
+What was changed: the ONNX graph and its weights were converted by tools/convert_onnx_model.py into one NumPy
+file; weights of 4096 values or more are stored as 8-bit integers with one scale per output channel (the colours
+it predicts differ from the float model's by 0.15-0.65 CIE Lab units on average). It is run by the Studio's own
+NumPy code (studio/engine/local/onnxnp.py, GPL-3.0); ONNX Runtime is not used.

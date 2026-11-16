@@ -16,7 +16,14 @@ closest to zero (and where there is contrast at all) are the ones most likely to
 the light. When those pixels fall into two clearly different colours, the photo has two light sources (candle
 and window), and both are reported.
 
-Both estimates are always computed; how well they agree is the confidence.
+Third method: **Night (SGP-LRD)** from RL-AWB (Lee, Chen, Chang, Liu, 2026; Apache 2.0; color/nightwb.py), made for
+low light: salient grey pixels kept by two night filters, weighted by brightness, a Minkowski mean of local
+reflectance; its two settings picked per photo by agreement across a grid instead of the paper's learned agent.
+Tested here on synthetic casts: much better than grey edge on a scene with nothing grey (coffee: 2.0 against 7.4
+degrees), worse than the grayness index where there is real grey (astronaut: 5.6 against 0.1); it still answers in
+very dark frames where the other two give up. Real night raws decide; the photo's own estimates are all shown.
+
+All the estimates are always computed; how well they agree is the confidence.
 
 **Keep the mood**: 100% makes the light fully neutral; less corrects only part of the way from the as-shot
 balance (people prefer not-quite-neutral, and a candle should stay warm). The default for a warm light in a
@@ -71,6 +78,9 @@ METHODS = {
                       weak="One dominant colour with coloured edges (autumn leaves) can pull it."),
     "grayness": dict(name="Grayness index", best="Finds the truly grey bits; reports a second light source.",
                      weak="Needs something close to neutral somewhere in the frame."),
+    "night": dict(name="Night (SGP-LRD)", best="Low light and night scenes, and scenes with nothing grey in them "
+                                               "(a brown room, a lamp-lit street).",
+                  weak="Bright scenes with real grey surfaces: the grayness index is better there."),
 }
 
 
@@ -145,18 +155,28 @@ def estimates(image) -> dict:
     """Both estimates, their agreement and a confidence, for the Auto white balance panel.
     {"grey_edge": mult | None, "grayness": mult | None, "lights": [(mult, share), ...], "agreement_deg",
      "confidence": "high" | "medium" | "low"}"""
+    from . import nightwb
     cam = camera_rgb_half(image)
     ge = grey_edge(cam)
     gi, lights = grayness_index(cam)
+    try:
+        nt = nightwb.estimate(cam)
+    except Exception:
+        slog.log_exception("night white balance failed; left out", log)
+        nt = None
+    ni = nt["light"] if nt else None
     out = {"grey_edge": _mult(ge) if ge is not None else None, "grayness": _mult(gi) if gi is not None else None,
+           "night": _mult(ni) if ni is not None else None, "night_spread_deg": nt["spread_deg"] if nt else None,
            "lights": [(_mult(l), s) for l, s in lights], "agreement_deg": None, "confidence": "low"}
-    if ge is not None and gi is not None:
-        a = angle_deg(ge, gi)
+    have = [e for e in (ge, gi, ni) if e is not None]
+    if len(have) >= 2:                               # the widest disagreement between any two of them
+        a = max(angle_deg(x, y) for i, x in enumerate(have) for y in have[i + 1:])
         out["agreement_deg"] = round(a, 1)
         out["confidence"] = "high" if a < 3.0 else ("medium" if a < 7.0 else "low")
-    log.info("auto white balance estimates: grey edge %s, grayness %s, agreement %s deg, %d light(s)",
+    log.info("auto white balance estimates: grey edge %s, grayness %s, night %s, agreement %s deg, %d light(s)",
              None if ge is None else np.round(out["grey_edge"], 3).tolist(),
-             None if gi is None else np.round(out["grayness"], 3).tolist(), out["agreement_deg"], len(lights))
+             None if gi is None else np.round(out["grayness"], 3).tolist(),
+             None if ni is None else np.round(out["night"], 3).tolist(), out["agreement_deg"], len(lights))
     return out
 
 
@@ -192,6 +212,13 @@ def in_band(cam_xyz, mult, tint_limit: float = 60.0):
 
 def auto_multipliers(image, method: str = "grey_edge") -> tuple[np.ndarray | None, str]:
     cam = camera_rgb_half(image)
+    if method == "night":
+        from . import nightwb
+        nt = nightwb.estimate(cam)
+        if nt is not None:
+            m = _mult(nt["light"])
+            log.info("auto white balance (night): multipliers %s", np.round(m, 4).tolist())
+            return m, "night (SGP-LRD)"
     if method == "grayness":
         gi, lights = grayness_index(cam)
         if gi is not None:

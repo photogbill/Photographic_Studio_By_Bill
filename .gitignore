@@ -104,6 +104,15 @@
 # Face and people models (Google MediaPipe, Apache 2.0, see models/*/NOTICE): in models/faces and models/people only.
 !/models/faces/*.tflite
 !/models/people/*.tflite
+# Scratch detector (Microsoft, MIT, see models/scratches/NOTICE), converted to NumPy arrays.
+!/models/scratches/*.npz
+# Colour model (DDColor, Apache 2.0, see models/colour/NOTICE), converted to NumPy arrays with 8-bit weights.
+!/models/colour/*.npz
+# Depth model (Depth Anything V2 Small, Apache 2.0, see models/depth/NOTICE), converted to NumPy arrays.
+!/models/depth/*.npz
+# Click-to-select (SAM 2.1 Tiny, Apache 2.0, see models/sam/NOTICE), converted with 16-bit weights. Large is made on
+# each PC by Convert Models.bat (it is too big for GitHub) and stays out.
+!/models/sam/sam2.1_tiny_*.npz
 
 # 4. Folders that are never shared, even if a file inside has an allowed type.
 /Voigtlander/

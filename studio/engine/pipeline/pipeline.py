@@ -60,6 +60,8 @@ class Image:
         self._warp = None
         self._memo: dict = {}
         self.denoise_report: dict | None = None    # last whole-frame denoise: photosites kept by the safeguard
+        self.scratch_report: dict | None = None    # last whole-frame dust and scratch pass: marks found
+        self.colour_report: dict | None = None     # the colourizer's last run (time, map size)
 
     def highlight_maps(self, mult, use_optical_black: bool = True):
         """Rebuilt highlight colour for the whole frame at this white balance (raw/highlights.py), computed once."""
@@ -163,6 +165,8 @@ class Image:
     def noise_model(self, use_optical_black: bool = True):
         """Noise model for this frame: estimated from the image itself (amber tier) with the read noise
         pinned to the masked border. Calibrated profiles (cyan) will take precedence once they exist."""
+        if use_optical_black not in self._noise and getattr(self.raw, "is_scan", False):
+            self._noise[use_optical_black] = _scan_noise_model(self)
         if use_optical_black not in self._noise:
             from ..calib.noise import estimate_from_image
             from ..calib.profile import find_profile
@@ -186,6 +190,8 @@ class Image:
         return self._noise[use_optical_black]
 
     def row_banding(self, use_optical_black: bool = True):
+        if getattr(self.raw, "is_scan", False):
+            return None
         if self._rows is None:
             from ..raw.banding import measure_rows
             self._rows = measure_rows(self.raw, self.levels(use_optical_black)) or False
@@ -193,6 +199,9 @@ class Image:
 
     def lateral_ca(self):
         """Lateral CA measured once on the whole frame (as-shot white balance), then reused for every region."""
+        if self._ca is None and getattr(self.raw, "is_scan", False):
+            from ..lens.auto import LateralCA
+            self._ca = LateralCA(red=(0.0, 0.0), blue=(0.0, 0.0), tiles=0, confidence="none", max_shift_px=0.0)
         if self._ca is None:
             from ..lens.auto import estimate_lateral_ca
             lv = self.levels(True)
@@ -211,6 +220,9 @@ class Image:
         tiles (detail/sharpen.py). Cached per demosaic algorithm."""
         algo = (edit or Edit()).demosaic
         algo = "menon" if algo == "half" else algo
+        if getattr(self.raw, "is_scan", False):
+            from ..detail import sharpen as shp
+            return shp.DEFAULT_BLUR                    # a scan's blur is the scanner's; no mosaic to measure
         if algo not in self._blur:
             with slog.stage("sharpen.measure_blur", log, demosaic=algo):
                 self._blur[algo] = _measure_capture_blur(self, algo)
@@ -226,7 +238,15 @@ SAFEGUARD_K = 4.5           # denoise safeguard: photosites moved by more than t
 
 
 def open_image(path: str) -> Image:
+    from ..io.scanfile import is_scan, open_scan
+    if is_scan(path):
+        return Image(open_scan(path))
     return Image(open_raw(path))
+
+
+def is_scan_image(image: Image) -> bool:
+    """True for a TIFF / JPEG / PNG scan (io/scanfile.py), False for a raw."""
+    return bool(getattr(image.raw, "is_scan", False))
 
 
 # ------------------------------------------------------------------------------------------ white balance
@@ -270,6 +290,8 @@ def linear_rgb(image: Image, edit: Edit, region=None, half_size: bool = False, c
     a neutral), in the camera-crop frame. ``sharpen=False`` skips capture sharpening (callers that sharpen only
     the part they show, see _render_plain)."""
     sharpen_on = sharpen and edit.sharpen.enabled and not half_size and edit.sharpen.amount > 0
+    if getattr(image.raw, "is_scan", False):
+        sharpen_on = False                         # capture sharpening undoes a lens; a scan's blur is not measured
     key = (edit.raw_key(), tuple(region) if region else None, half_size, sharpen_on)
     slot = "whole" if region is None else "region"
     with image._lock:
@@ -285,6 +307,12 @@ def linear_rgb(image: Image, edit: Edit, region=None, half_size: bool = False, c
         if cut.shape[:2] == (h // 2, w // 2):
             return np.ascontiguousarray(cut)
     raw = image.raw
+    if getattr(raw, "is_scan", False):
+        rgb = _scan_linear(image, edit, region, half_size)
+        if cache:
+            with image._lock:
+                image._lin_cache[slot] = (key, rgb)
+        return rgb
     lv = image.levels(edit.use_optical_black)
     x, y, w, h = _crop_box(image, region)
     # read a margin around the region so the demosaic has context; keep everything CFA-aligned
@@ -293,6 +321,8 @@ def linear_rgb(image: Image, edit: Edit, region=None, half_size: bool = False, c
         m = 32                                     # deconvolution reaches a few blur widths
     if edit.denoise.enabled:
         m = 256                                    # coarse denoise scales need context around a region
+    if _old_on(edit):
+        m = max(m, _old_photo_pad(image, edit) * (2 if half_size else 1))
     x0, y0 = max(0, (x - m) // 2 * 2), max(0, (y - m) // 2 * 2)
     x1, y1 = min(raw.width, x + w + m), min(raw.height, y + h + m)
     with slog.stage("linearize.normalise", log, w=x1 - x0, h=y1 - y0):
@@ -315,6 +345,10 @@ def linear_rgb(image: Image, edit: Edit, region=None, half_size: bool = False, c
             if region is None and st:              # whole frame: what the Clean panel reports
                 image.denoise_report = dict(st, half=half_size)
     mult = wb_multipliers(image, edit)
+    film_on = _film_on(edit)
+    if film_on:                                    # a negative: balance the light through the film neutrally;
+        user_mult, mult = mult, cam.normalise_wb(raw.wb_as_shot)    # the user's balance acts on the positive
+        mult = np.asarray(mult, float) / float(np.min(mult))
     with slog.stage("white_balance", log, mult=np.round(mult, 4).tolist(), mode=edit.white_balance.mode):
         pat = raw.cfa_rgb
         for i in (0, 1):
@@ -379,6 +413,32 @@ def linear_rgb(image: Image, edit: Edit, region=None, half_size: bool = False, c
             rgb = _overlapped(rgb, lambda s: defringe(s, edit.lens.defringe_strength), pad=16)
     if sharpen_on:                                 # stage 12 (full resolution only: invisible at half size)
         rgb = apply_sharpen(image, edit, rgb)
+    if film_on:                                    # film negative -> positive (local/film.py)
+        from ..local import film as fm
+        params = film_params(image, edit)
+        with slog.stage("film.positive", log, kind=params.get("kind")):
+            rgb = fm.positive(rgb, params, scene=True)
+            r = np.asarray(user_mult, float) / np.asarray(mult, float)
+            r = r / r[1]
+            if np.any(np.abs(r - 1.0) > 1e-6):
+                rgb *= _cam_ratio_in_pp(raw, r).astype(np.float32)
+    if _halftone_on(edit):                         # printing dots (local/halftone.py)
+        rgb = apply_halftone(image, edit, rgb, 2 if half_size else 1)
+    if _stains_on(edit):                           # stains and corrosion, unmixed (local/stains.py)
+        cx0, cy0 = raw.crop[0], raw.crop[1]
+        rgb = apply_stains(image, edit, rgb, x0 - cx0, y0 - cy0, 2 if half_size else 1)
+    if _scratches_on(edit):                        # dust and scratches (local/scratches.py)
+        cx0, cy0 = raw.crop[0], raw.crop[1]
+        rgb = apply_scratches(image, edit, rgb, x0 - cx0, y0 - cy0, 2 if half_size else 1, whole=region is None)
+    if _colour_on(edit):                           # black and white -> colour (local/colourize.py)
+        cx0, cy0 = raw.crop[0], raw.crop[1]
+        rgb = apply_colourize(image, edit, rgb, x0 - cx0, y0 - cy0, 2 if half_size else 1)
+    if _relight_on(edit):                          # the light moved (local/relight.py), before the haze
+        cx0, cy0 = raw.crop[0], raw.crop[1]
+        rgb = apply_relight(image, edit, rgb, x0 - cx0, y0 - cy0, 2 if half_size else 1)
+    if _depth_on(edit):                            # haze by distance (local/depth.py)
+        cx0, cy0 = raw.crop[0], raw.crop[1]
+        rgb = apply_depth(image, edit, rgb, x0 - cx0, y0 - cy0, 2 if half_size else 1)
     if half_size:
         ox, oy = (x - x0) // 2, (y - y0) // 2
         rgb = rgb[oy:oy + h // 2, ox:ox + w // 2]
@@ -389,6 +449,809 @@ def linear_rgb(image: Image, edit: Edit, region=None, half_size: bool = False, c
         with image._lock:
             image._lin_cache[slot] = (key, rgb)
     return rgb
+
+
+# ------------------------------------------------------------------------------------------ scans (io/scanfile.py)
+_INV_STD = None
+
+
+def _inverse_standard():
+    """(ys, xs): the default Studio Standard curve sampled finely, for undoing it (display-linear -> scene)."""
+    global _INV_STD
+    if _INV_STD is None:
+        t = Edit().tone
+        xs = np.concatenate([[0.0], np.exp2(np.linspace(-20.0, math.log2(t.mid_grey) + t.white, 8192))])
+        ys = tone_mod.standard_curve(xs, mid_in=t.mid_grey, contrast=t.contrast, shoulder=t.shoulder,
+                                     white=t.white, toe=t.toe).astype(np.float64)
+        keep = np.concatenate([[True], np.diff(ys) > 1e-9])
+        _INV_STD = (ys[keep], xs[keep])
+    return _INV_STD
+
+
+def scan_to_scene(disp_pp: np.ndarray) -> np.ndarray:
+    """Display-linear ProPhoto (a scan as the file shows it) -> scene-linear ProPhoto that the default Studio
+    Standard curve turns back into exactly the file: per channel in the render space, as the curve is applied."""
+    ys, xs = _inverse_standard()
+    r = apply_matrix(disp_pp, tone_mod.PP_TO_RENDER)
+    np.clip(r, 0.0, 1.0, out=r)
+    flat = r.reshape(-1)
+    for a in range(0, flat.size, 1 << 22):
+        flat[a:a + (1 << 22)] = np.interp(flat[a:a + (1 << 22)], ys, xs)
+    return apply_matrix(r, tone_mod.RENDER_TO_PP)
+
+
+def _film_on(edit: Edit) -> bool:
+    from ..local import film as fm
+    return fm.active(edit.film)
+
+
+def _cam_ratio_in_pp(raw, r) -> np.ndarray:
+    """White-balance ratios given in camera RGB, as per-channel gains on linear ProPhoto (the neutral's change)."""
+    M = cam.camera_to_working(raw.cam_xyz)
+    g = M @ np.asarray(r, float) / (M @ np.ones(3))
+    return g / g[1]
+
+
+def film_params(image: Image, edit: Edit) -> dict:
+    """The edit's film settings with anything still to measure (base, density range) measured on the whole
+    negative, once per image and setting (local/film.py)."""
+    from ..local import film as fm
+    f = dict(edit.film or {})
+    if not fm.needs_measure(f):
+        return f
+    key = ("film", f.get("kind"), json.dumps(f.get("base")), edit.raw_key() if not is_scan_image(image) else "")
+    with image._lock:
+        hit = image._memo.get(key)
+    if hit is None:
+        T = film_light(image, edit)
+        hit = fm.measure(T, f["kind"], f.get("base"))
+        with image._lock:
+            image._memo = {k: v for k, v in image._memo.items() if k[0] != "film"}
+            image._memo[key] = hit
+    out = dict(hit)
+    out.update(f)                                  # what the edit already holds wins over what was measured
+    return out
+
+
+def film_light(image: Image, edit: Edit, long_edge: int = 1200) -> np.ndarray:
+    """A small copy of the whole negative as linear light let through (before the positive), for measuring."""
+    if is_scan_image(image):
+        T = image.raw.display_linear(None, half=True)
+    else:
+        e = Edit.from_dict(edit.to_dict())
+        e.film = None
+        e.sharpen.enabled = False
+        e.white_balance = type(e.white_balance)()          # as shot
+        T = linear_rgb(image, e, None, half_size=True, cache=False)
+    k = min(1.0, float(long_edge) / max(T.shape[:2]))
+    if k < 1:
+        T = resize(np.ascontiguousarray(T), max(8, round(T.shape[1] * k)), max(8, round(T.shape[0] * k)))
+    return np.maximum(np.ascontiguousarray(T, np.float32), 0.0)
+
+
+def film_measure(image: Image, edit: Edit, kind: str, base=None) -> dict:
+    """Film settings for a negative of this kind, measured now (the interface keeps them in the edit, so the
+    photo renders the same later). ``base``: the film base picked by the user, or None to find it."""
+    from ..local import film as fm
+    with slog.stage("film.measure", log, kind=kind, picked=base is not None):
+        return fm.measure(film_light(image, edit), kind, base)
+
+
+def film_base_at(image: Image, edit: Edit, u: float, v: float, r: int = 6) -> list:
+    """The film base colour at a spot of the displayed photo (fractions), for "pick the film base"."""
+    warp = make_warp(image, edit)
+    xs, ys = warp.output_to_s(u * warp.out_w - 0.5, v * warp.out_h - 0.5)
+    _, _, sw, sh = image.raw.crop
+    x, y = int(np.clip(xs, 0, sw - 1)), int(np.clip(ys, 0, sh - 1))
+    box = (max(0, x - r), max(0, y - r), min(sw, x + r + 1) - max(0, x - r), min(sh, y + r + 1) - max(0, y - r))
+    if is_scan_image(image):
+        T = image.raw.display_linear(box)
+    else:
+        e = Edit.from_dict(edit.to_dict())
+        e.film = None
+        e.sharpen.enabled = False
+        e.white_balance = type(e.white_balance)()
+        T = linear_rgb(image, e, box, cache=False)
+    return [round(float(np.median(T[..., c])), 7) for c in range(3)]
+
+
+def _scratches_on(edit: Edit) -> bool:
+    from ..local import scratches as scr
+    return scr.active(edit.scratches)
+
+
+def _stains_on(edit: Edit) -> bool:
+    from ..local import stains as stn
+    return stn.active(edit.stains)
+
+
+def _halftone_on(edit: Edit) -> bool:
+    from ..local import halftone as hft
+    return hft.active(edit.halftone)
+
+
+def _depth_on(edit: Edit) -> bool:
+    from ..local import depth as dp
+    return dp.active(edit.depth) and dp.available()
+
+
+def _relight_on(edit: Edit) -> bool:
+    from ..local import depth as dp
+    from ..local import relight as rl
+    return rl.active(edit.relight) and dp.available()
+
+
+def _old_on(edit: Edit) -> bool:
+    """Any of the old-photo and Cognitive stages that work on a block (with context round it where needed)."""
+    return (_halftone_on(edit) or _stains_on(edit) or _scratches_on(edit) or _colour_on(edit) or _depth_on(edit)
+            or _relight_on(edit))
+
+
+def _colour_on(edit: Edit) -> bool:
+    from ..local import colourize as cz
+    return cz.active(edit.colourize)
+
+
+def _old_photo_pad(image: Image, edit: Edit) -> int:
+    """Context (full-resolution pixels) the dust and scratch pass and the colourizer need round a block."""
+    pad = 8 if _stains_on(edit) else 0
+    if _halftone_on(edit):
+        from ..local import halftone as hft
+        pad = max(pad, hft.pad_for())
+    if _scratches_on(edit):
+        from ..local import scratches as scr
+        pad = max(pad, scr.pad_for(edit.scratches))
+    if _colour_on(edit):
+        from ..local import colourize as cz
+        _, _, cw, ch = image.raw.crop
+        pad = max(pad, cz.pad_for((256, 256), (ch, cw)))
+    return pad
+
+
+def _std_display(Y: np.ndarray) -> np.ndarray:
+    """The default Studio Standard curve on scene-linear luminance (a neutral's display-linear value)."""
+    t = Edit().tone
+    return tone_mod.standard_curve(Y, mid_in=t.mid_grey, contrast=t.contrast, shoulder=t.shoulder, white=t.white,
+                                   toe=t.toe)
+
+
+def colour_map(image: Image, edit: Edit):
+    """DDColor's colour map (Lab a, b at the model's size) for the whole photo, once per image and base settings:
+    (ab, crop width, crop height, milliseconds)."""
+    from ..local import colourize as cz
+    e = Edit.from_dict(edit.to_dict())
+    e.colourize = None
+    e.sharpen.enabled = False
+    key = ("colour", e.raw_key())
+    with image._lock:
+        hit = image._memo.get(key)
+    if hit is not None:
+        return hit
+    with slog.stage("colourize.predict", log):
+        base = linear_rgb(image, e, None, half_size=True, cache=False)
+        k = min(1.0, 1024.0 / max(base.shape[:2]))
+        if k < 1:
+            base = resize(np.ascontiguousarray(base), max(16, round(base.shape[1] * k)),
+                          max(16, round(base.shape[0] * k)))
+        Y = tone_mod.luminance(np.ascontiguousarray(base)).reshape(base.shape[:2])
+        L = cz.L_of_Y(_std_display(Y)).astype(np.float32)
+        if edit.stage_versions.get("colourize", 1) >= 2:
+            L = cz.even_tones(L)               # a faded or badly exposed photo is shown to the model evened out
+        ab, ms = cz.predict(L)
+    _, _, cw, ch = image.raw.crop
+    res = (ab, cw, ch, ms)
+    with image._lock:
+        image._memo = {kk: v for kk, v in image._memo.items() if kk[0] != "colour"}
+        image._memo[key] = res
+    image.colour_report = {"ms": ms, "size": list(ab.shape[:2])}
+    log.info("DDColor: %dx%d colour map in %.0f ms", ab.shape[1], ab.shape[0], ms)
+    return res
+
+
+def apply_colourize(image: Image, edit: Edit, rgb: np.ndarray, ox: int, oy: int, step: int) -> np.ndarray:
+    """Colour on a scene-linear block whose top-left is at crop-frame (ox, oy) (local/colourize.py): DDColor's
+    automatic colour (when on), then each colour hint laid into its own area."""
+    from ..local import colourize as cz
+    from ..local import masks as mk
+    st = cz.settings(edit.colourize)
+    _, _, cw, ch = image.raw.crop
+    blk, k_map = None, max(cw, ch) / 256.0
+    if st["on"]:
+        ab, cw, ch, _ = colour_map(image, edit)
+        blk = np.stack([_prior_block((ab[..., c], cw, ch), ox, oy, rgb.shape[0], rgb.shape[1], step)
+                        for c in range(2)], axis=-1)
+        k_map = cw / float(ab.shape[1])
+    with slog.stage("colourize.apply", log, w=rgb.shape[1], h=rgb.shape[0], hints=len(cz.hints_of(edit.colourize))):
+        target, Yd, guide = cz.display_target(rgb, blk, float(st["amount"]), step, k_map, _std_display,
+                                              warm=float(st["warm"]), tint=float(st["tint"]))
+        for h in cz.hints_of(edit.colourize):
+            bm = mk.decode_bitmap(h["data"], int(h["w"]), int(h["h"])).astype(np.float32) / 255.0
+            alpha = _prior_block((bm, cw, ch), ox, oy, rgb.shape[0], rgb.shape[1], step)
+            if float(alpha.max()) <= 0.002:
+                continue
+            r = int(round(1.2 * max(cw, ch) / float(max(bm.shape)) / step))
+            target = cz.blend_hint(target, Yd, guide, alpha, h["rgb"], r)
+        return scan_to_scene(target)
+
+
+def colour_hint_area(image: Image, edit: Edit, fg: list, bg: list | None = None, spread: float = 0.08,
+                     size: int = 640, model: str | None = None) -> dict:
+    """The area of a colour hint: what is reachable from the clicks (S-frame fractions) without crossing a sharp
+    edge in brightness (local/colourize.py, geodesic_area), on a small copy of the whole photo as it is shown
+    without colour. ``spread``: the brightness step (L*/100) that stops it. {"w", "h", "data", "fg", "bg",
+    "spread"} with the bitmap in the S frame."""
+    from ..local import colourize as cz
+    from ..local import masks as mk
+    from ..local import sam
+    from .edit import Geometry
+    if model in sam.SIZES and sam.available(model) and fg:        # SAM 2.1 outlines the part (spread unused)
+        with slog.stage("colourize.hint_area_sam", log, model=model, fg=len(fg), bg=len(bg or [])):
+            bm = sam_bitmap(image, edit, fg, bg, model)
+        return {"w": int(bm.shape[1]), "h": int(bm.shape[0]), "data": mk.encode_bitmap(bm),
+                "fg": [list(map(float, p)) for p in fg], "bg": [list(map(float, p)) for p in (bg or [])],
+                "spread": round(float(spread), 4), "model": f"sam2.1-{model}"}
+    e = Edit.from_dict(edit.to_dict())
+    e.masks = None
+    e.geometry = Geometry()
+    e.colourize = None
+    _, _, sw, sh = image.raw.crop
+    sc = min(1.0, size / float(max(sw, sh)))
+    a = np.ascontiguousarray(_unorient(render(image, e, scale=sc), image.raw.flip))
+    L = cz.L_of_Y(tone_mod.luminance(a).reshape(a.shape[:2])) / 100.0
+    with slog.stage("colourize.hint_area", log, size=f"{a.shape[1]}x{a.shape[0]}", fg=len(fg), bg=len(bg or [])):
+        bm = cz.geodesic_area(L, fg, bg or [], edge=float(spread))
+    log.info("colour hint area: %.1f%% of the photo", 100.0 * (bm > 127).mean())
+    return {"w": int(bm.shape[1]), "h": int(bm.shape[0]), "data": mk.encode_bitmap(bm),
+            "fg": [list(map(float, p)) for p in fg], "bg": [list(map(float, p)) for p in (bg or [])],
+            "spread": round(float(spread), 4)}
+
+
+def colour_at(image: Image, edit: Edit, u: float, v: float, r: int = 3) -> list:
+    """The colour (sRGB 0..1) DDColor suggests at a spot of the displayed photo: where the colour picker starts."""
+    from ..io.export import ExportSpec, to_output
+    e = Edit.from_dict(edit.to_dict())
+    e.colourize = {"on": True, "amount": float(((edit.colourize or {}).get("amount", 1.0)))}
+    a8 = to_output(render(image, e, scale=min(1.0, 900.0 / max(output_size(image, e)))),
+                   ExportSpec(format="jpeg", space="srgb", bits=8))
+    h, w = a8.shape[:2]
+    x, y = min(w - 1, int(u * w)), min(h - 1, int(v * h))
+    patch = a8[max(0, y - r):y + r + 1, max(0, x - r):x + r + 1].reshape(-1, 3)
+    return [round(float(c) / 255.0, 4) for c in np.median(patch, axis=0)]
+
+
+def _srgb_preview(image: Image, e: Edit, max_side: int):
+    """The whole photo small (long side at most ``max_side``) in the S frame: (scene-linear ProPhoto, display sRGB
+    0..1 with the standard tone curve) - what the learned models look at."""
+    _, _, cw, ch = image.raw.crop
+    base = linear_rgb(image, e, None, half_size=max(cw, ch) >= 2 * max_side, cache=False)
+    k = min(1.0, float(max_side) / max(base.shape[:2]))
+    if k < 1:
+        base = resize(np.ascontiguousarray(base), max(16, round(base.shape[1] * k)), max(16, round(base.shape[0] * k)))
+    lut = tone_lut(image, Edit(), base)
+    disp = tone_mod.apply_curve_rgb(np.ascontiguousarray(base), *lut) if lut is not None else base
+    from ..color import spaces as sp
+    srgb = sp.srgb_encode(np.clip(apply_matrix(disp, sp.conversion_matrix(sp.PROPHOTO, sp.SRGB)), 0, 1))
+    return base, np.ascontiguousarray(srgb, np.float32)
+
+
+def sam_features(image: Image, edit: Edit, size: str):
+    """SAM 2.1's look at the whole photo (local/sam.py), once per photo, model size and base settings: (features,
+    preview width, preview height)."""
+    from ..local import sam
+    e = Edit.from_dict(edit.to_dict())
+    e.masks = None
+    e.colourize = None
+    e.depth = None
+    e.sharpen.enabled = False
+    key = ("sam", size, e.raw_key())
+    with image._lock:
+        hit = image._memo.get(key)
+    if hit is not None:
+        return hit
+    with slog.stage("sam.encode", log, size=size):
+        _, srgb = _srgb_preview(image, e, sam.SIZE)
+        feats, ms = sam.encode(srgb, size)
+    res = (feats, srgb.shape[1], srgb.shape[0])
+    with image._lock:
+        image._memo = {kk: v for kk, v in image._memo.items() if kk[0] != "sam"}
+        image._memo[key] = res
+    image.sam_report = {"size": size, "ms": ms}
+    log.info("SAM 2.1 %s looked at the photo (%dx%d) in %.0f ms", size, srgb.shape[1], srgb.shape[0], ms)
+    return res
+
+
+def sam_bitmap(image: Image, edit: Edit, fg: list, bg: list | None, size: str) -> np.ndarray:
+    """SAM 2.1's outline of the thing under the clicks (S-frame fractions), as a soft uint8 bitmap in the S frame."""
+    from ..local import sam
+    feats, w, h = sam_features(image, edit, size)
+    t = __import__("time").perf_counter()
+    logits, score = sam.decode(feats, size, fg, bg or [])
+    _, _, cw, ch = image.raw.crop
+    k = min(1.0, 2048.0 / max(cw, ch))                       # the outline kept at up to 2048 px (soft edge)
+    bm = sam.bitmap(logits, max(16, round(ch * k)), max(16, round(cw * k)))
+    log.info("SAM 2.1 %s outline: %d+%d clicks, score %.2f, %.1f%% of the photo, %.0f ms", size, len(fg),
+             len(bg or []), score, 100.0 * float((bm > 127).mean()), (__import__("time").perf_counter() - t) * 1e3)
+    return bm
+
+
+def colour_match_solve(image: Image, edit: Edit, ref_image: Image, ref_edit: Edit | None = None,
+                       size: int = 320, ref_weight=None):
+    """Colour match (local/colourmatch.py): the setting changes that give the photo the reference photo's colour
+    statistics, solved on small renders of both. (p, base multipliers, report); apply them with
+    colour_match_apply. ``ref_weight``: optional per-pixel weight over the reference render (e.g. a subject)."""
+    from ..local import colourmatch as cm
+    ref_edit = ref_edit or Edit()
+    with slog.stage("colour_match.solve", log):
+        rs = min(0.5, size / float(max(output_size(ref_image, ref_edit))))
+        R = render(ref_image, ref_edit, scale=rs)
+        target = cm.stats(R, ref_weight)
+        sc = min(0.5, size / float(max(output_size(image, edit))))
+        base_mult = wb_multipliers(image, edit)
+        p, rep = cm.solve(lambda e: render(image, e, scale=sc), edit, target, base_mult, log=log)
+    rep["text"] = cm.describe(p)
+    rep["target"] = target.tolist()
+    log.info("colour match: %s (residual %.3f -> %.3f, %d renders, %.0f ms)", rep["text"], rep["start"], rep["end"],
+             rep["renders"], rep["ms"])
+    return p, base_mult, rep
+
+
+def colour_match_apply(edit: Edit, p, base_mult, amount: float = 1.0, image: Image | None = None) -> Edit:
+    """The edit with a colour match's setting changes applied at ``amount`` (0..1.5). With ``image``, a changed
+    white balance also gets its temperature and tint filled in, for the sliders."""
+    from ..local import colourmatch as cm
+    e = cm.apply(edit, np.asarray(p, float) * float(amount), base_mult)
+    if image is not None and e.white_balance.mode == "multipliers" and e.white_balance.multipliers:
+        try:
+            tt = wb_temp_tint(image, np.asarray(e.white_balance.multipliers, float))
+            if tt is not None:
+                e.white_balance.temperature, e.white_balance.tint = round(tt[0]), round(tt[1])
+        except Exception:
+            slog.log_exception("colour match: temperature/tint for the sliders failed", log)
+    return e
+
+
+def depth_map(image: Image, edit: Edit):
+    """Relative depth of the whole photo (local/depth.py; near = 1), once per image and base settings, from the
+    photo as displayed without depth effects: (D, crop width, crop height, milliseconds, haze colour, scene-linear
+    luminance of the copy it was measured on)."""
+    from ..local import depth as dp
+    e = Edit.from_dict(edit.to_dict())
+    e.depth = None
+    e.relight = None
+    e.colourize = None
+    e.sharpen.enabled = False
+    key = ("depth", e.raw_key())
+    with image._lock:
+        hit = image._memo.get(key)
+    if hit is not None:
+        return hit
+    with slog.stage("depth.predict", log):
+        base, srgb = _srgb_preview(image, e, 1024)
+        D, ms = dp.predict(srgb)
+        Y = tone_mod.luminance(np.ascontiguousarray(base)).reshape(base.shape[:2])
+        far = D < np.percentile(D, 15)                     # the haze colour: the brightest of the far tenth
+        sky = base[far] if far.sum() > 50 else base.reshape(-1, 3)
+        ys = Y[far] if far.sum() > 50 else Y.ravel()
+        A = np.median(sky[ys >= np.percentile(ys, 70)], axis=0)
+        A = A / max(float(A.max()), 1e-6) * float(np.clip(np.percentile(Y, 97), 0.2, 1.0))
+    _, _, cw, ch = image.raw.crop
+    res = (D, cw, ch, ms, A.astype(np.float32), Y.astype(np.float32))
+    with image._lock:
+        image._memo = {kk: v for kk, v in image._memo.items() if kk[0] != "depth"}
+        image._memo[key] = res
+    image.depth_report = {"ms": ms, "size": list(D.shape)}
+    log.info("depth: %dx%d map in %.0f ms", D.shape[1], D.shape[0], ms)
+    return res
+
+
+def apply_depth(image: Image, edit: Edit, rgb: np.ndarray, ox: int, oy: int, step: int) -> np.ndarray:
+    """Haze by distance on a scene-linear block whose top-left is at crop-frame (ox, oy) (local/depth.py)."""
+    from ..local import depth as dp
+    D, cw, ch, _, A, _ = depth_map(image, edit)
+    blk = _prior_block((D, cw, ch), ox, oy, rgb.shape[0], rgb.shape[1], step)
+    with slog.stage("depth.haze", log, w=rgb.shape[1], h=rgb.shape[0]):
+        return dp.haze(rgb, blk, float(dp.settings(edit.depth)["haze"]), A)
+
+
+def relight_map(image: Image, edit: Edit):
+    """The relight gain over the whole photo (local/relight.py) from the depth map's normals and the light measured
+    on the photo: (G, crop width, crop height, report). The normals and the measured light are kept per photo."""
+    from ..local import relight as rl
+    D, cw, ch, _, _, Y = depth_map(image, edit)
+    e = Edit.from_dict(edit.to_dict())
+    e.depth, e.relight, e.colourize = None, None, None
+    e.sharpen.enabled = False
+    key = ("relight_fit", e.raw_key())
+    with image._lock:
+        hit = image._memo.get(key)
+    if hit is None:
+        with slog.stage("relight.fit", log):
+            N = rl.normals(D)
+            coef = rl.fit_light(Y, N)
+        hit = (N, coef)
+        with image._lock:
+            image._memo = {kk: v for kk, v in image._memo.items() if kk[0] != "relight_fit"}
+            image._memo[key] = hit
+        c = coef[1:]
+        az = math.degrees(math.atan2(-c[1], c[0])) if np.hypot(c[0], c[1]) > 1e-9 else 0.0
+        el = math.degrees(math.atan2(c[2], float(np.hypot(c[0], c[1])) + 1e-12))
+        image.relight_report = {"azimuth": az, "elevation": el, "strength": float(np.linalg.norm(c) /
+                                                                                   max(abs(coef[0]), 1e-9))}
+        log.info("relight: measured light %s (azimuth %.0f, elevation %.0f)", rl.direction_name(az, el), az, el)
+    N, coef = hit
+    s = rl.settings(edit.relight)
+    gk = ("relight_gain", key, tuple(round(s[k], 2) for k in sorted(s)))
+    with image._lock:
+        G = image._memo.get(gk)
+    if G is None:
+        G = rl.gain(N, coef, edit.relight)
+        with image._lock:
+            image._memo = {kk: v for kk, v in image._memo.items() if kk[0] != "relight_gain"}
+            image._memo[gk] = G
+    return G, cw, ch
+
+
+def apply_relight(image: Image, edit: Edit, rgb: np.ndarray, ox: int, oy: int, step: int) -> np.ndarray:
+    """The light moved on a scene-linear block whose top-left is at crop-frame (ox, oy) (local/relight.py)."""
+    G, cw, ch = relight_map(image, edit)
+    blk = _prior_block((G, cw, ch), ox, oy, rgb.shape[0], rgb.shape[1], step)
+    with slog.stage("relight.apply", log, w=rgb.shape[1], h=rgb.shape[0]):
+        return (rgb * blk[..., None]).astype(np.float32)
+
+
+def depth_shape(image: Image, edit: Edit, lo: float = 0.0, hi: float = 0.4, soft: float = 0.1) -> dict:
+    """A depth mask shape for the photo (masks.py, "depth"): the depth map as a bitmap in the S frame, and the
+    distance range (near = 1)."""
+    from ..local import masks as mk
+    D = depth_map(image, edit)[0]
+    return {"type": "depth", "op": "add", "w": int(D.shape[1]), "h": int(D.shape[0]),
+            "data": mk.encode_bitmap(np.round(D * 255).astype(np.uint8)), "lo": lo, "hi": hi, "soft": soft}
+
+
+def depth_view(image: Image, edit: Edit, scale: float = 0.25) -> np.ndarray:
+    """The depth map as the displayed photo shows it (crop, rotation and geometry applied), coloured warm near and
+    cool far (RGBA uint8), for the "Show depth map" overlay."""
+    from ..local import depth as dp
+    shp = depth_shape(image, edit)
+    shp["raw"] = True
+    e = Edit.from_dict(edit.to_dict())
+    e.masks = [{"name": "depth", "enabled": True, "adjust": {}, "shapes": [shp]}]
+    return dp.colour_map(render_mask(image, e, 0, scale))
+
+
+def halftone_map(image: Image, edit: Edit) -> dict:
+    """The printing screen found in the photo (local/halftone.py, measure), once per image and base settings,
+    from a full-resolution crop of its middle (the dots are finer than any preview)."""
+    from ..local import halftone as hft
+    e = Edit.from_dict(edit.to_dict())
+    e.halftone = None
+    e.stains = None
+    e.scratches = None
+    e.colourize = None
+    e.sharpen.enabled = False
+    key = ("halftone", e.raw_key())
+    with image._lock:
+        hit = image._memo.get(key)
+    if hit is not None:
+        return hit
+    _, _, cw, ch = image.raw.crop
+    s = int(min(hft.CROP, cw, ch))
+    box = ((cw - s) // 2, (ch - s) // 2, s, s)
+    with slog.stage("halftone.measure", log, side=s):
+        crop = linear_rgb(image, e, box, half_size=False, cache=False)
+        m = hft.measure(np.ascontiguousarray(crop, np.float32))
+    with image._lock:
+        image._memo = {kk: v for kk, v in image._memo.items() if kk[0] != "halftone"}
+        image._memo[key] = m
+    image.halftone_report = dict(m)
+    if m["peaks"]:
+        log.info("halftone: screen every %.2f px at %.0f degrees, %d peaks, %.0f dB", m["period"], m["angle"],
+                 len(m["peaks"]), m["strength"])
+    else:
+        log.info("halftone: no printing screen found")
+    return m
+
+
+def apply_halftone(image: Image, edit: Edit, rgb: np.ndarray, step: int) -> np.ndarray:
+    """Printing dots taken out of a scene-linear block (local/halftone.py): the same notches in every block."""
+    from ..local import halftone as hft
+    m = halftone_map(image, edit)
+    if not m["peaks"]:
+        return rgb
+    with slog.stage("halftone.clean", log, w=rgb.shape[1], h=rgb.shape[0], peaks=len(m["peaks"])):
+        return hft.clean(rgb, m["peaks"], edit.halftone, step)
+
+
+def stain_map(image: Image, edit: Edit):
+    """The stain measurement over the whole photo (local/stains.py, measure), once per image and base settings:
+    (measurement, crop width, crop height). Made from the photo as it is before stains, dust and colour."""
+    from ..local import stains as stn
+    e = Edit.from_dict(edit.to_dict())
+    sens = float(stn.settings(e.stains)["sensitivity"])
+    e.stains = None
+    e.scratches = None
+    e.colourize = None
+    e.sharpen.enabled = False
+    key = ("stain", e.raw_key(), round(sens, 3))      # (printing dots, when on, are already out of this base)
+    with image._lock:
+        hit = image._memo.get(key)
+    if hit is not None:
+        return hit
+    with slog.stage("stains.measure", log):
+        base = linear_rgb(image, e, None, half_size=True, cache=False)
+        k = min(1.0, 1024.0 / max(base.shape[:2]))
+        if k < 1:
+            base = resize(np.ascontiguousarray(base), max(16, round(base.shape[1] * k)),
+                          max(16, round(base.shape[0] * k)))
+        m = stn.measure(np.ascontiguousarray(base, np.float32), sens)
+    _, _, cw, ch = image.raw.crop
+    res = (m, cw, ch)
+    with image._lock:
+        image._memo = {kk: v for kk, v in image._memo.items() if kk[0] != "stain"}
+        image._memo[key] = res
+    image.stain_report = {"stained": m["stained"], "lost": m["lost_frac"], "coef": m["coef"]}
+    log.info("stains: %.1f%% of the photo stained, %.1f%% bloom cores (picture may be gone); fit %s",
+             100 * m["stained"], 100 * m["lost_frac"], [round(c, 3) for c in m["coef"]])
+    return res
+
+
+def apply_stains(image: Image, edit: Edit, rgb: np.ndarray, ox: int, oy: int, step: int) -> np.ndarray:
+    """Stains and corrosion unmixed on a scene-linear block whose top-left is at crop-frame (ox, oy), full-resolution
+    pixels ``step`` apart (local/stains.py). The colour backgrounds come from the whole-photo measurement, so a 100%
+    view and the export are cleaned exactly alike."""
+    from ..local import stains as stn
+    m, cw, ch = stain_map(image, edit)
+    h, w = rgb.shape[:2]
+    mw = _prior_block((m["med_w"], cw, ch), ox, oy, h, w, step)
+    mg = _prior_block((m["med_g"], cw, ch), ox, oy, h, w, step)
+    with slog.stage("stains.clean", log, w=w, h=h):
+        return stn.clean(rgb, mw, mg, m["coef"], edit.stains, step, angle=m.get("angle", 0.0))
+
+
+def stain_lost_shape(image: Image, edit: Edit) -> dict | None:
+    """Where the picture may be gone under a bloom core (local/stains.py), as an object-mask shape in the S frame
+    (for the "Show what's lost" overlay); None when stains are off."""
+    from ..local import masks as mk
+    if not _stains_on(edit):
+        return None
+    m, _, _ = stain_map(image, edit)
+    lost = m["lost"]
+    return {"type": "object", "op": "add", "w": int(lost.shape[1]), "h": int(lost.shape[0]),
+            "data": mk.encode_bitmap(lost)}
+
+
+def scratch_prior(image: Image, edit: Edit):
+    """The learned scratch detector's damage map over the whole photo (local/scratchnet.py), measured once per
+    image and base settings: (P, crop width, crop height), or None when the detector is not installed."""
+    from ..local import scratchnet as sn
+    if not sn.available():
+        return None
+    e = Edit.from_dict(edit.to_dict())
+    e.scratches = None
+    e.sharpen.enabled = False
+    key = ("scrnet", e.raw_key())
+    with image._lock:
+        hit = image._memo.get(key)
+    if hit is not None:
+        return hit
+    with slog.stage("scratches.learned_map", log):
+        base = linear_rgb(image, e, None, half_size=True, cache=False)
+        k = min(1.0, 1024.0 / max(base.shape[:2]))
+        if k < 1:
+            base = resize(np.ascontiguousarray(base), max(16, round(base.shape[1] * k)),
+                          max(16, round(base.shape[0] * k)))
+        lut = tone_lut(image, Edit(), base)
+        disp = tone_mod.apply_curve_rgb(np.ascontiguousarray(base), *lut) if lut is not None else base
+        from ..color import spaces as sp
+        srgb = sp.srgb_encode(np.clip(apply_matrix(disp, sp.conversion_matrix(sp.PROPHOTO, sp.SRGB)), 0, 1))
+        grey = (srgb @ np.array([0.299, 0.587, 0.114], np.float32)).astype(np.float32)
+        _, _, cw, ch = image.raw.crop
+        P = sn.damage_map(grey, sn.short_for(ch, cw))
+    res = (P, cw, ch)
+    with image._lock:
+        image._memo = {kk: v for kk, v in image._memo.items() if kk[0] != "scrnet"}
+        image._memo[key] = res
+    log.info("learned scratch map: %dx%d, %.2f%% marked", P.shape[1], P.shape[0], 100.0 * float((P > 0.35).mean()))
+    return res
+
+
+def _prior_block(prior, ox: int, oy: int, h: int, w: int, step: int) -> np.ndarray:
+    """The damage map sampled at a block's pixels (block top-left at crop-frame (ox, oy), ``step`` apart)."""
+    from scipy.ndimage import map_coordinates
+    P, cw, ch = prior
+    ys = (oy + (np.arange(h) + 0.5) * step) * (P.shape[0] / float(ch)) - 0.5
+    xs = (ox + (np.arange(w) + 0.5) * step) * (P.shape[1] / float(cw)) - 0.5
+    yy, xx = np.meshgrid(ys, xs, indexing="ij")
+    return map_coordinates(P, [yy, xx], order=1, mode="nearest").astype(np.float32)
+
+
+def _protect_block(edit: Edit, ox: int, oy: int, h: int, w: int, step: int, sw: int, sh: int):
+    """Eyes, brows, lips and nostrils of the faces in the edit (their catchlights and highlights look like dust)."""
+    from ..local import portrait as pt
+    faces = pt.faces_of(edit.portrait)
+    if not faces:
+        return None
+    m = np.zeros((h, w), bool)
+    ys = oy + (np.arange(h) + 0.5) * step
+    xs = ox + (np.arange(w) + 0.5) * step
+    for f in faces:
+        try:
+            circles = pt.feature_avoid(pt.Face(f, sw, sh))
+        except Exception:
+            continue
+        for cx, cy, r in circles:
+            r = r * 1.3
+            iy = (ys > cy - r) & (ys < cy + r)
+            ix = (xs > cx - r) & (xs < cx + r)
+            if iy.any() and ix.any():
+                sub = (ys[iy][:, None] - cy) ** 2 + (xs[ix][None, :] - cx) ** 2 <= r * r
+                m[np.ix_(iy, ix)] |= sub
+    return m if m.any() else None
+
+
+def apply_scratches(image: Image, edit: Edit, rgb: np.ndarray, ox: int, oy: int, step: int,
+                    whole: bool = False) -> np.ndarray:
+    """Dust and scratch removal on a scene-linear block whose top-left is at crop-frame (ox, oy), full-resolution
+    pixels, ``step`` apart (local/scratches.py, with the learned detector's map when it is installed)."""
+    from ..local import scratches as scr
+    prior = None
+    try:
+        pm = scratch_prior(image, edit)
+        if pm is not None:
+            prior = _prior_block(pm, ox, oy, rgb.shape[0], rgb.shape[1], step)
+    except Exception:
+        slog.log_exception("learned scratch detector failed; using the filter alone", log)
+    _, _, sw, sh = image.raw.crop
+    protect = _protect_block(edit, ox, oy, rgb.shape[0], rgb.shape[1], step, sw, sh)
+    st = {}
+    out = scr.clean(rgb, edit.scratches, ox, oy, step, stats=st, protect=protect, prior=prior)
+    if whole:
+        image.scratch_report = dict(st, learned=prior is not None, half=step > 1)
+    return out
+
+
+def jpeg_repairable(image: Image) -> bool:
+    raw = getattr(image, "raw", None)
+    return bool(getattr(raw, "is_scan", False)) and str(getattr(raw, "path", "")).lower().endswith((".jpg", ".jpeg"))
+
+
+def _scan_source(image: Image, edit: Edit):
+    """The scan's pixels as the pipeline reads them: the file as decoded; with JPEG repair, repaired inside its
+    quantisation intervals (local/jpegfix.py); with Clean, its measured noise removed (local/scanclean.py). Each
+    once per photo and setting (kept with it)."""
+    src = _scan_repaired(image, edit)
+    if not edit.denoise.enabled or src.data.dtype.kind == "f":
+        return src
+    dn = edit.denoise
+    key = ("scanclean", round(float(dn.luma), 3), round(float(dn.chroma), 3), round(float(dn.grain), 3),
+           bool(dn.safeguard), src is not image.raw)
+    with image._lock:
+        hit = image._memo.get(key)
+    if hit is not None:
+        return hit
+    import dataclasses
+    from ..local import scanclean as sc
+    top = float(np.iinfo(src.data.dtype).max)
+    enc = src.data.astype(np.float32) / top
+    with slog.stage("scan.clean", log, w=src.width, h=src.height, luma=dn.luma, chroma=dn.chroma):
+        nk = ("scannoise", src is not image.raw)
+        with image._lock:
+            noise = image._memo.get(nk)
+        if noise is None:
+            noise = sc.measure(enc)
+            with image._lock:
+                image._memo[nk] = noise
+        st: dict = {}
+        out = sc.clean(enc, noise, float(dn.luma), float(dn.chroma), float(dn.grain), bool(dn.safeguard), st)
+        fixed = dataclasses.replace(src, data=np.round(out * 65535.0).astype(np.uint16), bits=16, _luts=None)
+    image.scan_noise_report = {"levels": noise["levels"], "protected": st.get("protected", 0),
+                               "sites": st.get("sites", 1)}
+    log.info("scan clean: noise about %.2f levels, %d pixels kept by the safeguard", noise["levels"],
+             st.get("protected", 0))
+    with image._lock:
+        image._memo = {k: v for k, v in image._memo.items() if not (isinstance(k, tuple) and k and k[0] == "scanclean")}
+        image._memo[key] = fixed
+    return fixed
+
+
+def _scan_repaired(image: Image, edit: Edit):
+    """The scan's pixels, JPEG-repaired when that is on (local/jpegfix.py)."""
+    raw = image.raw
+    if not ((edit.jpeg or {}).get("on") and jpeg_repairable(image)):
+        return raw
+    with image._lock:
+        hit = image._memo.get(("jpegfix",))
+    if hit is not None:
+        return hit
+    import dataclasses
+    from PIL import Image as PI
+    from ..io.scanfile import _upright
+    from ..local import jpegfix as jf
+    with slog.stage("jpeg.repair", log, file=os.path.basename(raw.path)):
+        a, rep = jf.repair_file(raw.path)
+        orient = 1
+        try:
+            with PI.open(raw.path) as im:
+                orient = int(im.getexif().get(274, 1) or 1)
+        except Exception:
+            pass
+        a = _upright(a, orient)
+        if a.shape[:2] != raw.data.shape[:2] or a.ndim != raw.data.ndim:
+            log.warning("JPEG repair: %s came back %s, the file is %s; repair skipped", os.path.basename(raw.path),
+                        a.shape, raw.data.shape)
+            return raw
+        fixed = dataclasses.replace(raw, data=a, bits=16, _luts=None)
+    image.jpeg_report = rep
+    log.info("JPEG repair: quality about %d, %d steps, %.0f ms", rep["quality"], rep["iterations"], rep["ms"])
+    with image._lock:
+        image._memo[("jpegfix",)] = fixed
+    return fixed
+
+
+def _scan_linear(image: Image, edit: Edit, region, half_size: bool) -> np.ndarray:
+    """Stages 1-12 for a scan: decode the box, undo the file's colour space (scanfile.py) and the Standard curve
+    (or turn a negative into a positive), then white balance in linear ProPhoto (the scan's "camera")."""
+    raw = _scan_source(image, edit)
+    x, y, w, h = _crop_box(image, region)
+    if half_size:
+        x, y, w, h = x // 2 * 2, y // 2 * 2, w // 2 * 2, h // 2 * 2
+    bx, by, bw, bh = x, y, w, h                    # the box asked for, inside the block read (context round it)
+    if _old_on(edit):
+        pd = _old_photo_pad(image, edit) // 2 * 2 * (2 if half_size else 1)
+        x0, y0 = max(0, x - pd), max(0, y - pd)
+        x1, y1 = min(raw.width, x + w + pd), min(raw.height, y + h + pd)
+        if half_size:
+            x0, y0 = x0 // 2 * 2, y0 // 2 * 2
+            x1, y1 = x0 + (x1 - x0) // 2 * 2, y0 + (y1 - y0) // 2 * 2
+        x, y, w, h = x0, y0, x1 - x0, y1 - y0
+    with slog.stage("scan.decode", log, w=w, h=h, half=half_size):
+        disp = raw.display_linear((x, y, w, h), half_size)
+    from ..local import film as fm
+    if fm.active(edit.film):
+        params = film_params(image, edit)
+        with slog.stage("film.positive", log, kind=params.get("kind")):
+            rgb = fm.positive(disp, params, scene=True)
+    else:
+        rgb = scan_to_scene(disp)
+    mult = wb_multipliers(image, edit)
+    if np.any(np.abs(mult - mult[1]) > 1e-6):
+        rgb *= (mult / mult[1]).astype(np.float32)
+    if _old_on(edit):
+        st = 2 if half_size else 1
+        if _halftone_on(edit):
+            rgb = apply_halftone(image, edit, rgb, st)
+        if _stains_on(edit):
+            rgb = apply_stains(image, edit, rgb, x, y, st)
+        if _scratches_on(edit):
+            rgb = apply_scratches(image, edit, rgb, x, y, st, whole=region is None)
+        if _colour_on(edit):
+            rgb = apply_colourize(image, edit, rgb, x, y, st)
+        if _relight_on(edit):
+            rgb = apply_relight(image, edit, rgb, x, y, st)
+        if _depth_on(edit):
+            rgb = apply_depth(image, edit, rgb, x, y, st)
+        ix, iy = (bx - x) // st, (by - y) // st
+        rgb = rgb[iy:iy + bh // st, ix:ix + bw // st]
+    return np.ascontiguousarray(rgb, np.float32)
+
+
+def _scan_noise_model(image: Image):
+    """A scan has no sensor model: one constant noise level, measured as the robust spread of the finest
+    differences of its scene-linear luminance (grain included), in the noise-model shape the gates expect."""
+    from ..calib.noise import NoiseModel
+    raw = image.raw
+    k = max(1, int(math.sqrt(raw.width * raw.height / 4.0e6)))
+    disp = raw.display_linear((0, 0, raw.width // k * k, raw.height // k * k))[::k, ::k] if k > 1 \
+        else raw.display_linear()
+    Y = tone_mod.luminance(np.ascontiguousarray(scan_to_scene(np.ascontiguousarray(disp)))).reshape(disp.shape[:2])
+    d = (Y[1:-1, 1:-1] * 4 - Y[:-2, 1:-1] - Y[2:, 1:-1] - Y[1:-1, :-2] - Y[1:-1, 2:]) / math.sqrt(20.0)
+    mid = (Y[1:-1, 1:-1] > 0.03) & (Y[1:-1, 1:-1] < 0.5)
+    v = d[mid] if mid.sum() > 1000 else d.reshape(-1)
+    sig = float(1.4826 * np.median(np.abs(v - np.median(v)))) if v.size else 1e-3
+    sig = max(sig, 1e-5)
+    log.info("scan noise: sigma %.5f (scene-linear, constant)", sig)
+    return NoiseModel(a=np.zeros((2, 2)), b=np.full((2, 2), sig * sig), source="scan (measured)",
+                      confidence="low")
 
 
 def apply_sharpen(image: Image, edit: Edit, rgb: np.ndarray) -> np.ndarray:
@@ -982,10 +1845,23 @@ def render(image: Image, edit: Edit | None = None, region=None, scale: float = 1
     if region is None:
         warp = make_warp(image, edit)
         if warp.warped:
-            return _render_warp(image, edit, warp, None, scale)
+            return _with_subjects(image, edit, _render_warp(image, edit, warp, None, scale), None)
         if not warp.identity:                       # crop only: no resampling, just the rectangle
-            return _render_plain(image, edit, _window_to_s(image, warp, None), scale)
+            return _with_subjects(image, edit, _render_plain(image, edit, _window_to_s(image, warp, None), scale),
+                                  None)
+        return _with_subjects(image, edit, _render_plain(image, edit, region, scale), None)
     return _render_plain(image, edit, region, scale)
+
+
+def _with_subjects(image: Image, edit: Edit, out: np.ndarray, window) -> np.ndarray:
+    """The composite's subjects laid on a finished picture (pipeline/composite.py); not on masks or analysis views."""
+    if not edit.composite or getattr(_VIEW, "what", None) is not None:
+        return out
+    from . import composite as cp
+    if not cp.active(edit):
+        return out
+    with slog.stage("composite", log, layers=len(cp.layers(edit))):
+        return cp.apply(image, edit, out, window)
 
 
 def render_view(image: Image, edit: Edit | None, u: float, v: float, w: int = 720, h: int = 480) -> np.ndarray:
@@ -994,8 +1870,9 @@ def render_view(image: Image, edit: Edit | None, u: float, v: float, w: int = 72
     warp = make_warp(image, edit)
     x, y, w, h = view_window(image, edit, u, v, w, h)
     if warp.warped:
-        return _render_warp(image, edit, warp, (x, y, w, h), 1.0)
-    return _render_plain(image, edit, _window_to_s(image, warp, (x, y, w, h)), 1.0)
+        return _with_subjects(image, edit, _render_warp(image, edit, warp, (x, y, w, h), 1.0), (x, y, w, h))
+    return _with_subjects(image, edit, _render_plain(image, edit, _window_to_s(image, warp, (x, y, w, h)), 1.0),
+                          (x, y, w, h))
 
 
 def render_window(image: Image, edit: Edit | None, window, scale: float = 1.0) -> np.ndarray:
@@ -1011,8 +1888,9 @@ def render_window(image: Image, edit: Edit | None, window, scale: float = 1.0) -
     scale = float(min(max(scale, 0.02), 1.0))
     with slog.stage("render.window", log, window=f"{w}x{h}+{x}+{y}", scale=round(scale, 3)):
         if warp.warped:
-            return _render_warp(image, edit, warp, (x, y, w, h), scale)
-        return _render_plain(image, edit, _window_to_s(image, warp, (x, y, w, h)), scale)
+            return _with_subjects(image, edit, _render_warp(image, edit, warp, (x, y, w, h), scale), (x, y, w, h))
+        return _with_subjects(image, edit, _render_plain(image, edit, _window_to_s(image, warp, (x, y, w, h)), scale),
+                              (x, y, w, h))
 
 
 def _window_to_s(image: Image, warp, window):
@@ -1145,13 +2023,15 @@ def auto_colour(image: Image, edit: Edit) -> dict:
 def auto_white_balance(image: Image, method: str = "grey_edge", mood: float | None = None):
     """Auto white balance (plan 23.9). Returns (multipliers [R, G, B] or None, how, info).
 
-    method: "grey_edge" or "grayness". mood: how far to correct from the as-shot balance, 0..1 (1 = fully
+    method: "grey_edge", "grayness" or "night". mood: how far to correct from the as-shot balance, 0..1 (1 = fully
     neutral); None = the default for this photo (60% for a warm light in a low-light photo, else 90%).
     info: both estimates in kelvin, their agreement, the confidence, the mood used, the number of lights."""
     from ..color import autowb as aw
     est = aw.estimates(image)
-    m = est["grayness"] if method == "grayness" and est["grayness"] is not None else est["grey_edge"]
-    how = "grayness index" if (method == "grayness" and est["grayness"] is not None) else "grey edge"
+    if method in ("grayness", "night") and est.get(method) is not None:
+        m, how = est[method], {"grayness": "grayness index", "night": "night (SGP-LRD)"}[method]
+    else:
+        m, how = est["grey_edge"], "grey edge"
     if m is None:
         m, how = aw.auto_multipliers(image, "grey_edge")          # grey world, the last resort
         if m is None:
@@ -1164,8 +2044,8 @@ def auto_white_balance(image: Image, method: str = "grey_edge", mood: float | No
     out = aw.keep_mood(m, as_shot, k)
     info = {"mood": k, "confidence": est["confidence"], "agreement_deg": est["agreement_deg"],
             "lights": len(est["lights"]), "in_band": not pulled, "neutral_k": round(T)}
-    for name in ("grey_edge", "grayness"):
-        if est[name] is not None:
+    for name in ("grey_edge", "grayness", "night"):
+        if est.get(name) is not None:
             info[name + "_k"] = round(cam.temp_tint_from_multipliers(cam_xyz, est[name])[0])
     if len(est["lights"]) > 1:
         info["lights_k"] = [round(cam.temp_tint_from_multipliers(cam_xyz, l)[0]) for l, _ in est["lights"]]
@@ -1207,6 +2087,24 @@ def view_to_s(image: Image, edit: Edit, u, v):
     return np.asarray(xs, float) / sw, np.asarray(ys, float) / sh
 
 
+def change_map(image: Image, edit: Edit, scale: float = 0.25) -> np.ndarray:
+    """How much the automatic tools (printing dots, stains, dust and scratches, colourize) changed each pixel of the
+    photo as displayed: 0 = untouched, 1 = a large change (H x W), for the "Show what changed" overlay. Both renders
+    use every other setting as it is, so only those tools' work shows."""
+    e0 = Edit.from_dict(edit.to_dict())
+    e0.halftone = None
+    e0.stains = None
+    e0.scratches = None
+    e0.colourize = None
+    with slog.stage("change_map", log, scale=round(scale, 3)):
+        a = render(image, edit, scale=scale)
+        b = render(image, e0, scale=scale)
+    if a.shape != b.shape:
+        b = resize(np.ascontiguousarray(b), a.shape[1], a.shape[0])
+    d = np.abs(np.log(np.maximum(a, 0.0) + 1e-3) - np.log(np.maximum(b, 0.0) + 1e-3)).max(axis=2)
+    return np.clip((d - 0.02) / 0.25, 0.0, 1.0).astype(np.float32)
+
+
 def render_mask(image: Image, edit: Edit, index: int, scale: float = 0.25) -> np.ndarray:
     """Mask ``index`` of the edit as the displayed photo shows it (0..1, H x W), for the overlay."""
     _VIEW.what = ("mask", int(index))
@@ -1239,12 +2137,21 @@ def _unorient(img: np.ndarray, flip: int) -> np.ndarray:
     return img
 
 
-def object_mask(image: Image, edit: Edit, fg: list, bg: list | None = None, size: int = 480) -> dict:
+def object_mask(image: Image, edit: Edit, fg: list, bg: list | None = None, size: int = 480,
+                model: str | None = None) -> dict:
     """'Click an object': a mask shape for the object under the foreground points (S-frame fractions), not
-    reaching the background points. Computed on a small render of the whole photo, stored as a bitmap."""
+    reaching the background points, stored as a bitmap. ``model``: "tiny" / "large" = SAM 2.1 of that size
+    (local/sam.py); None or "classic" = the Studio's own colour-and-edge method on a small render."""
     from ..lens.geometry import GeomParams  # noqa: F401  (geometry is reset below)
     from ..local import masks as mk
+    from ..local import sam
     from .edit import Geometry
+    if model in sam.SIZES and sam.available(model) and fg:
+        with slog.stage("masks.object_sam", log, model=model, fg=len(fg), bg=len(bg or [])):
+            bm = sam_bitmap(image, edit, fg, bg, model)
+        return {"type": "object", "op": "add", "w": int(bm.shape[1]), "h": int(bm.shape[0]),
+                "data": mk.encode_bitmap(bm), "fg": [list(map(float, p)) for p in fg],
+                "bg": [list(map(float, p)) for p in (bg or [])], "model": f"sam2.1-{model}"}
     e = Edit.from_dict(edit.to_dict())
     e.masks = None
     e.geometry = Geometry()

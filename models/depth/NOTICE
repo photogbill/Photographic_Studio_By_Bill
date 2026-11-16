@@ -1,0 +1,19 @@
+Depth model used by Photographic Studio By Bill (Develop > Cognitive Adjustments > Depth; Masks > Depth)
+
+depth_anything_v2_small.npz    Depth Anything V2, Small (ViT-S encoder, 24.8 M parameters)
+
+Depth Anything V2: Lihe Yang, Bingyi Kang, Zilong Huang, Zhen Zhao, Xiaogang Xu, Jiashi Feng, Hengshuang Zhao,
+"Depth Anything V2", NeurIPS 2024. Code and weights: https://github.com/DepthAnything/Depth-Anything-V2
+The Small model is licensed under the Apache License, Version 2.0; a copy is in the file LICENSE in this folder.
+(The Base, Large and Giant models are licensed CC-BY-NC-4.0, non-commercial, and are NOT used here.)
+Unless required by applicable law or agreed to in writing, the model is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
+
+Source of this file: the ONNX export model.onnx from https://huggingface.co/onnx-community/depth-anything-v2-small
+(model card licence Apache-2.0).
+
+What was changed: the ONNX graph was simplified for a fixed 518 x 518 input (onnxsim) and converted by
+tools/convert_onnx_model.py into one NumPy file; weights of 4096 values or more are stored as 8-bit integers with
+one scale per output channel (the depth it predicts differs from the float model's by about 0.3% of its range on
+average). It is run by the Studio's own NumPy code (studio/engine/local/onnxnp.py, GPL-3.0); ONNX Runtime is not
+used.

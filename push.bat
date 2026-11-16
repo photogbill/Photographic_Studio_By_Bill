@@ -74,14 +74,17 @@ if "!LISTSIZE!"=="0" (
 
 rem --- 3. Safety check: no pictures, raws or big files, whatever .gitignore says ---
 echo  3. Safety check: no photos, raws or big files...
+rem  Converted models - models\NAME\*.npz, which .gitignore lets in - may go, up to 95 MB: GitHub refuses 100 MB.
 set "BAD=0"
 for /f "usebackq delims=" %%F in (`git -c core.quotepath=off diff --cached --name-only --diff-filter=ACMR`) do (
   set "P=%%F"
   set "P=!P:/=\!"
   set "EXT="
   for %%Z in ("!P!") do set "EXT=%%~xZ"
+  set "MODEL=0"
+  if /i "!P:~0,7!"=="models\" set "MODEL=1"
   for %%E in (.cr2 .cr3 .crw .nef .nrw .arw .srf .sr2 .raf .orf .rw2 .pef .dng .x3f .iiq .3fr .erf .mrw .srw .rwl .kdc .dcr .mos .jpg .jpeg .tif .tiff .heic .psd .psb .pdf .npy .npz) do (
-    if /i "!EXT!"=="%%E" (
+    if /i "!EXT!"=="%%E" if /i not "!MODEL!!EXT!"=="1.npz" (
       set "BAD=1"
       echo     BLOCKED, picture, raw or data file: %%F
       >>"%LOG%" echo BLOCKED type: %%F
@@ -95,9 +98,11 @@ for /f "usebackq delims=" %%F in (`git -c core.quotepath=off diff --cached --nam
   set "SZ="
   for %%Z in ("!P!") do set "SZ=%%~zZ"
   if not defined SZ set "SZ=0"
-  if !SZ! GTR 10485760 (
+  set "LIM=10485760"
+  if "!MODEL!"=="1" set "LIM=99614720"
+  if !SZ! GTR !LIM! (
     set "BAD=1"
-    echo     BLOCKED, bigger than 10 MB: %%F
+    echo     BLOCKED, too big ^(10 MB; models 95 MB^): %%F
     >>"%LOG%" echo BLOCKED size: %%F
   )
 )

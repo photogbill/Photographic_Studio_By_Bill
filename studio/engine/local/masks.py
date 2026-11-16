@@ -171,6 +171,15 @@ def shape_alpha(sh: dict, c: Ctx) -> np.ndarray:
         fx = c.xs / c.sw * bm.shape[1] - 0.5
         a = map_coordinates(bm, [fy, fx], order=1, mode="nearest").astype(np.float32)
         return refine(a, c)
+    if t == "depth":                         # select by distance (local/depth.py): near = 1, far = 0
+        bm = decode_bitmap(sh["data"], int(sh["w"]), int(sh["h"])).astype(np.float32) / 255.0
+        fy = c.ys / c.sh * bm.shape[0] - 0.5
+        fx = c.xs / c.sw * bm.shape[1] - 0.5
+        D = map_coordinates(bm, [fy, fx], order=1, mode="nearest").astype(np.float32)
+        if sh.get("raw"):                    # the depth map itself (the "Show depth map" view)
+            return D
+        lo, hi, s = float(sh.get("lo", 0.0)), float(sh.get("hi", 0.4)), max(float(sh.get("soft", 0.1)), 1e-3)
+        return refine((_smooth((D - (lo - s)) / s) * (1.0 - _smooth((D - hi) / s))).astype(np.float32), c)
     raise ValueError(f"unknown mask shape {t!r}")
 
 

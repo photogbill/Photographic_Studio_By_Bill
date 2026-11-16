@@ -885,7 +885,7 @@ class Viewer(QWidget):
             self._erase = bool(e.modifiers() & Qt.KeyboardModifier.AltModifier)
         elif self.tool in ("linear", "radial"):
             self._pts = [uv, uv]
-        elif self.tool in ("object", "colour"):
+        elif self.tool in ("object", "colour", "hint"):
             self.tool_click.emit(uv[0], uv[1], bool(e.modifiers() & Qt.KeyboardModifier.AltModifier))
         self.update()
 
@@ -1456,11 +1456,200 @@ class DevelopPage(QWidget):
         g.add(hbox(ab, sb))
         self._fill_looks()
         bl.addWidget(g)
+        # Old photo and film
+        g = Group("Old photo and film", "For scans and camera copies of prints, slides and negatives: turn a negative "
+                  "into a positive, take out dust and scratches, give a black and white photo its colour.")
+        self.film_kind = g.add(QComboBox())
+        self.film_kind.addItem("Positive (a print, a slide or a digital photo)", "")
+        self.film_kind.addItem("Black and white negative", "bw")
+        self.film_kind.addItem("Colour negative", "colour")
+        self.film_kind.setToolTip("A negative is turned positive from its own film base and density range, "
+                                  "measured on the whole frame. The orange mask of colour film goes with it.")
+        self.pick_base = QPushButton("Pick the film base")
+        self.pick_base.setCheckable(True)
+        self.pick_base.setToolTip("Click clear film between frames or at the edge (no picture on it). Without a "
+                                  "pick, the clearest part of the film is used.")
+        self.pick_base.toggled.connect(lambda on: self._set_pick("film" if on else None))
+        self.base_auto = QPushButton("Find it again")
+        self.base_auto.setToolTip("Forget the picked film base and use the clearest part of the film")
+        self.base_auto.clicked.connect(self._film_base_auto)
+        self.film_btns = g.add(hbox(self.pick_base, self.base_auto))
+        self.film_range = g.add(ValueSlider("Negative contrast", 0.6, 1.6, 1.0, 0.01, "{:.0%}",
+                                            "How much of the negative's range becomes the print's range. Lower "
+                                            "is softer, higher is punchier (on top of Contrast)."))
+        self.film_chip = g.add(chip("Film: a positive"))
+        self.st_on = g.add(QCheckBox("Remove stains and corrosion"))
+        self.st_on.setToolTip("Foxing, water stains, the rust-coloured corrosion on old plates: each is a coloured "
+                              "layer over the picture. The Studio measures how the stain's colour changes the "
+                              "brightness and takes both out, so the picture under a thin stain comes back instead "
+                              "of being painted over. Where a stain is so strong that the picture under it may be "
+                              "gone, nothing is invented: 'Show what's lost' marks those places.")
+        self.st_amt = g.add(ValueSlider("Stain strength", 0, 150, 100, 1, "{:.0f}%",
+                                        "How much of the measured stain is taken out. 100% is the measurement; go "
+                                        "higher if a ghost of the stain is left, lower if it leaves a pale spot."))
+        self.st_sens = g.add(ValueSlider("Sensitivity", 0, 100, 50, 1, "{:.0f}",
+                                         "Higher catches fainter stains. If real warm colours (a cheek, wood, a "
+                                         "sepia tone) start to fade, lower it."))
+        self.st_show = g.add(QCheckBox("Show what's lost (amber)"))
+        self.st_show.setToolTip("Marks the cores of strong stains, where the picture itself may be gone. These "
+                                "places are left as they are, never filled with made-up detail.")
+        self.st_show.toggled.connect(self._stain_show)
+        self.st_chip = g.add(chip("Stains: off"))
+        self.scr_on = g.add(QCheckBox("Remove dust and scratches"))
+        self.scr_on.setToolTip("Finds specks, hairs, scratches and cracks and fills them from the light and grain "
+                               "around them. Microsoft's scratch detector (trained on real old photos) decides "
+                               "which long marks are damage when it is installed.")
+        self.scr_amt = g.add(ValueSlider("Strength", 0, 100, 50, 1, "{:.0f}",
+                                         "Higher finds fainter marks. If real detail starts to go (a catchlight, a "
+                                         "star, a button), lower it."))
+        self.scr_size = g.add(ValueSlider("Largest mark", 2, 30, 8, 1, "{:.0f} px",
+                                          "The widest speck or scratch to take out, in pixels of the full-size "
+                                          "photo. Larger damage: use Heal in Retouch."))
+        self.scr_chip = g.add(chip("Dust and scratches: off"))
+        self.col_on = g.add(QCheckBox("Colourize a black and white photo (automatic)"))
+        self.col_on.setToolTip("DDColor (Kang et al. 2023, Apache 2.0) suggests colours for a black and white "
+                               "photo, on this PC. The brightness of every pixel stays exactly as it was; only "
+                               "colour is added. The colours are a plausible guess, not a record.")
+        self.col_amt = g.add(ValueSlider("Colour strength", 0.0, 1.5, 1.0, 0.05, "{:.0%}",
+                                         "How strong the suggested colours are. Automatic colourizers tend to be "
+                                         "shy; above 100% gives them more life."))
+        self.col_warm = g.add(ValueSlider("Colour: cool - warm", -100, 100, 0, 1, "{:+.0f}",
+                                          "Shifts the suggested colours towards blue (-) or towards yellow (+). Your "
+                                          "own coloured parts are not changed."))
+        self.col_tint = g.add(ValueSlider("Colour: green - magenta", -100, 100, 0, 1, "{:+.0f}",
+                                          "Shifts the suggested colours towards green (-) or towards magenta (+)."))
+        self.col_chip = g.add(chip("Colourize: off"))
+        self.hint_b = QPushButton("🎨 Colour a part")
+        self.hint_b.setCheckable(True)
+        self.hint_b.setToolTip("Click a part of the photo (a coat, a car, the sky) and choose its colour: it spreads "
+                               "over that part and keeps the photo's own light and shade. Shift-click adds more of "
+                               "the part, Alt-click takes a piece away. Works with or without the automatic colour.")
+        self.hint_b.toggled.connect(lambda on: self._set_hint_tool(on))
+        g.add(self.hint_b)
+        self.hint_list = g.add(QListWidget())
+        self.hint_list.setMaximumHeight(96)
+        self.hint_list.currentRowChanged.connect(self._hint_selected)
+        self.hint_col_b = QPushButton("Change colour")
+        self.hint_col_b.clicked.connect(self._hint_recolour)
+        self.hint_del_b = QPushButton("Remove")
+        self.hint_del_b.clicked.connect(self._hint_remove)
+        self.hint_btns = g.add(hbox(self.hint_col_b, self.hint_del_b))
+        self.hint_spread = g.add(ValueSlider("Spread", 3, 30, 8, 1, "{:.0f}",
+                                             "How far the selected part's colour spreads: higher crosses stronger "
+                                             "edges in the photo. Alt-click is the sure way to stop it somewhere."))
+        self.hint_spread.changed.connect(lambda *_: self._hint_spread_timer.start())
+        self._hint_spread_timer = QTimer(self, singleShot=True, interval=350, timeout=self._hint_respread)
+        self._hints, self._hsel = [], -1
+        self.old_only = [self.film_btns, self.film_range, self.st_amt, self.st_sens, self.st_show, self.scr_amt,
+                         self.scr_size, self.col_amt]
+        bl.addWidget(g)
+        self.old_group = g
+        # Cognitive Adjustments: our own local tools, built from research (docs/PROGRESS.md decisions 89-)
+        g = Group("Cognitive Adjustments", "Tools built from research papers and run on this PC. Each one "
+                                           "measures what is in the photo; nothing is invented.")
+        self.ht_on = g.add(QCheckBox("Remove printing dots (halftone)"))
+        self.ht_on.setToolTip("For scans of printed photos (a newspaper cutting, a yearbook, a magazine or book "
+                              "page). The printing screen is a regular grid of dots; the Studio finds its exact "
+                              "spacing and angle and takes out only those frequencies, so the picture's own detail "
+                              "stays. If no screen is found, nothing is changed.")
+        self.ht_amt = g.add(ValueSlider("Dot removal", 0, 100, 100, 1, "{:.0f}%",
+                                        "How much of the printing screen is taken out."))
+        self.ht_chip = g.add(chip("Printing dots: off"))
+        self.jp_on = g.add(QCheckBox("Repair JPEG blocks and ringing"))
+        self.jp_on.setToolTip("For JPEG files (shown only for them). A JPEG keeps each 8 x 8 block only to within "
+                              "a rounding step; the usual decoder shows the middle of every step, which makes the "
+                              "blocks and the halos round edges. This picks the smoothest picture that still "
+                              "matches the file exactly, so nothing is invented. Brightness and colour are each "
+                              "repaired in the file's own form; the result keeps 16 bits.")
+        self.jp_chip = g.add(chip("JPEG repair: off"))
+        self.dp_haze = g.add(ValueSlider("Depth haze", -100, 100, 0, 1, "{:+.0f}",
+                                         "Air between the camera and the scene, by distance: right adds haze to "
+                                         "the distance (pushes it back), left clears distant haze. Nearby things "
+                                         "are left nearly alone. The depth is worked out from the photo on this PC "
+                                         "(Depth Anything V2): an order from near to far, not metres; glass, "
+                                         "mirrors and water can fool it."))
+        self.dp_show = g.add(QCheckBox("Show depth map"))
+        self.dp_show.setToolTip("Colour the photo by distance: red and yellow are near, blue is far. The same map is "
+                                "used by Depth haze and by Masks > Depth.")
+        self.dp_show.toggled.connect(self._depth_show)
+        self.dp_chip = g.add(chip("Depth: not worked out yet"))
+        self.rl_amt = g.add(ValueSlider("Relight", 0, 100, 0, 1, "{:.0f}",
+                                        "Move the light. The shapes of things come from the depth map, the light "
+                                        "already on the photo is measured from how brightness follows them, and "
+                                        "each place is brightened or darkened by how the new light would fall "
+                                        "there. Only the light changes: no detail or feature is drawn, texture is "
+                                        "untouched. The shapes are a guess from one photo, so start gently."))
+        self.rl_az = g.add(ValueSlider("Light from", -180, 180, 135, 1, "{:+.0f}°",
+                                       "Where the light comes from: 0 right, 90 top, 180 left, -90 below "
+                                       "(135 = top left)."))
+        self.rl_el = g.add(ValueSlider("Light height", 0, 90, 35, 1, "{:.0f}°",
+                                       "0 = grazing from the side (deep shadows), 90 = from the camera (flat)."))
+        self.rl_soft = g.add(ValueSlider("Light softness", 0, 100, 40, 1, "{:.0f}",
+                                         "How much soft fill reaches the shadow side."))
+        self.rl_chip = g.add(chip("Relight: off"))
+        self.cm_btn = g.add(QPushButton("Match colours to another photo..."))
+        self.cm_btn.setToolTip("Pick a photo whose colours you like. The Studio works out exposure, contrast, white "
+                               "balance, saturation and the shadow and highlight colour wheels that give this photo "
+                               "the same colour mood, and moves those sliders. Nothing is painted: every change is "
+                               "an ordinary slider you can move afterwards (or Undo).")
+        self.cm_btn.clicked.connect(self._colour_match)
+        self.cm_amt = g.add(ValueSlider("Match amount", 0, 150, 100, 1, "{:.0f}%",
+                                        "How much of the colour match is applied (it moves the same sliders)."))
+        self.cm_amt.changed.connect(lambda *_: self._cm_timer.start())
+        self._cm_timer = QTimer(self, singleShot=True, interval=300, timeout=self._colour_match_amount)
+        self.cm_amt.setVisible(False)
+        self.cm_chip = g.add(chip("Colour match: none"))
+        self._cm = None
+        # Composite: subjects from other photos (pipeline/composite.py)
+        self.cp_add = g.add(QPushButton("Add a subject from another photo..."))
+        self.cp_add.setToolTip("Pick a photo, click the person or thing you want (click-to-select outlines it), "
+                               "and it is placed into this photo. Move, size and turn it with the sliders below; "
+                               "Match its colours re-develops it under this photo's light. Every pixel of the "
+                               "subject comes from its own photo; nothing is generated.")
+        self.cp_add.clicked.connect(self._composite_add)
+        self.cp_list = g.add(QListWidget())
+        self.cp_list.setMaximumHeight(80)
+        self.cp_list.currentRowChanged.connect(self._composite_selected)
+        self.cp_list.itemChanged.connect(self._composite_item_changed)
+        self.cp_x = g.add(ValueSlider("Subject across", 0, 100, 50, 0.5, "{:.0f}%", "Left (0) to right (100)."))
+        self.cp_y = g.add(ValueSlider("Subject up / down", 0, 100, 55, 0.5, "{:.0f}%", "Top (0) to bottom (100)."))
+        self.cp_size = g.add(ValueSlider("Subject size", 5, 150, 50, 1, "{:.0f}%",
+                                         "Its height as a share of this photo's height."))
+        self.cp_rot = g.add(ValueSlider("Subject turn", -180, 180, 0, 0.5, "{:+.0f}°", "+ = counter-clockwise."))
+        self.cp_soft = g.add(ValueSlider("Subject edge softness", 0, 10, 1, 0.1, "{:.1f} px"))
+        self.cp_flip = QCheckBox("Mirror")
+        self.cp_grain = QCheckBox("Match grain")
+        self.cp_grain.setToolTip("Adds this photo's measured noise to the subject when it is cleaner, so it does "
+                                 "not look pasted on.")
+        self.cp_row = g.add(hbox(self.cp_flip, self.cp_grain))
+        self.cp_match_b = QPushButton("Match its colours to this photo")
+        self.cp_match_b.setToolTip("Works out exposure, contrast, white balance, saturation and colour wheels that "
+                                   "give the subject's photo this photo's colour mood, and develops the subject "
+                                   "with them.")
+        self.cp_match_b.clicked.connect(self._composite_match)
+        self.cp_del_b = QPushButton("Remove subject")
+        self.cp_del_b.clicked.connect(self._composite_delete)
+        self.cp_btns = g.add(hbox(self.cp_match_b, self.cp_del_b))
+        self.cp_mamt = g.add(ValueSlider("Subject colour match", 0, 150, 100, 1, "{:.0f}%"))
+        self._layers, self._lsel = [], -1
+        for w_ in (self.cp_x, self.cp_y, self.cp_size, self.cp_rot, self.cp_soft, self.cp_mamt):
+            w_.changed.connect(self._composite_params)
+        for w_ in (self.cp_flip, self.cp_grain):
+            w_.toggled.connect(self._composite_params)
+        self.chg_show = g.add(QCheckBox("Show what the automatic tools changed"))
+        self.chg_show.setToolTip("A heat map over the photo: how much printing-dot removal, stain removal, dust and "
+                                 "scratch removal and colourizing changed each place. Untouched places stay clear, "
+                                 "so you can see that a face was left alone.")
+        self.chg_show.toggled.connect(self._change_show)
+        bl.addWidget(g)
+        self.cog_group = g
         # Clean
-        g = Group("Clean", "Noise is removed from the raw data itself, before colour is made.")
+        g = Group("Clean", "Noise is removed from the raw data itself, before colour is made: the best place to "
+                           "do it. Shoot raw for the cleanest results.")
         self.dn_on = g.add(QCheckBox("Clean up noise"))
-        self.dn_s = g.add(ValueSlider("Strength", 0.0, 2.0, 1.0, 0.05, "{:.0%}", "1 = matched to this camera's "
-                                      "measured noise at this ISO."))
+        self.dn_s = g.add(ValueSlider("Strength", 0.0, 2.0, 1.0, 0.05, "{:.0%}", "1 = matched to the measured "
+                                      "noise: the camera's own at this ISO for a raw, measured in the picture "
+                                      "for a scan or JPEG."))
         self.dn_l = g.add(ValueSlider("Luminance (grain)", 0.0, 2.5, Denoise().luma, 0.05, "{:.2f}",
                                       "Fine, grain-like noise. Lower keeps more texture."))
         self.dn_c = g.add(ValueSlider("Colour (blotches)", 0.0, 4.0, Denoise().chroma, 0.05, "{:.2f}",
@@ -1483,6 +1672,15 @@ class DevelopPage(QWidget):
         self.band.setChecked(True)
         self.noise_chip = g.add(chip("Noise model: -"))
         self.full_only = [self.dn_l, self.dn_c, self.dn_g, self.dn_m, self.dn_info]
+        self.clean_scan_note = g.add(label(
+            "Scan or JPEG: Clean measures the noise in the picture itself and removes it there. It does its best "
+            "work on raw files, where it knows every photosite's noise from the sensor, before the camera has "
+            "demosaiced, sharpened and compressed it; on a JPEG some noise is already smeared into the picture and "
+            "cannot be told apart. For the cleanest results, shoot raw. (Film grain is noise to it too: lower "
+            "Luminance, or use Keep grain, to keep it.)", None, wrap=True))
+        self.clean_scan_note.setStyleSheet(f"color:{T.AMBER};")
+        self.clean_scan_note.hide()
+        self.clean_group = g
         bl.addWidget(g)
         # Lens
         g = Group("Lens", "Works without a lens profile, including contactless vintage glass.")
@@ -1953,15 +2151,27 @@ class DevelopPage(QWidget):
                                 ("skin", "Skin", "Every area of skin tone (then Smooth skin below). Narrow it to "
                                                  "one face with  x Brush"),
                                 ("person", "Person", "Select the person (found on this PC), then pick a part: skin, "
-                                                     "face, hair, clothes, arms, legs, torso or the background")):
+                                                     "face, hair, clothes, arms, legs, torso or the background"),
+                                ("depth", "Depth", "Select by distance: near things, far things or a band between "
+                                                   "(the depth is worked out from the photo on this PC)")):
             b = QPushButton(text)
             b.setToolTip(tip)
             b.setStyleSheet("padding: 5px 6px;")
             b.clicked.connect(lambda _=False, k=kind: self.new_mask(k))
             self.mask_new[kind] = b
             btns.append(b)
-        g.add(hbox(*btns[:4]))
-        g.add(hbox(*btns[4:]))
+        g.add(hbox(*btns[:3]))
+        g.add(hbox(*btns[3:6]))
+        g.add(hbox(*btns[6:]))
+        self.sel_model = QComboBox()
+        self.sel_model.setToolTip("What finds the outline when you click an object (Masks > Object) or a part to "
+                                  "colour (Colour a part). SAM 2.1 (Meta, run on this PC) outlines almost anything "
+                                  "from one click; it looks at the photo once (Tiny about 10 s, Large longer), then "
+                                  "each click is instant. Classic is the Studio's own colour-and-edge method: no "
+                                  "model, instant, best on things with a clear colour.")
+        self._fill_sel_models()
+        self.sel_model.currentIndexChanged.connect(self._sel_model_changed)
+        g.add(hbox(label("Click-to-select:", "dim"), self.sel_model))
         self.person_part = QComboBox()
         from ..engine.local.people import PART_NAMES, PARTS
         for k in PARTS:
@@ -1992,7 +2202,8 @@ class DevelopPage(QWidget):
                                 "+ Colour", "+ Brightness", "- Brush (subtract)", "- Gradient (subtract)",
                                 "- Radial (subtract)", "- Object (subtract)", "x Brightness (only where)",
                                 "x Colour (only where)", "x Brush (only where)", "x Skin (only where)",
-                                "+ Skin", "+ Person", "- Person (subtract)", "x Person (only where)"])
+                                "+ Skin", "+ Person", "- Person (subtract)", "x Person (only where)", "+ Depth",
+                                "- Depth (subtract)", "x Depth (only where)"])
         self.mask_add.setToolTip("Add another shape to the selected mask: + adds, - takes away, x keeps only "
                                  "where both are")
         self.mask_add.activated.connect(self._mask_add_picked)
@@ -2023,7 +2234,14 @@ class DevelopPage(QWidget):
         self.c_soft = ValueSlider("Colour softness", 2, 90, 20, 1, "{:.0f}°")
         self.c_chroma = ValueSlider("Ignore greys below", 0, 20, 3, 0.5, "{:.1f}")
         self.r_feather = ValueSlider("Radial feather", 1, 100, 50, 1, "{:.0f}")
-        for w in (self.r_lo, self.r_hi, self.r_soft, self.c_width, self.c_soft, self.c_chroma, self.r_feather):
+        self.d_lo = ValueSlider("From (0 far, 100 near)", 0, 100, 60, 1, "{:.0f}",
+                                "How far away the selection starts: 0 is the most distant part of the photo, 100 "
+                                "the nearest")
+        self.d_hi = ValueSlider("To (0 far, 100 near)", 0, 100, 100, 1, "{:.0f}")
+        self.d_soft = ValueSlider("Depth softness", 1, 50, 10, 1, "{:.0f}")
+        self._range_ws = (self.r_lo, self.r_hi, self.r_soft, self.c_width, self.c_soft, self.c_chroma, self.r_feather,
+                          self.d_lo, self.d_hi, self.d_soft)
+        for w in self._range_ws:
             rbl.addWidget(w)
             w.changed.connect(self._shape_params_changed)
         g.add(self.range_box)
@@ -2152,6 +2370,15 @@ class DevelopPage(QWidget):
                   self.c_bw, self.f_gcol, self.dn_safe, self.hdr_on):
             w.toggled.connect(self.controls_changed)
         self.hdr_amt.changed.connect(self.controls_changed)
+        for w in (self.film_range, self.st_amt, self.st_sens, self.scr_amt, self.scr_size, self.col_amt,
+                  self.col_warm, self.col_tint, self.ht_amt, self.dp_haze, self.rl_amt, self.rl_az, self.rl_el,
+                  self.rl_soft):
+            w.changed.connect(self.controls_changed)
+        for w in (self.ht_on, self.st_on, self.scr_on, self.col_on, self.jp_on):
+            w.toggled.connect(self.controls_changed)
+            w.toggled.connect(lambda *_: self._old_photo_visibility())
+        self.film_kind.currentIndexChanged.connect(self.controls_changed)
+        self.film_kind.currentIndexChanged.connect(lambda *_: self._old_photo_visibility())
         for w in (self.hdr_strength, self.hdr_engine):
             w.currentIndexChanged.connect(self.controls_changed)
         for w in (self.t_toe, self.t_shoulder, self.con, self.l_wh):
@@ -2278,6 +2505,53 @@ class DevelopPage(QWidget):
         if C.lut == "__add__":
             C.lut = self.edit.colour.lut
         C.lut_amount = round(self.lut_amt.value(), 3)
+        kind = self.film_kind.currentData() or ""
+        if kind:
+            f = dict(self.edit.film or {}) if (self.edit.film or {}).get("kind") == kind else {}
+            f["kind"] = kind
+            rng = round(self.film_range.value(), 3)
+            if abs(rng - 1.0) > 1e-6:
+                f["range"] = rng
+            else:
+                f.pop("range", None)
+            e.film = f
+        else:
+            e.film = None
+        sa, ss = round(self.st_amt.value()), round(self.st_sens.value())
+        if self.st_on.isChecked() or (sa, ss) != (100, 50):
+            e.stains = {"on": self.st_on.isChecked(), "amount": float(sa), "sensitivity": float(ss)}
+        else:
+            e.stains = None
+        amt, size = round(self.scr_amt.value()), round(self.scr_size.value())
+        if self.scr_on.isChecked() or (amt, size) != (50, 8):
+            e.scratches = {"on": self.scr_on.isChecked(), "amount": float(amt), "size": float(size)}
+        else:
+            e.scratches = None
+        ha = round(self.ht_amt.value())
+        if self.ht_on.isChecked() or ha != 100:
+            e.halftone = {"on": self.ht_on.isChecked(), "amount": float(ha)}
+        else:
+            e.halftone = None
+        dh = round(self.dp_haze.value())
+        e.depth = {"haze": float(dh)} if dh else None
+        e.jpeg = {"on": True} if self.jp_on.isChecked() else None
+        import copy as _cpy
+        e.composite = _cpy.deepcopy(self._layers) or None
+        ra = round(self.rl_amt.value())
+        e.relight = ({"amount": float(ra), "azimuth": float(round(self.rl_az.value())),
+                      "elevation": float(round(self.rl_el.value())), "soft": float(round(self.rl_soft.value()))}
+                     if ra else None)
+        ca = round(self.col_amt.value(), 3)
+        cwm, ctn = round(self.col_warm.value()), round(self.col_tint.value())
+        import copy as _cp
+        if self.col_on.isChecked() or ca != 1.0 or self._hints or cwm or ctn:
+            e.colourize = {"on": self.col_on.isChecked(), "amount": ca}
+            if cwm or ctn:
+                e.colourize["warm"], e.colourize["tint"] = float(cwm), float(ctn)
+            if self._hints:
+                e.colourize["hints"] = _cp.deepcopy(self._hints)
+        else:
+            e.colourize = None
         import copy as _copy
         e.masks = _copy.deepcopy(self._masks) or None
         e.retouch = _copy.deepcopy(self._spots) or None
@@ -2411,6 +2685,46 @@ class DevelopPage(QWidget):
         self.g_blend.set_value(float(g.get("blending", 50)), emit=False)
         self._fill_luts(C.lut)
         self.lut_amt.set_value(C.lut_amount, emit=False)
+        for w in (self.film_kind, self.ht_on, self.st_on, self.scr_on, self.col_on):
+            w.blockSignals(True)
+        hf = e.halftone or {}
+        self.ht_on.setChecked(bool(hf.get("on")))
+        self.ht_amt.set_value(float(hf.get("amount", 100)), emit=False)
+        self.dp_haze.set_value(float((e.depth or {}).get("haze", 0.0)), emit=False)
+        import copy as _cpy
+        self._layers = _cpy.deepcopy(e.composite or [])
+        self._lsel = min(max(self._lsel, 0), len(self._layers) - 1) if self._layers else -1
+        self._fill_layers()
+        from ..engine.local import relight as _rl
+        rs = _rl.settings(e.relight)
+        for w_, k_ in ((self.rl_amt, "amount"), (self.rl_az, "azimuth"), (self.rl_el, "elevation"),
+                       (self.rl_soft, "soft")):
+            w_.set_value(float(rs[k_]), emit=False)
+        self.jp_on.blockSignals(True)
+        self.jp_on.setChecked(bool((e.jpeg or {}).get("on")))
+        self.jp_on.blockSignals(False)
+        self.film_kind.setCurrentIndex(max(0, self.film_kind.findData((e.film or {}).get("kind", ""))))
+        self.film_range.set_value(float((e.film or {}).get("range", 1.0)), emit=False)
+        sn = e.stains or {}
+        self.st_on.setChecked(bool(sn.get("on")))
+        self.st_amt.set_value(float(sn.get("amount", 100)), emit=False)
+        self.st_sens.set_value(float(sn.get("sensitivity", 50)), emit=False)
+        sc = e.scratches or {}
+        self.scr_on.setChecked(bool(sc.get("on")))
+        self.scr_amt.set_value(float(sc.get("amount", 50)), emit=False)
+        self.scr_size.set_value(float(sc.get("size", 8)), emit=False)
+        co = e.colourize or {}
+        self.col_on.setChecked(bool(co.get("on")))
+        self.col_amt.set_value(float(co.get("amount", 1.0)), emit=False)
+        self.col_warm.set_value(float(co.get("warm", 0.0)), emit=False)
+        self.col_tint.set_value(float(co.get("tint", 0.0)), emit=False)
+        import copy as _cp
+        self._hints = _cp.deepcopy(co.get("hints") or [])
+        self._hsel = min(self._hsel, len(self._hints) - 1)
+        self._fill_hints()
+        for w in (self.film_kind, self.ht_on, self.st_on, self.scr_on, self.col_on):
+            w.blockSignals(False)
+        self._old_photo_visibility()
         import copy as _copy
         self._masks = _copy.deepcopy(e.masks or [])
         self._msel = min(max(self._msel, 0), len(self._masks) - 1) if self._masks else -1
@@ -2474,6 +2788,16 @@ class DevelopPage(QWidget):
                              else "")
 
     def _dn_safe_refresh(self):
+        sr = getattr(self.image, "scan_noise_report", None) if self.image is not None else None
+        if sr and self.image is not None and getattr(self.image.raw, "is_scan", False):
+            if self.edit.denoise.enabled:
+                self.noise_chip.setText(f"Noise: about {sr['levels']:.1f} levels (8-bit), measured in this picture")
+                self.dn_safe_chip.setText(f"Protected: {sr['protected']:,} pixels kept as scanned "
+                                          f"({sr['protected'] / max(sr['sites'], 1) * 1e6:.0f} per million)"
+                                          if self.edit.denoise.safeguard else "Protected: -")
+            else:
+                self.dn_safe_chip.setText("Protected: -")
+            return
         r = getattr(self.image, "denoise_report", None) if self.image is not None else None
         on = self.image is not None and self.edit.denoise.enabled and self.edit.denoise.safeguard
         if not on or not r:
@@ -2727,7 +3051,7 @@ class DevelopPage(QWidget):
 
     def _set_pick(self, kind):
         self.pick = kind
-        for b, k in ((self.pick_wb, "wb"), (self.pick_rng, "range")):
+        for b, k in ((self.pick_wb, "wb"), (self.pick_rng, "range"), (self.pick_base, "film")):
             b.blockSignals(True)
             b.setChecked(kind == k)
             b.blockSignals(False)
@@ -2737,6 +3061,478 @@ class DevelopPage(QWidget):
             self.status.emit("Click something in the photo that should be neutral grey or white (Esc cancels).")
         elif kind == "range":
             self.status.emit("Click a colour in the photo to choose it on the colour wheel (Esc cancels).")
+        elif kind == "film":
+            self.status.emit("Click clear film with no picture on it: between frames or at the edge (Esc cancels).")
+
+    def _pick_film_base_at(self, u, v):
+        self._set_pick(None)
+        if not (self.edit.film or {}).get("kind"):
+            self.status.emit("Choose Black and white negative or Colour negative first.")
+            return
+        img, e0, path = self.image, self.edit_from_controls(), self.path
+
+        def work():
+            from ..engine.pipeline.pipeline import film_base_at
+            return film_base_at(img, e0, u, v)
+
+        def done(p, base):
+            if p != self.path or not (self.edit.film or {}).get("kind"):
+                return
+            from .. import engine as E
+            e = E.Edit.from_dict(self.edit.to_dict())
+            e.film = {k: v for k, v in (e.film or {}).items() if k not in ("lo", "hi", "stops")}
+            e.film["base"] = base
+            self.commit(e, "Film base picked: the negative is measured again from it.", "Pick the film base")
+        run_bg(work, path, done, lambda _, err: self.status.emit(f"Film base problem: {err}"))
+
+    def _film_base_auto(self):
+        if self.image is None or not (self.edit.film or {}).get("kind"):
+            return
+        from .. import engine as E
+        e = E.Edit.from_dict(self.edit.to_dict())
+        e.film = {k: v for k, v in (e.film or {}).items() if k not in ("base", "lo", "hi", "stops")}
+        self.commit(e, "Film base: the clearest part of the film is used.", "Find the film base")
+
+    # ------------------------------------------------------------------------------------ colour hints
+    def _set_hint_tool(self, on):
+        if on and self.image is None:
+            on = False
+        if on:
+            if self.viewer.tool and self.viewer.tool != "hint":
+                self._set_mask_tool(None)
+            self.viewer.tool = "hint"
+            self.viewer.setCursor(Qt.CursorShape.CrossCursor)
+            self.status.emit("Click a part of the photo to give it a colour. Shift-click adds more of it, Alt-click "
+                             "takes a piece away. Esc when done.")
+            self._render_hint_overlay()
+        elif self.viewer.tool == "hint":
+            self.viewer.tool = None
+            self.viewer.setCursor(Qt.CursorShape.ArrowCursor)
+            self.viewer.overlay = None
+            self.viewer.update()
+        self.hint_b.blockSignals(True)
+        self.hint_b.setChecked(bool(on))
+        self.hint_b.blockSignals(False)
+
+    def _fill_hints(self):
+        self.hint_list.blockSignals(True)
+        self.hint_list.clear()
+        for i, h in enumerate(self._hints):
+            r, g, b = (int(round(255 * c)) for c in h.get("rgb", [0.5, 0.5, 0.5]))
+            it = QListWidgetItem(f"Part {i + 1}   #{r:02X}{g:02X}{b:02X}" + ("" if h.get("data") else "  (finding...)"))
+            pm = QImage(14, 14, QImage.Format.Format_RGB32)
+            pm.fill(QColor(r, g, b))
+            from PySide6.QtGui import QIcon, QPixmap
+            it.setIcon(QIcon(QPixmap.fromImage(pm)))
+            self.hint_list.addItem(it)
+        if 0 <= self._hsel < len(self._hints):
+            self.hint_list.setCurrentRow(self._hsel)
+        self.hint_list.blockSignals(False)
+        self._old_photo_visibility()
+
+    def _pick_colour(self, start, title):
+        from PySide6.QtWidgets import QColorDialog
+        r, g, b = (int(round(255 * c)) for c in start)
+        c = QColorDialog.getColor(QColor(r, g, b), self, title)
+        if not c.isValid():
+            return None
+        return [round(c.redF(), 4), round(c.greenF(), 4), round(c.blueF(), 4)]
+
+    def _hint_click(self, u, v, alt, shift):
+        from .. import engine as E
+        if self.image is None:
+            return
+        pt = self._s_points([(u, v)])[0]
+        sel = self._hsel if 0 <= self._hsel < len(self._hints) else (len(self._hints) - 1 if self._hints else -1)
+        if (alt or shift) and sel >= 0:
+            idx = sel
+            h = dict(self._hints[idx])
+            h["fg"], h["bg"] = list(h.get("fg", [])), list(h.get("bg", []))
+            (h["bg"] if alt else h["fg"]).append(pt)
+        elif alt:
+            self.status.emit("Click a part first; Alt-click then takes a piece of it away.")
+            return
+        else:
+            start = [0.5, 0.5, 0.5]
+            if self.last_a8 is not None:                  # start from the colour shown there (the model's guess)
+                a8 = self.last_a8
+                hh, ww = a8.shape[:2]
+                x, y = min(ww - 1, int(u * ww)), min(hh - 1, int(v * hh))
+                start = [float(c) / 255.0 for c in np.median(a8[max(0, y - 3):y + 4, max(0, x - 3):x + 4]
+                                                               .reshape(-1, 3), axis=0)]
+            rgb = self._pick_colour(start, "Colour for this part")
+            if rgb is None:
+                return
+            idx = len(self._hints)
+            h = {"fg": [pt], "bg": [], "rgb": rgb, "spread": 0.08}
+        self._hint_area(idx, h, "Part coloured. Shift-click adds more of it, Alt-click takes a piece away; click "
+                                "elsewhere for another part. Esc when done.")
+
+    def _hint_area(self, idx, h, message):
+        """Work out a hint's area in the background, then put it in the list and render."""
+        from .. import engine as E
+        img, e0, path = self.image, self.edit_from_controls(), self.path
+        fg, bg = list(h.get("fg", [])), list(h.get("bg", []))
+        spread = float(h.get("spread", 0.08))
+        model = self._sel_model()
+        self.status.emit(self._sel_status(model, "part"))
+        self.viewer.busy = True
+        self.viewer.update()
+
+        def done(p, area):
+            self.viewer.busy = False
+            if p != self.path:
+                return
+            h.pop("model", None)
+            h.update(area)
+            if idx < len(self._hints):
+                self._hints[idx] = h
+            else:
+                self._hints.append(h)
+            self._hsel = idx
+            self._fill_hints()
+            self.controls_changed()
+            self._render_hint_overlay()
+            self.status.emit(message)
+        run_bg(lambda: E.colour_hint_area(img, e0, fg, bg, spread, model=model), path, done,
+               lambda _, err: (setattr(self.viewer, "busy", False), self.status.emit(f"Colour a part: {err}")))
+
+    def _hint_selected(self, row):
+        self._hsel = row
+        if 0 <= row < len(self._hints):
+            self.hint_spread.set_value(round(100 * float(self._hints[row].get("spread", 0.08))), emit=False)
+            self.hint_spread.setVisible(not self._hints[row].get("model"))
+        self._render_hint_overlay()
+
+    def _hint_respread(self):
+        i = self._hsel
+        if not (0 <= i < len(self._hints)) or self.image is None:
+            return
+        h = dict(self._hints[i])
+        sp_ = round(self.hint_spread.value() / 100.0, 4)
+        if abs(float(h.get("spread", 0.08)) - sp_) < 1e-6:
+            return
+        h["spread"] = sp_
+        self._hint_area(i, h, f"Part {i + 1}: spread {self.hint_spread.value():.0f}.")
+
+    def _change_show(self, on):
+        """Show what the automatic tools changed: a heat map (clear = untouched, yellow to red = more change)."""
+        self.viewer.show_overlay = (bool(on) or self.st_show.isChecked() or self.mask_show.isChecked()
+                                    or self.dp_show.isChecked())
+        if not on:
+            self.viewer.overlay = None
+            self.viewer.update()
+        self._update_overlay()
+
+    def _render_change_overlay(self):
+        from .. import engine as E
+        if self.image is None:
+            return
+        e = self.edit_from_controls()
+        img = self.image
+        sc = max(0.05, self.preview_scale(e) * 0.5)
+        self._ov_token = getattr(self, "_ov_token", 0) + 1
+        tok = self._ov_token
+
+        def ready(t, a):
+            if t != getattr(self, "_ov_token", -1) or not self.chg_show.isChecked():
+                return
+            hh, ww = a.shape
+            rgba = np.zeros((hh, ww, 4), np.uint8)
+            rgba[..., 0] = 255                                    # yellow (a little) to red (a lot)
+            rgba[..., 1] = (255 * (1.0 - 0.85 * a)).astype(np.uint8)
+            rgba[..., 3] = np.clip(np.sqrt(a) * 0.75 * 255, 0, 255).astype(np.uint8)
+            self.viewer.overlay = QImage(np.ascontiguousarray(rgba).data, ww, hh, 4 * ww,
+                                         QImage.Format.Format_RGBA8888).copy()
+            self.viewer.update()
+            changed = float((a > 0.05).mean())
+            self.status.emit(f"The automatic tools changed {100 * changed:.1f}% of the photo (red: most change).")
+        self.status.emit("Comparing the photo with and without the automatic tools...")
+        run_bg(lambda: E.change_map(img, e, sc), tok, ready,
+               lambda _, err: self.status.emit(f"Change overlay problem: {err}"))
+
+    def _depth_show(self, on):
+        """Show depth map: the photo coloured by distance (red and yellow near, blue far)."""
+        self.viewer.show_overlay = (bool(on) or self.chg_show.isChecked() or self.st_show.isChecked()
+                                    or self.mask_show.isChecked())
+        if not on:
+            self.viewer.overlay = None
+            self.viewer.update()
+        self._update_overlay()
+
+    def _render_depth_overlay(self):
+        from .. import engine as E
+        from ..engine.local import depth as dp
+        if self.image is None:
+            return
+        if not dp.available():
+            self.status.emit("The depth model is missing from models\\depth. Run Convert Models.bat.")
+            return
+        e = self.edit_from_controls()
+        img = self.image
+        sc = max(0.05, self.preview_scale(e) * 0.5)
+        self._ov_token = getattr(self, "_ov_token", 0) + 1
+        tok = self._ov_token
+
+        def ready(t, rgba):
+            if t != getattr(self, "_ov_token", -1) or not self.dp_show.isChecked():
+                return
+            hh, ww = rgba.shape[:2]
+            self.viewer.overlay = QImage(np.ascontiguousarray(rgba).data, ww, hh, 4 * ww,
+                                         QImage.Format.Format_RGBA8888).copy()
+            self.viewer.update()
+            self._depth_chip()
+            self.status.emit("Depth map: red and yellow are near, blue is far (an order, not metres).")
+        self.status.emit("Working out how far away each part of the photo is (a few seconds, once per photo)...")
+        run_bg(lambda: E.depth_view(img, e, sc), tok, ready,
+               lambda _, err: self.status.emit(f"Depth map problem: {err}"))
+
+    def _depth_chip(self):
+        from ..engine.local import depth as dp
+        if not dp.available():
+            self.dp_chip.setText("Depth: the model is not installed (models\\depth)")
+            self.dp_chip.setStyleSheet(f"color:{T.DIM};")
+            return
+        r = getattr(self.image, "depth_report", None) if self.image is not None else None
+        if r:
+            self.dp_chip.setText(f"Depth: worked out on this PC in {r['ms'] / 1000:.1f} s")
+            self.dp_chip.setStyleSheet(f"color:{T.VIOLET}; border-color:{T.alpha(T.VIOLET, 0.4)};")
+        else:
+            self.dp_chip.setText("Depth: worked out when first used (a few seconds)")
+            self.dp_chip.setStyleSheet(f"color:{T.DIM};")
+
+    def _stain_show(self, on):
+        """Show what's lost: the cores of strong stains (amber), where the picture may be gone."""
+        self.viewer.show_overlay = (bool(on) or self.chg_show.isChecked() or self.mask_show.isChecked()
+                                    or self.dp_show.isChecked())
+        if not on:
+            self.viewer.overlay = None
+            self.viewer.update()
+        self._update_overlay()
+
+    def _render_stain_overlay(self):
+        from .. import engine as E
+        if self.image is None:
+            return
+        e = self.edit_from_controls()
+        img = self.image
+        sc = max(0.05, self.preview_scale(e) * 0.5)
+        self._ov_token = getattr(self, "_ov_token", 0) + 1
+        tok = self._ov_token
+
+        def work():
+            shp = E.stain_lost_shape(img, e)
+            if shp is None:
+                return None
+            e2 = type(e).from_dict(e.to_dict())
+            e2.masks = [{"name": "lost", "enabled": True, "adjust": {}, "shapes": [shp]}]
+            return E.render_mask(img, e2, 0, sc)
+
+        def ready(t, a):
+            if t != getattr(self, "_ov_token", -1) or not self.st_show.isChecked():
+                return
+            if a is None:
+                self.viewer.overlay = None
+                self.viewer.update()
+                return
+            hh, ww = a.shape
+            rgba = np.zeros((hh, ww, 4), np.uint8)
+            rgba[..., 0], rgba[..., 1], rgba[..., 2] = 255, 176, 0          # amber: the picture may be gone here
+            rgba[..., 3] = np.clip(a * 0.55 * 255, 0, 255).astype(np.uint8)
+            self.viewer.overlay = QImage(np.ascontiguousarray(rgba).data, ww, hh, 4 * ww,
+                                         QImage.Format.Format_RGBA8888).copy()
+            self.viewer.update()
+        self.status.emit("Marking where the picture may be lost under stains...")
+        run_bg(work, tok, ready, lambda _, err: self.status.emit(f"Stain overlay problem: {err}"))
+
+    def _render_hint_overlay(self):
+        """While colouring parts, the selected part is shown tinted in its own colour, so you see exactly where
+        the colour will go."""
+        from .. import engine as E
+        i = self._hsel
+        if self.image is None or self.viewer.tool != "hint" or not (0 <= i < len(self._hints)) \
+                or not self._hints[i].get("data"):
+            if self.viewer.tool == "hint":
+                self.viewer.overlay = None
+                self.viewer.update()
+            return
+        h = self._hints[i]
+        e = self.edit_from_controls()
+        e.masks = [{"name": "part", "enabled": True, "adjust": {},
+                    "shapes": [{"type": "object", "op": "add", "w": h["w"], "h": h["h"], "data": h["data"]}]}]
+        img = self.image
+        sc = max(0.05, self.preview_scale(e) * 0.5)
+        rgb = tuple(int(round(255 * c)) for c in h.get("rgb", [1, 0.3, 0.3]))
+        self._ov_token = getattr(self, "_ov_token", 0) + 1
+        tok = self._ov_token
+
+        def ready(t, a):
+            if t != getattr(self, "_ov_token", -1) or self.viewer.tool != "hint":
+                return
+            hh, ww = a.shape
+            rgba = np.zeros((hh, ww, 4), np.uint8)
+            edge = np.minimum((np.abs(np.gradient(a)[0]) + np.abs(np.gradient(a)[1])) * 4, 1.0)
+            for c in range(3):                         # a light tint of the part's colour, a white outline
+                rgba[..., c] = (rgb[c] * (1 - edge) + 255 * edge).astype(np.uint8)
+            rgba[..., 3] = np.clip((a * 0.25 * (1 - edge) + edge * 0.95) * 255, 0, 255).astype(np.uint8)
+            self.viewer.overlay = QImage(np.ascontiguousarray(rgba).data, ww, hh, 4 * ww,
+                                         QImage.Format.Format_RGBA8888).copy()
+            self.viewer.update()
+        run_bg(lambda: E.render_mask(img, e, 0, sc), tok, ready,
+               lambda _, err: self.status.emit(f"Part overlay problem: {err}"))
+
+    def _hint_recolour(self):
+        i = self.hint_list.currentRow()
+        if not (0 <= i < len(self._hints)):
+            return
+        rgb = self._pick_colour(self._hints[i].get("rgb", [0.5, 0.5, 0.5]), f"Colour for part {i + 1}")
+        if rgb is None:
+            return
+        self._hints[i]["rgb"] = rgb
+        self._fill_hints()
+        self.controls_changed()
+
+    def _hint_remove(self):
+        i = self.hint_list.currentRow()
+        if not (0 <= i < len(self._hints)):
+            return
+        del self._hints[i]
+        self._hsel = min(i, len(self._hints) - 1)
+        self._fill_hints()
+        self.controls_changed()
+
+    def _old_photo_visibility(self):
+        neg = bool(self.film_kind.currentData())
+        self.film_btns.setVisible(neg)
+        self.film_range.setVisible(neg)
+        for w in (self.st_amt, self.st_sens, self.st_show):
+            w.setVisible(self.st_on.isChecked())
+        if not self.st_on.isChecked() and self.st_show.isChecked():
+            self.st_show.setChecked(False)
+        self.scr_amt.setVisible(self.scr_on.isChecked())
+        self.scr_size.setVisible(self.scr_on.isChecked())
+        self.col_amt.setVisible(self.col_on.isChecked())
+        self.col_warm.setVisible(self.col_on.isChecked())
+        self.col_tint.setVisible(self.col_on.isChecked())
+        self.ht_amt.setVisible(self.ht_on.isChecked())
+        for w_ in (self.rl_az, self.rl_el, self.rl_soft):
+            w_.setVisible(self.rl_amt.value() > 0)
+        from .. import engine as E
+        jp = self.image is not None and E.jpeg_repairable(self.image)
+        self.jp_on.setVisible(jp or self.jp_on.isChecked())
+        self.jp_chip.setVisible(jp)
+        self.hint_list.setVisible(bool(self._hints))
+        self.hint_btns.setVisible(bool(self._hints))
+        sel = self._hints[self._hsel] if 0 <= self._hsel < len(self._hints) else {}
+        self.hint_spread.setVisible(bool(self._hints) and not sel.get("model"))   # SAM outlines have no spread
+
+    def _old_photo_refresh(self):
+        """The Old photo and film chips: what the film measure, the dust and scratch pass and the colourizer did."""
+        from .. import engine as E
+        e = self.edit
+        if (e.film or {}).get("kind") and self.image is not None:
+            try:
+                p = E.film_params(self.image, e)
+                src = "picked" if "base" in (e.film or {}) else "found"
+                self.film_chip.setText(f"Film: {'colour' if p['kind'] == 'colour' else 'black and white'} "
+                                       f"negative, base {src}, {p['stops'] * float(p.get('range', 1.0)):.1f} stops "
+                                       "of scene range")
+                self.film_chip.setStyleSheet(f"color:{T.AMBER}; border-color:{T.alpha(T.AMBER, 0.4)};")
+            except Exception:
+                slog.log_exception("film report failed", log)
+        else:
+            self.film_chip.setText("Film: a positive")
+            self.film_chip.setStyleSheet(f"color:{T.DIM};")
+        if (e.halftone or {}).get("on"):
+            hr = getattr(self.image, "halftone_report", None) if self.image is not None else None
+            if hr and hr.get("peaks"):
+                txt = (f"Printing dots: a screen every {hr['period']:.1f} px at {hr['angle']:.0f}° found and "
+                       "taken out")
+                col = T.VIOLET
+            elif hr is not None:
+                txt = "Printing dots: no printing screen found, nothing changed"
+                col = T.DIM
+            else:
+                txt, col = "Printing dots: on", T.VIOLET
+            self.ht_chip.setText(txt)
+            self.ht_chip.setStyleSheet(f"color:{col}; border-color:{T.alpha(col, 0.4)};")
+        else:
+            self.ht_chip.setText("Printing dots: off")
+            self.ht_chip.setStyleSheet(f"color:{T.DIM};")
+        if self.chg_show.isChecked():
+            self._update_overlay()
+        self._depth_chip()
+        from ..engine.local import relight as _rl
+        if _rl.active(e.relight):
+            rs = _rl.settings(e.relight)
+            txt = f"Relight: light {_rl.direction_name(rs['azimuth'], rs['elevation'])}"
+            rr = getattr(self.image, "relight_report", None) if self.image is not None else None
+            if rr:
+                txt += f"; the photo's own light measured {_rl.direction_name(rr['azimuth'], rr['elevation'])}"
+            self.rl_chip.setText(txt)
+            self.rl_chip.setStyleSheet(f"color:{T.VIOLET}; border-color:{T.alpha(T.VIOLET, 0.4)};")
+        else:
+            self.rl_chip.setText("Relight: off")
+            self.rl_chip.setStyleSheet(f"color:{T.DIM};")
+        if (e.jpeg or {}).get("on"):
+            jr = getattr(self.image, "jpeg_report", None) if self.image is not None else None
+            if jr:
+                self.jp_chip.setText(f"JPEG repair: saved at about quality {jr['quality']}; repaired within what "
+                                     f"the file allows ({jr['ms'] / 1000:.1f} s)")
+            else:
+                self.jp_chip.setText("JPEG repair: on")
+            self.jp_chip.setStyleSheet(f"color:{T.VIOLET}; border-color:{T.alpha(T.VIOLET, 0.4)};")
+        else:
+            self.jp_chip.setText("JPEG repair: off")
+            self.jp_chip.setStyleSheet(f"color:{T.DIM};")
+        if (e.stains or {}).get("on"):
+            sr = getattr(self.image, "stain_report", None) if self.image is not None else None
+            if sr:
+                txt = (f"Stains: {100 * sr['stained']:.0f}% of the photo unmixed; {100 * sr['lost']:.1f}% may have "
+                       "lost the picture (left as it is)")
+            else:
+                txt = "Stains: on"
+            self.st_chip.setText(txt)
+            self.st_chip.setStyleSheet(f"color:{T.VIOLET}; border-color:{T.alpha(T.VIOLET, 0.4)};")
+        else:
+            self.st_chip.setText("Stains: off")
+            self.st_chip.setStyleSheet(f"color:{T.DIM};")
+        if self.st_show.isChecked():
+            self._update_overlay()
+        r = getattr(self.image, "scratch_report", None) if self.image is not None else None
+        if (e.scratches or {}).get("on"):
+            from ..engine.local import scratchnet
+            how = "learned detector + filter" if scratchnet.available() else "filter only (detector not installed)"
+            n = (r or {}).get("marks")
+            txt = f"Dust and scratches: {n} marks taken out ({how})" if n is not None else \
+                f"Dust and scratches: on ({how})"
+            if r and r.get("half"):
+                txt += "; the full-size photo is searched more finely"
+            col = T.VIOLET if scratchnet.available() else T.AMBER
+            self.scr_chip.setText(txt)
+            self.scr_chip.setStyleSheet(f"color:{col}; border-color:{T.alpha(col, 0.4)};")
+        else:
+            self.scr_chip.setText("Dust and scratches: off")
+            self.scr_chip.setStyleSheet(f"color:{T.DIM};")
+        from ..engine.local import colourize as cz
+        nh = len(cz.hints_of(e.colourize))
+        if (e.colourize or {}).get("on") or nh:
+            if cz.available():
+                rep = getattr(self.image, "colour_report", None) or {}
+                txt = ("Colourize: DDColor" + (f", {rep['ms']:.0f} ms" if rep.get("ms") else "")) \
+                    if (e.colourize or {}).get("on") else "Colourize: your colours only"
+                if nh:
+                    txt += f"; {nh} part{'s' if nh != 1 else ''} coloured by you"
+                col = T.VIOLET
+            else:
+                txt = "Colourize: the colour model is missing (models/colour/ddcolor.npz); reinstall or update."
+                col = T.AMBER
+            self.col_chip.setText(txt)
+            self.col_chip.setStyleSheet(f"color:{col}; border-color:{T.alpha(col, 0.4)};")
+        else:
+            self.col_chip.setText("Colourize: off" if cz.available() else "Colourize: off (DDColor model not "
+                                  "installed yet)")
+            self.col_chip.setStyleSheet(f"color:{T.DIM};")
 
     def _pick_white_at(self, u, v):
         self._set_pick(None)
@@ -2782,6 +3578,8 @@ class DevelopPage(QWidget):
             parts.append(f"grey edge {info['grey_edge_k']} K")
         if "grayness_k" in info:
             parts.append(f"grayness index {info['grayness_k']} K")
+        if "night_k" in info:
+            parts.append(f"night {info['night_k']} K")
         txt = "Light: " + ", ".join(parts) if parts else "Light: one estimate only"
         if info.get("agreement_deg") is not None:
             word = {"high": "they agree: confident", "medium": "they roughly agree",
@@ -3193,7 +3991,7 @@ class DevelopPage(QWidget):
 
     # ------------------------------------------------------------------------------------ masks
     KIND_NAMES = {"brush": "Brush", "linear": "Gradient", "radial": "Radial", "object": "Object", "colour": "Colour",
-                  "skin": "Skin", "person": "Person",
+                  "skin": "Skin", "person": "Person", "depth": "Depth",
                   "luminance": "Brightness"}
 
     def _cur_mask(self):
@@ -3230,9 +4028,9 @@ class DevelopPage(QWidget):
         shapes = (m or {}).get("shapes", [])
         t = shapes[-1]["type"] if shapes else None
         groups = {"luminance": (self.r_lo, self.r_hi, self.r_soft), "colour": (self.c_width, self.c_soft, self.c_chroma),
-                  "radial": (self.r_feather,)}
+                  "radial": (self.r_feather,), "depth": (self.d_lo, self.d_hi, self.d_soft)}
         shown = groups.get(t, ())
-        for w in (self.r_lo, self.r_hi, self.r_soft, self.c_width, self.c_soft, self.c_chroma, self.r_feather):
+        for w in self._range_ws:
             w.setVisible(w in shown)
         self.range_box.setVisible(bool(shown))
         persons = [x for x in shapes if x.get("type") == "person"]
@@ -3247,7 +4045,8 @@ class DevelopPage(QWidget):
             vals = {self.r_lo: 100 * sh.get("lo", 0.6), self.r_hi: 100 * sh.get("hi", 1.0),
                     self.r_soft: 100 * sh.get("soft", 0.1), self.c_width: sh.get("width", 30),
                     self.c_soft: sh.get("soft", 20) if t == "colour" else 20, self.c_chroma: 100 * sh.get("chroma", 0.03),
-                    self.r_feather: 100 * sh.get("feather", 0.5)}
+                    self.r_feather: 100 * sh.get("feather", 0.5), self.d_lo: 100 * sh.get("lo", 0.6),
+                    self.d_hi: 100 * sh.get("hi", 1.0), self.d_soft: 100 * sh.get("soft", 0.1)}
             for w, v in vals.items():
                 w.set_value(float(v), emit=False)
 
@@ -3274,6 +4073,9 @@ class DevelopPage(QWidget):
             self.status.emit("Skin selected (red). Now raise Smooth skin under 'Adjust inside the mask'. To keep it "
                              "to one face, pick 'x Brush (only where)' and paint over that face.")
             return
+        if kind == "depth":
+            self._depth_mask(op)
+            return
         if kind == "luminance":
             self._add_shape({"type": "luminance", "op": op, "lo": 0.6, "hi": 1.0, "soft": 0.1})
             self.mask_show.setChecked(True)
@@ -3282,6 +4084,267 @@ class DevelopPage(QWidget):
             return
         self._mask_pending = (kind, op)
         self._set_mask_tool(kind)
+
+    def _fill_sel_models(self):
+        """Click-to-select choices: each SAM 2.1 size (greyed out with how to get it when not installed) and
+        Classic; the last choice is remembered."""
+        from ..engine.local import sam
+        have = sam.installed()
+        cb = self.sel_model
+        cb.blockSignals(True)
+        cb.clear()
+        for size, name in sam.SIZES.items():
+            if size in have:
+                cb.addItem(f"SAM 2.1 {name}", size)
+            else:
+                cb.addItem(f"SAM 2.1 {name.split(' (')[0]}: not installed (Convert Models.bat)", size)
+                cb.model().item(cb.count() - 1).setEnabled(False)
+        cb.addItem("Classic (no model, instant)", "classic")
+        want = self.settings.get("select_model") or (have[0] if have else "classic")
+        if want != "classic" and want not in have:
+            want = have[0] if have else "classic"
+        cb.setCurrentIndex(max(0, cb.findData(want)))
+        cb.blockSignals(False)
+
+    def _sel_model_changed(self, *_):
+        self.settings.set("select_model", self.sel_model.currentData())
+
+    def _sel_model(self):
+        """The SAM 2.1 size to use for the next click, or None for the Studio's own method."""
+        from ..engine.local import sam
+        return sam.choose(self.sel_model.currentData() if hasattr(self, "sel_model") else None)
+
+    def _sel_status(self, model, what):
+        """What to say while a click is worked out (the first SAM click on a photo takes a while)."""
+        from ..engine.local import sam
+        if model is None:
+            return f"Finding the {what}..."
+        r = getattr(self.image, "sam_report", None)
+        if r and r.get("size") == model:
+            return f"Finding the {what}..."
+        secs = "about 10 seconds" if model == "tiny" else "up to a minute or two"
+        return (f"SAM 2.1 {sam.SIZES[model].split(' (')[0]} is looking at the photo ({secs}, once per photo; "
+                "after that each click is instant)...")
+
+    # ------------------------------------------------------------------------------------ composite
+    def _fill_layers(self):
+        lw = self.cp_list
+        lw.blockSignals(True)
+        lw.clear()
+        for L in self._layers:
+            it = QListWidgetItem(L.get("name") or os.path.basename(L.get("src", "subject")))
+            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            it.setCheckState(Qt.CheckState.Checked if L.get("enabled", True) else Qt.CheckState.Unchecked)
+            lw.addItem(it)
+        if 0 <= self._lsel < len(self._layers):
+            lw.setCurrentRow(self._lsel)
+        lw.blockSignals(False)
+        self._composite_controls()
+
+    def _composite_controls(self):
+        L = self._layers[self._lsel] if 0 <= self._lsel < len(self._layers) else None
+        show = L is not None
+        self.cp_list.setVisible(bool(self._layers))
+        for w_ in (self.cp_x, self.cp_y, self.cp_size, self.cp_rot, self.cp_soft, self.cp_row, self.cp_btns):
+            w_.setVisible(show)
+        self.cp_mamt.setVisible(show and bool((L or {}).get("match")))
+        if not show:
+            return
+        for w_, v in ((self.cp_x, 100 * L.get("x", 0.5)), (self.cp_y, 100 * L.get("y", 0.55)),
+                      (self.cp_size, 100 * L.get("size", 0.5)), (self.cp_rot, L.get("rotate", 0.0)),
+                      (self.cp_soft, L.get("feather", 1.0)),
+                      (self.cp_mamt, 100 * float((L.get("match") or {}).get("amount", 1.0)))):
+            w_.set_value(float(v), emit=False)
+        for w_, v in ((self.cp_flip, L.get("flip", False)), (self.cp_grain, L.get("grain", True))):
+            w_.blockSignals(True)
+            w_.setChecked(bool(v))
+            w_.blockSignals(False)
+
+    def _composite_selected(self, row):
+        self._lsel = row
+        self._composite_controls()
+
+    def _composite_item_changed(self, it):
+        row = self.cp_list.row(it)
+        if 0 <= row < len(self._layers):
+            self._layers[row]["enabled"] = it.checkState() == Qt.CheckState.Checked
+            self.controls_changed()
+
+    def _composite_params(self, *_):
+        if not (0 <= self._lsel < len(self._layers)):
+            return
+        L = self._layers[self._lsel]
+        L["x"], L["y"] = round(self.cp_x.value() / 100.0, 4), round(self.cp_y.value() / 100.0, 4)
+        L["size"] = round(self.cp_size.value() / 100.0, 4)
+        L["rotate"] = round(self.cp_rot.value(), 1)
+        L["feather"] = round(self.cp_soft.value(), 2)
+        L["flip"], L["grain"] = self.cp_flip.isChecked(), self.cp_grain.isChecked()
+        if L.get("match"):
+            L["match"]["amount"] = round(self.cp_mamt.value() / 100.0, 3)
+        self.controls_changed()
+
+    def _composite_add(self):
+        from ..engine.io.rawfile import RAW_EXTENSIONS
+        from ..engine.io.scanfile import SCAN_EXTENSIONS
+        from .subject_picker import SubjectPicker
+        if self.image is None:
+            return
+        pat = " ".join(f"*{x}" for x in RAW_EXTENSIONS + SCAN_EXTENSIONS)
+        start = os.path.dirname(self.path) if self.path else ""
+        f, _ = QFileDialog.getOpenFileName(self, "The photo the subject is in", start, f"Photos ({pat})")
+        if not f:
+            return
+        try:
+            dlg = SubjectPicker(self, f, self._sel_model())
+        except Exception as err:
+            slog.log_exception("composite: could not open the source photo", log)
+            self.status.emit(f"Could not open {os.path.basename(f)}: {err}")
+            return
+        if dlg.exec() != QDialog.DialogCode.Accepted or not dlg.shape:
+            return
+        sh = dlg.shape
+        n = 1 + sum(1 for L in self._layers if L.get("src") == f)
+        L = {"src": f, "name": f"{os.path.splitext(os.path.basename(f))[0]} {n}",
+             "mask": {"w": sh["w"], "h": sh["h"], "data": sh["data"]}, "fg": sh.get("fg", []),
+             "bg": sh.get("bg", []), "model": sh.get("model", "classic"), "x": 0.5, "y": 0.55, "size": 0.5,
+             "rotate": 0.0, "flip": False, "grain": True, "feather": 1.0, "enabled": True, "match": None}
+        self._layers.append(L)
+        self._lsel = len(self._layers) - 1
+        self._fill_layers()
+        self.controls_changed()
+        self.status.emit("Subject placed in the middle. Move and size it with the sliders; Match its colours "
+                         "re-develops it under this photo's light.")
+
+    def _composite_delete(self):
+        if 0 <= self._lsel < len(self._layers):
+            self._layers.pop(self._lsel)
+            self._lsel = min(self._lsel, len(self._layers) - 1)
+            self._fill_layers()
+            self.controls_changed()
+
+    def _composite_match(self):
+        """Colour match the subject's photo to this one: solved as that photo's settings (colourmatch.py)."""
+        from .. import engine as E
+        from ..engine.pipeline import composite as cp
+        if not (0 <= self._lsel < len(self._layers)) or self.image is None:
+            return
+        L = self._layers[self._lsel]
+        img, path = self.image, self.path
+        here = self.edit_from_controls()
+        here.composite = None
+        self.viewer.busy = True
+        self.viewer.update()
+        self.status.emit("Matching the subject's colours to this photo (a few seconds)...")
+
+        def work():
+            src = cp._source(L["src"])
+            se = cp.source_edit(dict(L, match=None))
+            return E.colour_match_solve(src, se, img, here)
+
+        def done(p_, res):
+            self.viewer.busy = False
+            self.viewer.update()
+            if p_ != self.path or L not in self._layers:
+                return
+            p, mult, rep_ = res
+            L["match"] = {"p": list(map(float, p)), "mult": list(map(float, mult)), "amount": 1.0}
+            self._composite_controls()
+            self.controls_changed()
+            self.status.emit(f"Subject developed under this photo's light: {rep_['text']}.")
+        run_bg(work, path, done, lambda _, err: (setattr(self.viewer, "busy", False), self.viewer.update(),
+                                                 self.status.emit(f"Subject colour match problem: {err}")))
+
+    def _colour_match(self):
+        """Match colours to another photo: solved as slider settings (local/colourmatch.py), in the background."""
+        from .. import engine as E
+        from ..engine.io.rawfile import RAW_EXTENSIONS
+        from ..engine.io.scanfile import SCAN_EXTENSIONS
+        if self.image is None:
+            return
+        pat = " ".join(f"*{x}" for x in RAW_EXTENSIONS + SCAN_EXTENSIONS)
+        start = os.path.dirname(self.path) if self.path else ""
+        f, _ = QFileDialog.getOpenFileName(self, "Match colours to this photo", start, f"Photos ({pat})")
+        if not f:
+            return
+        img, e0, path = self.image, self.edit_from_controls(), self.path
+        name = os.path.basename(f)
+        self.viewer.busy = True
+        self.viewer.update()
+        self.status.emit(f"Matching the colours of {name}: trying settings on small copies (a few seconds)...")
+
+        def work():
+            ref = E.open(f)
+            try:
+                ref_edit = E.load_edit(f)
+            except Exception:
+                slog.log_exception("colour match: reference sidecar unreadable, using defaults", log)
+                ref_edit = E.Edit()
+            return E.colour_match_solve(img, e0, ref, ref_edit)
+
+        def done(p_, res):
+            self.viewer.busy = False
+            self.viewer.update()
+            if p_ != self.path:
+                return
+            p, mult, rep_ = res
+            amt = self.cm_amt.value() / 100.0
+            self._cm = {"p": list(map(float, p)), "mult": list(map(float, mult)), "applied": amt, "name": name,
+                        "text": rep_["text"]}
+            new = E.colour_match_apply(self.edit_from_controls(), p, mult, amt, image=img)
+            self.cm_amt.setVisible(True)
+            self.cm_chip.setText(f"Colour match: {name} ({rep_['text']})")
+            self.cm_chip.setStyleSheet(f"color:{T.VIOLET}; border-color:{T.alpha(T.VIOLET, 0.4)};")
+            self.commit(new, f"Colours matched to {name}: {rep_['text']}. Every change is in the normal sliders; "
+                             "Match amount scales it.", label="Colour match")
+        run_bg(work, path, done, lambda _, err: (setattr(self.viewer, "busy", False), self.viewer.update(),
+                                                 self.status.emit(f"Colour match problem: {err}")))
+
+    def _colour_match_amount(self):
+        """Match amount moved: apply the difference to the same sliders (the rest of the edit stays as it is)."""
+        from .. import engine as E
+        cm = self._cm
+        if not cm or self.image is None:
+            return
+        amt = self.cm_amt.value() / 100.0
+        d = amt - float(cm["applied"])
+        if abs(d) < 1e-6:
+            return
+        cm["applied"] = amt
+        from ..engine.pipeline.pipeline import wb_multipliers
+        cur = self.edit_from_controls()
+        new = E.colour_match_apply(cur, cm["p"], wb_multipliers(self.image, cur), d, image=self.image)
+        self.commit(new, f"Colour match at {amt * 100:.0f}%.", label="Colour match amount")
+
+    def _depth_mask(self, op):
+        """A depth mask: the photo's depth map (local/depth.py, worked out once per photo on this PC), then From and
+        To below choose the distances."""
+        from .. import engine as E
+        from ..engine.local import depth as dp
+        if self.image is None:
+            return
+        if not dp.available():
+            self.status.emit("The depth model is missing from models\\depth. Run Convert Models.bat (or copy that "
+                             "folder back from the download).")
+            return
+        img, e, path, idx = self.image, self.edit_from_controls(), self.path, self._msel
+        self.viewer.busy = True
+        self.viewer.update()
+        self.status.emit("Working out how far away each part of the photo is (a few seconds, once per photo)...")
+
+        def done(p, shape):
+            self.viewer.busy = False
+            self.viewer.update()
+            if p != self.path or not (0 <= idx < len(self._masks)):
+                return
+            shape["op"] = op
+            shape["lo"], shape["hi"], shape["soft"] = 0.6, 1.0, 0.1
+            self._msel = idx
+            self._add_shape(shape)
+            self.mask_show.setChecked(True)
+            self.status.emit("Depth: the nearest part of the photo is selected (red). Move From and To to choose "
+                             "the distances (0 = farthest, 100 = nearest).")
+        run_bg(lambda: E.depth_shape(img, e), path, done,
+               lambda _, err: (setattr(self.viewer, "busy", False), self.status.emit(f"Depth mask: {err}")))
 
     def _find_person(self, op):
         from .. import engine as E
@@ -3342,6 +4405,8 @@ class DevelopPage(QWidget):
     def _set_mask_tool(self, kind):
         if self.image is None:
             kind = None
+        if kind and self.viewer.tool == "hint":
+            self._set_hint_tool(False)
         if kind and self.viewer.tool == "spot":
             self._set_spot_tool(None)
         if kind and self.viewer.tool in ("eyes", "sculpt", "shape"):
@@ -3436,6 +4501,10 @@ class DevelopPage(QWidget):
 
     def _tool_click(self, u, v, alt):
         from .. import engine as E
+        if self.viewer.tool == "hint":
+            shift = bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
+            self._hint_click(u, v, alt, shift)
+            return
         m = self._cur_mask()
         kind = self.viewer.tool
         if m is None or self.image is None:
@@ -3466,7 +4535,8 @@ class DevelopPage(QWidget):
                 self.status.emit("Click the object first; Alt-click then marks what does not belong to it.")
                 return
             img, e0, path = self.image, self.edit_from_controls(), self.path
-            self.status.emit("Finding the object...")
+            model = self._sel_model()
+            self.status.emit(self._sel_status(model, "object"))
             self.viewer.busy = True
             self.viewer.update()
 
@@ -3482,9 +4552,10 @@ class DevelopPage(QWidget):
                 self.controls_changed()
                 self._refresh_mask_controls()
                 self._update_overlay()
-                self.status.emit("Object selected. Click again to add a part, Alt-click to take a part away, Esc "
-                                 "when done.")
-            run_bg(lambda: E.object_mask(img, e0, fg, bg), path, done,
+                by = " (SAM 2.1)" if shape.get("model") else ""
+                self.status.emit(f"Object selected{by}. Click again to add a part, Alt-click to take a part away, "
+                                 "Esc when done.")
+            run_bg(lambda: E.object_mask(img, e0, fg, bg, model=model), path, done,
                    lambda _, err: (setattr(self.viewer, "busy", False), self.status.emit(f"Object problem: {err}")))
 
     def _mask_selected(self, row):
@@ -3517,7 +4588,8 @@ class DevelopPage(QWidget):
             self._update_overlay()
 
     def _mask_show(self, on):
-        self.viewer.show_overlay = bool(on)
+        self.viewer.show_overlay = (bool(on) or self.chg_show.isChecked() or self.st_show.isChecked()
+                                    or self.dp_show.isChecked())
         self._update_overlay()
 
     def _mask_adjust(self, key, v):
@@ -3536,7 +4608,7 @@ class DevelopPage(QWidget):
         if idx <= 0:
             return
         kinds = {"Brush": "brush", "Gradient": "linear", "Radial": "radial", "Object": "object", "Colour": "colour",
-                 "Brightness": "luminance", "Skin": "skin", "Person": "person"}
+                 "Brightness": "luminance", "Skin": "skin", "Person": "person", "Depth": "depth"}
         op = {"+": "add", "-": "subtract", "x": "intersect"}[text[0]]
         kind = next(v for k, v in kinds.items() if k in text)
         self._start_shape(kind, op)
@@ -3554,6 +4626,9 @@ class DevelopPage(QWidget):
             sh["chroma"] = round(self.c_chroma.value() / 100.0, 4)
         elif sh["type"] == "radial":
             sh["feather"] = round(self.r_feather.value() / 100.0, 3)
+        elif sh["type"] == "depth":
+            sh["lo"], sh["hi"] = round(self.d_lo.value() / 100.0, 3), round(self.d_hi.value() / 100.0, 3)
+            sh["soft"] = round(self.d_soft.value() / 100.0, 3)
         else:
             return
         self.controls_changed()
@@ -3567,6 +4642,18 @@ class DevelopPage(QWidget):
 
     def _render_overlay(self):
         from .. import engine as E
+        if self.viewer.tool == "hint":
+            self._render_hint_overlay()
+            return
+        if self.viewer.tool is None and getattr(self, "chg_show", None) is not None and self.chg_show.isChecked():
+            self._render_change_overlay()
+            return
+        if self.viewer.tool is None and getattr(self, "dp_show", None) is not None and self.dp_show.isChecked():
+            self._render_depth_overlay()
+            return
+        if self.viewer.tool is None and getattr(self, "st_show", None) is not None and self.st_show.isChecked():
+            self._render_stain_overlay()
+            return
         m = self._cur_mask()
         show = self.viewer.tool is not None or self.mask_show.isChecked()
         if self.image is None or m is None or not show or not m.get("shapes"):
@@ -3874,6 +4961,12 @@ class DevelopPage(QWidget):
             return
         self.save_sidecar()
         self.path, self.image, self.before_img = path, None, None
+        self._cm = None                                    # a colour match belongs to the photo it was made on
+        if hasattr(self, "cm_amt"):
+            self.cm_amt.setVisible(False)
+            self.cm_amt.set_value(100, emit=False)
+            self.cm_chip.setText("Colour match: none")
+            self.cm_chip.setStyleSheet(f"color:{T.DIM};")
         self._wb_auto_used = False                          # Auto white balance belongs to the photo it ran on
         self.wb_chip.setText("Auto white balance: not used")
         self.before_key = None
@@ -3907,12 +5000,28 @@ class DevelopPage(QWidget):
         self._fill_versions()
         self._fill_snapshots()
         m = self.image.meta
-        exp = (f"1/{round(1 / m.exposure_s)} s" if m.exposure_s and m.exposure_s < 0.5 else
-               (f"{m.exposure_s:g} s" if m.exposure_s else ""))
-        bits = [m.model or "Unknown camera", m.lens or "manual lens", m.iso_label, exp,
-                f"f/{m.fnumber:g}" if m.fnumber else "",
-                f"camera {m.camera_temperature_c:.0f} °C" if m.camera_temperature_c is not None else ""]
+        scan = bool(getattr(self.image.raw, "is_scan", False))
+        if scan:
+            r = self.image.raw
+            bits = [f"Scan: {r.width} x {r.height}", f"{r.bits}-bit {'grey' if r.grey else 'RGB'}",
+                    r.profile.name + (" (assumed)" if r.profile.source == "assumed" else ""),
+                    "black and white" if r.mono else "", m.datetime[:10] if m.datetime else ""]
+        else:
+            exp = (f"1/{round(1 / m.exposure_s)} s" if m.exposure_s and m.exposure_s < 0.5 else
+                   (f"{m.exposure_s:g} s" if m.exposure_s else ""))
+            bits = [m.model or "Unknown camera", m.lens or "manual lens", m.iso_label, exp,
+                    f"f/{m.fnumber:g}" if m.fnumber else "",
+                    f"camera {m.camera_temperature_c:.0f} °C" if m.camera_temperature_c is not None else ""]
         self.info.setText("  ·  ".join(b for b in bits if b))
+        raw_only = (self.band, self.dn_m, self.dn_info)        # row banding and the method picker need raw data
+        for w in self.clean_group.findChildren(QWidget):
+            if w is not self.clean_scan_note and w.parent() is self.clean_group.body:
+                w.setEnabled(not (scan and w in raw_only))
+        self.clean_scan_note.setVisible(scan)
+        if scan:
+            self.noise_chip.setText("Noise: measured in this picture when Clean is on")
+            self.noise_chip.setStyleSheet(f"color:{T.AMBER}; border-color:{T.alpha(T.AMBER, 0.4)};")
+        self._old_photo_refresh()
         self._map_chip()
         self._fill_lenses(self.edit.lens.tag)
         if not self.edit.lens.tag and (m.manual_lens or not m.lens) and self.settings.get("last_lens"):
@@ -4507,6 +5616,8 @@ class DevelopPage(QWidget):
         """which: None | "eyes" | ("sculpt", kind) | ("shape", tool)."""
         if self.image is None:
             which = None
+        if which and self.viewer.tool == "hint":
+            self._set_hint_tool(False)
         kind = which if isinstance(which, str) else (which[0] if which else None)
         sub = which[1] if isinstance(which, tuple) else None
         for b, on in [(self.pt_eyes, kind == "eyes")] + [(b, kind == "sculpt" and sub == k)
@@ -4839,6 +5950,8 @@ class DevelopPage(QWidget):
     def _set_spot_tool(self, kind):
         if self.image is None:
             kind = None
+        if kind and self.viewer.tool == "hint":
+            self._set_hint_tool(False)
         for k, b in self.rt_btn.items():
             b.blockSignals(True)
             b.setChecked(k == kind)
@@ -5073,6 +6186,7 @@ class DevelopPage(QWidget):
         self._glow_refresh()
         self._dn_safe_refresh()
         self._hdr_refresh()
+        self._old_photo_refresh()
         if b8 is not None:
             self.before_img = to_qimage(b8)
             self.before_key = bkey
@@ -5093,13 +6207,17 @@ class DevelopPage(QWidget):
             self._pick_white_at(u, v)
         elif self.pick == "range":
             self._pick_range_at(u, v)
+        elif self.pick == "film":
+            self._pick_film_base_at(u, v)
 
     def _escape(self, keep_zoom: bool = False):
         """Esc: put down the eyedropper or tool in hand; with nothing in hand, back to the whole photo."""
         busy_tool = bool(self.pick) or bool(self.viewer.tool)
         if self.pick:
             self._set_pick(None)
-        if self.viewer.tool in ("eyes", "sculpt", "shape"):
+        if self.viewer.tool == "hint":
+            self._set_hint_tool(False)
+        elif self.viewer.tool in ("eyes", "sculpt", "shape"):
             self._set_portrait_tool(None)
         elif self.viewer.tool == "spot":
             self._set_spot_tool(None)
@@ -5402,6 +6520,36 @@ class HelpPage(InfoPage):
                              ("Body sculpting", "Push, Shrink, Grow brushes; shape tools (breast lift & size, butt "
                                                 "improvement tool, slim waist, tummy, arm, thigh): drag along the "
                                                 "area, then set Lift, Size or Slim. Every warp is capped."),
+                             ("Old photos & scans", "The Library shows TIFF, JPEG and PNG scans beside raws. "
+                                                    "Develop > Old photo and film: choose Colour or Black and white "
+                                                    "negative to turn a negative positive (Pick the film base on "
+                                                    "clear film if the colour is off); Remove stains and corrosion "
+                                                    "(unmixed, not painted over; Show what's lost marks where the "
+                                                    "picture may be gone); Remove dust and scratches; "
+                                                    "Colourize a black and white photo (only colour is added; the "
+                                                    "brightness stays). Colour a part: click a coat or the sky and "
+                                                    "choose its colour; Shift-click adds more, Alt-click stops it, "
+                                                    "the white outline shows where it goes."),
+                             ("Cognitive Adjustments", "Develop > Cognitive Adjustments: our own tools, built from "
+                                                       "research and run on this PC; each measures what is in the "
+                                                       "photo and invents nothing. Remove printing dots: for scans "
+                                                       "of newspaper, yearbook or book pictures (the screen is found "
+                                                       "exactly; nothing changes if there is none). Repair JPEG "
+                                                       "blocks and ringing (JPEG files): the smoothest picture that "
+                                                       "still matches the file exactly. Add a subject from another "
+                                                       "photo: click it out (click-to-select), place, size and turn "
+                                                       "it, match its colours and grain. Relight: moves the light "
+                                                       "(Light from, height, softness) using the shapes in the "
+                                                       "depth map; only the light changes. Depth haze: "
+                                                       "adds or clears haze by distance, using a depth map worked "
+                                                       "out from the photo (Show depth map: red near, blue far; "
+                                                       "Masks > Depth selects by distance). Match colours to "
+                                                       "another photo: moves exposure, contrast, white balance, "
+                                                       "saturation and the colour wheels to that photo's colour "
+                                                       "mood (all ordinary sliders; Match amount scales it). "
+                                                       "Show what the "
+                                                       "automatic tools changed: a heat map, clear where nothing was "
+                                                       "touched."),
                              ("Zoom and move", "Click the photo for 100% there, click again for the whole photo. "
                                                "The mouse wheel zooms around the pointer, from the whole photo to "
                                                "400%. Drag to move (with a tool on: middle- or right-drag, or "

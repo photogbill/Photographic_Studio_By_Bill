@@ -103,7 +103,10 @@ def load_thumb(path: str, size: int = 260) -> np.ndarray:
     """Embedded camera preview, oriented, reduced (Library and filmstrip: opens folders instantly)."""
     import rawpy
     from PIL import Image
+    from ..engine.io.scanfile import is_scan, scan_preview
     from ..engine.pipeline.pipeline import apply_orientation
+    if is_scan(path):
+        return scan_preview(path, size)
     with rawpy.imread(path) as r:
         flip = r.sizes.flip
         th = r.extract_thumb()

@@ -176,7 +176,8 @@ _NAMES = {"exposure_ev": "Exposure", "light": "Light", "tone": "Tone", "colour":
           "White balance", "microcontrast": "Local contrast", "detail": "Detail by scale", "hdr": "Auto HDR", "sharpen": "Sharpening", "denoise": "Noise",
           "banding": "Banding", "lens": "Lens", "geometry": "Shape", "demosaic": "Demosaic",
           "masks": "Masks", "retouch": "Retouch", "finish": "Finish", "profile": "Camera profile", "highlight_mode": "Clipped highlights",
-          "glow_profile": "Lens glow profile", "portrait": "Portrait"}
+          "glow_profile": "Lens glow profile", "portrait": "Portrait", "film": "Film", "halftone": "Printing dots", "stains": "Stains & corrosion", "scratches": "Dust & scratches",
+          "colourize": "Colourize", "depth": "Depth haze", "jpeg": "JPEG repair", "relight": "Relight", "composite": "Composite"}
 
 
 _SUB = {"ranges": "colour wheel", "grading": "colour grading", "hsl": "HSL", "bw_mix": "B&W mix", "curve": "tone curve",
@@ -198,8 +199,18 @@ def describe_change(old, new) -> str:
         return _describe_retouch(a.get("retouch") or [], b.get("retouch") or [])
     if k == "portrait":
         return _describe_portrait(a.get("portrait") or {}, b.get("portrait") or {})
+    if k == "film":
+        f = b.get("film") or {}
+        if not f:
+            return "Film: positive"
+        if (a.get("film") or {}).get("kind") != f.get("kind"):
+            return "Film: " + ("colour negative" if f.get("kind") == "colour" else "black and white negative")
+    if k in ("halftone", "stains", "scratches", "colourize", "jpeg") and not (b.get(k) or {}).get("on") and (a.get(k) or {}).get("on"):
+        return f"{_NAMES.get(k, k)}: off"
+    if b[k] is None:
+        return _NAMES.get(k, k)
     if isinstance(b[k], dict):
-        sub = [s for s in b[k] if a.get(k, {}).get(s) != b[k][s]]
+        sub = [s for s in b[k] if (a.get(k) or {}).get(s) != b[k][s]]
         if len(sub) == 1:
             v = b[k][sub[0]]
             name = _SUB.get(sub[0], sub[0].replace("_", " "))

@@ -150,14 +150,14 @@ def test_keep_the_mood_and_defaults():
     assert np.allclose(half, np.sqrt(auto * shot)), "half-way is half the correction in every channel"
     assert AW.default_mood(2800, 6400) == 0.6, "a warm light in a low-light photo: the candle stays warm"
     assert AW.default_mood(2800, 100) == 0.9 and AW.default_mood(5500, 6400) == 0.9
-    assert set(AW.METHODS) == {"grey_edge", "grayness"}
+    assert set(AW.METHODS) == {"grey_edge", "grayness", "night"}
 
 
 def test_auto_white_balance_in_the_pipeline():
     from conftest import scene, synthetic_raw
     from studio.engine.pipeline import pipeline as PL
     img = PL.Image(synthetic_raw(scene(240, 360), read_noise=2.0))
-    for method in ("grey_edge", "grayness"):
+    for method in ("grey_edge", "grayness", "night"):
         m, how, info = PL.auto_white_balance(img, method)
         assert m is not None and m.min() == pytest.approx(1.0) and how
         assert 0.0 < info["mood"] <= 1.0 and info["confidence"] in ("high", "medium", "low")

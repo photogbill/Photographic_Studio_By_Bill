@@ -42,6 +42,15 @@ STAGE_VERSIONS = {
     "portrait": 1,
     "detail": 1,
     "hdr": 1,
+    "film": 1,                       # film negatives -> positives (local/film.py)
+    "halftone": 1,                   # printing dots on scans of printed photos (local/halftone.py)
+    "stains": 1,                     # stains and corrosion, unmixed (local/stains.py, the Plate Lab)
+    "scratches": 1,                  # dust and scratches on scans and old photos (local/scratches.py)
+    "depth": 1,                      # depth from one photo: haze by distance (local/depth.py)
+    "jpeg": 1,
+    "relight": 1,                    # the light moved, from the depth map's surfaces (local/relight.py)
+    "composite": 1,                  # subjects from other photos laid on the finished picture (composite.py)                       # JPEG repair inside the file's quantisation intervals (local/jpegfix.py)
+    "colourize": 2,                  # black and white -> colour (local/colourize.py); 2: faded tones evened first
 }
 
 
@@ -207,6 +216,15 @@ class Edit:
     masks: list | None = None        # local adjustments (local/masks.py): shapes attached to the photo + settings
     retouch: list | None = None      # heal / clone / red-eye spots (local/retouch.py), attached to the photo
     portrait: dict | None = None     # faces, face sliders and body sculpting (local/portrait.py), attached to the photo
+    film: dict | None = None         # film negative -> positive (local/film.py): {"kind", "base", "dmax", ...}
+    halftone: dict | None = None     # printing dots (local/halftone.py): {"on", "amount"}
+    stains: dict | None = None       # stains and corrosion (local/stains.py): {"on", "amount", "sensitivity"}
+    scratches: dict | None = None    # dust and scratch removal (local/scratches.py): {"on", "amount", ...}
+    colourize: dict | None = None    # black and white -> colour (local/colourize.py): {"on", "amount", ...}
+    depth: dict | None = None        # depth from one photo (local/depth.py): {"haze"}
+    jpeg: dict | None = None         # JPEG repair (local/jpegfix.py): {"on"}
+    relight: dict | None = None      # move the light (local/relight.py): {"amount", "azimuth", "elevation", "soft"}
+    composite: list | None = None    # subjects from other photos (pipeline/composite.py): [{"src", "mask", "x", ...}]
     use_optical_black: bool = True
     banding: bool = True             # row banding from the masked border, Wiener-gated (never adds bands)
     gamut_compress: bool = True      # smooth gamut compression before the tone curve (gamut.py)
@@ -256,6 +274,30 @@ class Edit:
         d = self.to_dict()
         keep = {k: d[k] for k in ("white_balance", "highlight_mode", "demosaic", "green_eq", "use_optical_black", "denoise", "banding",
                                           "lens", "sharpen", "profile")}
+        if d.get("film"):                          # a negative is turned positive in stages 1-12
+            keep["film"] = d["film"]
+            keep["film_v"] = d["stage_versions"].get("film", 1)
+        if (d.get("halftone") or {}).get("on"):    # printing dots are taken out there
+            keep["halftone"] = d["halftone"]
+            keep["halftone_v"] = d["stage_versions"].get("halftone", 1)
+        if (d.get("stains") or {}).get("on"):      # stains and corrosion are unmixed there
+            keep["stains"] = d["stains"]
+            keep["stains_v"] = d["stage_versions"].get("stains", 1)
+        if (d.get("scratches") or {}).get("on"):   # dust and scratches are taken out there too
+            keep["scratches"] = d["scratches"]
+            keep["scratches_v"] = d["stage_versions"].get("scratches", 1)
+        if (d.get("colourize") or {}).get("on") or (d.get("colourize") or {}).get("hints"):   # and colour
+            keep["colourize"] = d["colourize"]
+            keep["colourize_v"] = d["stage_versions"].get("colourize", 1)
+        if float((d.get("relight") or {}).get("amount", 0)) > 1e-6:     # the light moved
+            keep["relight"] = d["relight"]
+            keep["relight_v"] = d["stage_versions"].get("relight", 1)
+        if (d.get("jpeg") or {}).get("on"):                 # JPEG repair changes the decoded pixels
+            keep["jpeg"] = d["jpeg"]
+            keep["jpeg_v"] = d["stage_versions"].get("jpeg", 1)
+        if d.get("depth") and abs(float((d.get("depth") or {}).get("haze", 0))) > 1e-6:    # haze by distance
+            keep["depth"] = d["depth"]
+            keep["depth_v"] = d["stage_versions"].get("depth", 1)
         if d.get("highlight_mode") == "glow":
             keep["glow_profile"] = d.get("glow_profile", "")
             keep["glow_v"] = d["stage_versions"].get("glow", 1)

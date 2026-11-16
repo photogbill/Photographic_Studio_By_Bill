@@ -40,7 +40,7 @@ def collect(items: list[str], recursive: bool = False) -> list[str]:
             else:
                 out += [os.path.join(it, f) for f in sorted(os.listdir(it)) if f.lower().endswith(RAW_EXTENSIONS)]
         elif os.path.isfile(it):
-            if it.lower().endswith(RAW_EXTENSIONS):
+            if it.lower().endswith(RAW_EXTENSIONS + (".tif", ".tiff", ".jpg", ".jpeg", ".png")):
                 out.append(it)
             else:
                 print(f"  skipped (not a raw file): {it}")

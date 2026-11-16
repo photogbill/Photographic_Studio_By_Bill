@@ -792,3 +792,56 @@ A 37% tile against the same part of the whole photo rendered at 37%: mean differ
 slider while zoomed: tile 0.14 s, then the preview 0.6 s (both from their own cache; with the old single cache
 slot each render evicted the other's denoised data). Develop's minimum window width: 1,521 px before, 1,353 after
 (a long file name now shortens instead of widening the window).
+
+### Old photos: scans, negatives, dust and scratches (session 2026-11-16)
+All in the container (2 CPU cores; Bill's PC is several times faster). Scans made from the R5 test raw rendered at
+quarter size (1366 x 2048).
+
+Scans render as the file (default edit, then encoded back to the file's space):
+
+| File | Mean difference | Largest |
+|---|---|---|
+| 16-bit TIFF, Adobe RGB profile | 0.000% | 0.39% (one code value at 8 bits) |
+| 8-bit JPEG / PNG, no profile (sRGB) | 0.096% (the export dither) | 0.39-0.78% |
+| 8-bit grey JPEG | 0.098% | 0.39% |
+
+Negatives (synthetic: orange base 0.72/0.42/0.24, layer contrast 0.55/0.60/0.65, then the turn back): log-brightness
+correlation with the original 0.9995 (colour) and 0.9974 (B&W). The colour comes back neutral-balanced (a warm
+candle scene comes back cooler, as from any auto-balanced scan); white balance takes it from there.
+
+Dust and scratches (300 specks of radius 0.8-3.5 px and 15 scratches of 1-3 px, half bright and half dark, on the
+2.8 MP candle scan):
+
+| | Amount 30 | 50 | 70 |
+|---|---|---|---|
+| Damage found (pixels) | 100% | 100% | 100% |
+| Damage left after the fill | 2.96 -> 0.06 stops | 0.07 | 0.07 |
+| Pixels marked on the same photo with no damage (filter alone) | 0.12% | 0.32% | 0.77% |
+
+Through the pipeline with the learned detector: damage 3.37 -> 0.09 stops, the rest changed by 0.004 stops on
+average; a 300 x 240 region against the same part of the whole photo: largest difference 0.00002. Time: whole photo
+5.7 s the first time (2.7 s of it the detector's map, made once per photo), half-size preview 0.7 s.
+
+Half-size preview (the fit view): scratches 2.96 -> 0.06 stops, specks 2.41 -> 0.08, after two fixes: the detector's
+verdict is taken a few pixels either side of a mark (its map is coarse), and a long thin mark standing at least
+twice the threshold above its texture counts as a scratch even where the detector cannot see one that thin (before:
+0.19 stops left on scratches at half size). The detector runs with the short side at 384 px from 1000 px up (one
+thin scratch's median probability 0.10 at 256, 0.49 at 384; false marks on undamaged areas 0.98% -> 0.12%).
+
+Scratch detector (NumPy): short side 256 px 2.7 s, 384 px 5.4 s on 2 cores. On the clean photo no pixel above 0.4 (its own
+threshold); on the damaged one 70% of the damage pixels above it (the specks are below its resolution). 8-bit
+weights against the float ones: the damage mask agrees on 99.92% of pixels (largest probability difference 0.14).
+
+Colourize (DDColor paper tiny, 256 x 256): the Studio's NumPy runner against ONNX Runtime on three photos: largest
+difference 0.0004 (a, b units), 1.1-1.5 s each on 2 cores (ONNX Runtime 0.6-1.6 s). 8-bit weights against float:
+mean difference 0.15 / 0.30 / 0.65 Lab units (cat, coffee, astronaut), invisible side by side; one outlier pixel 24
+units. Through the pipeline (1536 px and 1800 px grey JPEGs): 2.5-4.0 s, L* changed by 0.24-0.26 on average (99th
+percentile under 1.1, from the taper and gamut limits), a zoomed region identical to the whole. The predicted
+colour depends on how the black and white was made: the astronaut's orange suit comes back orange from true CIE
+lightness and blue from a gamma-luma grey copy, which is the model's guess, not a bug.
+
+Colour a part (astronaut, 1536 px grey JPEG): finding a part 0.4-0.55 s (geodesic distance on a 640 px copy).
+Two clicks (one Shift) took the whole suit including its folds and left the badge out; one click on the wall took
+the wall and leaked into the pale left cheek and the top of the hair; one Alt-click on the cheek fixed the cheek.
+On the synthetic test (a dark-to-light ramp beside a sharp edge) the part fills the whole ramp and stops exactly at
+the edge; brightness changed by under 0.8 L* anywhere (the hint test's limit; typical 0.0001).

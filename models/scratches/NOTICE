@@ -1,0 +1,16 @@
+Scratch detector used by Photographic Studio By Bill (Develop > Old photo and film > Remove dust and scratches)
+
+scratch_detector.npz    the scratch-detection U-Net of "Bringing Old Photos Back to Life"
+
+Copyright (c) Microsoft Corporation. Licensed under the MIT License; the licence text is in the file LICENSE in this
+folder. Source: https://github.com/microsoft/Bringing-Old-Photos-Back-to-Life (release v1.0,
+global_checkpoints.zip, checkpoints/detection/FT_Epoch_latest.pt). The repository states that its code and
+pretrained models are under the MIT licence.
+
+Paper: Ziyu Wan, Bo Zhang, Dongdong Chen, Pan Zhang, Dong Chen, Jing Liao, Fang Wen, "Bringing Old Photos Back to
+Life", CVPR 2020, and "Old Photo Restoration via Deep Latent Space Translation", IEEE TPAMI 2022.
+
+What was changed: only the model's own weights were kept (not the optimiser state saved with them); each
+convolution's batch normalisation was folded into its weights; the weights are stored as 8-bit integers with one
+scale per filter. tools/convert_scratch_detector.py does all of it, without PyTorch, from Microsoft's file. The
+network is run by the Studio's own NumPy code (studio/engine/local/scratchnet.py, GPL-3.0); PyTorch is not used.

@@ -1,0 +1,21 @@
+Click-to-select models used by Photographic Studio By Bill (Masks > Object, Colour a part; Masks > Click-to-select)
+
+sam2.1_tiny_encoder.npz, sam2.1_tiny_decoder.npz      SAM 2.1, Hiera-Tiny (shipped)
+sam2.1_large_encoder.npz, sam2.1_large_decoder.npz    SAM 2.1, Hiera-Large (made on each PC by Convert Models.bat
+                                                      from the download; too big to ship)
+
+SAM 2: Nikhila Ravi, Valentin Gabeur, Yuan-Ting Hu, Ronghang Hu, Chaitanya Ryali, Tengyu Ma, Haitham Khedr, Roman
+Radle, Chloe Rolland, Laura Gustafson, Eric Mintun, Junting Pan, Kalyan Vasudev Alwala, Nicolas Carion, Chao-Yuan
+Wu, Ross Girshick, Piotr Dollar, Christoph Feichtenhofer, "SAM 2: Segment Anything in Images and Videos", Meta FAIR,
+2024. Code and checkpoints: https://github.com/facebookresearch/sam2 - licensed under the Apache License, Version
+2.0; a copy is in the file LICENSE in this folder. Unless required by applicable law or agreed to in writing, the
+models are distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
+
+Source of these files: the ONNX exports of the SAM 2.1 checkpoints packaged as sam2.1_hiera_tiny_20260221.zip and
+sam2.1_hiera_large_20260221.zip (an image encoder and a prompt decoder each, as used by X-AnyLabeling).
+
+What was changed: the image encoder was simplified for a fixed 1024 x 1024 input (onnxsim or onnxslim) and both
+graphs were converted by tools/convert_onnx_model.py into NumPy files, with weights of 4096 values or more stored as
+16-bit floats (the image features differ from the original's by about 0.1% on average; the outlines agree to 99.8%
+intersection-over-union in our tests). They are run by the Studio's own NumPy code (studio/engine/local/onnxnp.py,
+GPL-3.0); ONNX Runtime is not used.

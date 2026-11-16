@@ -147,12 +147,42 @@ class TiffMeta:
     container: str = ""
 
 
+def _exif_block(buf: bytes) -> bytes:
+    """The TIFF-structured EXIF block of a JPEG (APP1 "Exif") or PNG (eXIf chunk); b"" when there is none."""
+    if buf[:2] == b"\xff\xd8":
+        i = 2
+        while i + 4 <= len(buf) and buf[i] == 0xFF:
+            marker = buf[i + 1]
+            if marker in (0xD9, 0xDA):              # end of image / start of scan: no EXIF before the pixels
+                break
+            n = struct.unpack_from(">H", buf, i + 2)[0]
+            if marker == 0xE1 and buf[i + 4:i + 10] == b"Exif\0\0":
+                return buf[i + 10:i + 2 + n]
+            i += 2 + n
+        return b""
+    i = 8
+    while i + 8 <= len(buf):
+        n = struct.unpack_from(">I", buf, i)[0]
+        kind = buf[i + 4:i + 8]
+        if kind == b"eXIf":
+            return buf[i + 8:i + 8 + n]
+        if kind in (b"IDAT", b"IEND"):
+            break
+        i += 12 + n
+    return b""
+
+
 def read_tiff_meta(path: str, head_bytes: int = 24 * 1024 * 1024) -> TiffMeta:
     """Read IFD0, ExifIFD and the Canon MakerNote from a CR2/CR3 (or any TIFF-based raw)."""
     with open(path, "rb") as fh:
         buf = fh.read(head_bytes)
     meta = TiffMeta()
-    if buf[4:8] == b"ftyp":
+    if buf[:2] == b"\xff\xd8" or buf[:8] == b"\x89PNG\r\n\x1a\n":     # a scan: EXIF inside JPEG APP1 / PNG eXIf
+        meta.container = "jpeg" if buf[:2] == b"\xff\xd8" else "png"
+        buf = _exif_block(buf)
+        if not buf:
+            return meta
+    elif buf[4:8] == b"ftyp":
         meta.container = "isobmff"
         blobs = cr3_cmt_blobs(buf)
         if b"CMT1" in blobs:

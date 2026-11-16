@@ -29,12 +29,14 @@ One raw file in, one finished file out. Your photos never leave your PC.
 | ✅ | **Develop engine** | Turns CR2 and CR3 files into 16-bit Adobe RGB TIFFs, and builds a page comparing each result with your camera's own JPEG. |
 | 🎨 | **Calibration wizard** | Teach the tool your camera: print a checklist, shoot about 120 frames, drop them in. |
 | 🎨 | **Lens wizard** | Teach it your lenses, including vintage lenses with no electronic contacts. |
-| 🧪 | **High-ISO denoiser** | Cleans noise in the raw data itself, before anything is clipped, smeared or tinted. |
+| 🧪 | **High-ISO denoiser** | Cleans noise in the raw data itself, before anything is clipped, smeared or tinted: that is where it works best, so shoot raw for the cleanest results. Scans and JPEGs can be cleaned too, from noise measured in the picture itself (good on grain and colour mottling; it cannot undo what the camera already smeared or compressed). |
 | 🧪 | **Automatic lens correction** | One **Fix lens** button: colour fringing, distortion (from a lens profile or from straight lines in the photo) and falloff, fixed automatically, even for vintage lenses with no contacts. Purple-fringe removal is on by default; vignetting correction stays off unless you want it. |
 | 🧪 | **Develop controls** | Exposure, white balance, straighten, perspective and crop work today; colour wheel and masks are next. |
 | 🧪 | **Detail by scale (microcontrast)** | More shades of shadow: the quality great lenses are loved for. One Amount and a Balance from tonal to crisp, or six methods you can dial in and combine. No halos, noise is not lifted as detail, and you can judge it in black and white. |
 | 🧪 | **Auto HDR** | One tick, then Light, Medium, Heavy, Highlights only, Low-key or Shadows only: opens shadows and holds highlights without flattening the photo. Never on unless you turn it on. |
 | 🧪 | **Recover lens sharpness** | Undoes part of the measured blur by deconvolution, without ringing. Off for lenses you mark as character lenses. |
+| 🧪 | **Old photos, scans and film** | Opens TIFF, JPEG and PNG scans beside your raws and shows them exactly as they are. Turns black and white or colour negatives into positives (from scans or camera copies), takes stains and corrosion out by unmixing them from the picture (where a stain has eaten the picture, it shows you instead of inventing), removes dust and scratches with Microsoft's scratch detector plus the Studio's own filter, and can colourize a black and white photo with DDColor (downloaded once, runs on your PC). Faces are never redrawn. |
+| 🧪 | **Cognitive Adjustments** | The Studio's own answer to Photoshop's Neural Filters, built from research papers and run on your PC. Each tool measures what is in the photo and invents nothing: printing-dot removal for scans of printed pictures, colourize with evened input and colour balance, a heat map of what every automatic tool changed, depth from one photo (Depth haze, a depth view, and Masks > Depth to select by distance), click-to-select with Meta's SAM 2.1 (Tiny shipped; Large made on your PC by `Convert Models.bat`), colour match from another photo (solved as ordinary slider settings you can still move), JPEG repair (the smoothest picture that still matches the file exactly), Relight (move the light using the shapes in the depth map) and Composite (click a subject out of another photo, place it, match its colours and grain). |
 | 🗺️ | **Render like my lens** | A shared library of real lens signatures. |
 | 🗺️ | **Photoshop and PhotoCraft** | Send to Photoshop or PhotoCraft in one click, plus a Photoshop panel. |
 | 🗺️ | **Every brand** | Canon first, then Nikon, Sony, Pentax, Fujifilm and more. |
@@ -71,6 +73,7 @@ Windows may show a blue **"Windows protected your PC"** box for either file. Tha
 - **Start Studio.bat** (or the desktop shortcut) opens the Studio; on Linux, `start-studio.sh` or the menu entry.
 - Drag **CR2** or **CR3** files, or a whole folder, onto **Analyze Raws.bat** for a report on your camera's files.
 - Drag raw files onto **Develop Raws.bat** to develop them. Your TIFFs and the comparison page land in the `outputs` folder.
+- **Convert Models.bat** turns model downloads in the `models` folder into the Studio's format on your PC (SAM 2.1 Large for click-to-select, which is too big to ship; or a newer depth model). It checks each one runs and logs to `logs\convert_models.log`.
 
 **Developers:** clone the repository with git and double-click **Install.bat** (on Linux: `bash install-linux.sh` inside the clone). It uses your own Python (3.10 or newer) in a private environment inside the folder, or downloads a private copy of Python if your PC has none. Installers never overwrite a git copy.
 

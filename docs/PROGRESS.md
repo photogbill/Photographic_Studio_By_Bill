@@ -490,3 +490,232 @@ Updated 2026-11-15 (session 11: Phase 4b, plan section 24). Plan: BUILD_PLAN.md 
     without tearing Qt down once everything is saved: exit 0 within about 1.5 s. One Studio at a time (a lock
     beside the settings; "Open another window anyway" is offered), since a slow start invited a second click. (4)
     *Zooming and dragging took up to ten seconds*: 0.1.3 predates decision 85.
+87. **Old photos, scans and film (Bill: "removing dust and scratches is a must", colour negatives "definitely",
+    no hand colourization, no face restorers).** (1) *Scans open.* TIFF (8/16-bit, float), JPEG and PNG, grey or
+    RGB, in the Library beside raws (a camera's JPEG beside its raw stays hidden) and in Develop. The embedded ICC
+    profile is read field by field (matrix/TRC and grey; anything else, or none, is taken as sRGB and the
+    info line says "assumed"), giving display-linear ProPhoto; then the default Studio Standard curve is inverted,
+    so a default edit shows the scan exactly as the file (16-bit TIFF: mean 0.000%, 99.9th percentile 0.005%) and
+    every slider works on it as on a raw. Clean stays raw-only (it is said in its panel). (2) *Negatives.* Black
+    and white or colour, from a scan or a camera copy: density above the film base, each layer normalised by the
+    frame's own density range (the orange mask and the layers' different contrasts go together), written as
+    scene-linear light for the Studio's tone curve (the "paper"). Base and range are measured once on the whole
+    frame; Pick the film base on clear film overrides; Negative contrast scales the range. White balance acts on
+    the positive. (3) *Dust and scratches.* Top-hats both ways on log brightness, a threshold set by the local
+    texture (a speck on a sky or cheek is found faint, the same contrast in foliage is left), hysteresis for whole
+    shapes, specks or long thin marks only; the filled light is a harmonic membrane solved on the marked pixels
+    only, with grain like the grain round it. Microsoft's scratch detector (Bringing Old Photos Back to Life, MIT),
+    run in NumPy from 8-bit weights (33 MB, converted without PyTorch), judges which long marks are damage: on a
+    clean photo it marks nothing, so the filter's texture false alarms on lines go. Specks are below its 256-pixel
+    view and are judged by the filter alone. Faces' eyes, brows, lips and nostrils are never touched (catchlights).
+    (4) *Colourize.* DDColor (Apache 2.0) from Qualcomm's ONNX export, converted to one NumPy file with 8-bit
+    weights (53 MB, ships with the Studio: nothing to download) and run by a new small ONNX-graph runner
+    (local/onnxnp.py: 19 layer types, matches ONNX Runtime to 0.0004, 1.1-1.5 s at 256 px on 2 cores). Only a, b
+    are taken; each pixel keeps its L*; colour is put in scene-linear light through the inverse standard curve,
+    brought up to full size edge-aware (guided filter), tapered near black and white. All four live in stages 1-12, are in
+    the stage-1-12 cache key, and a zoomed region renders like the whole photo. CodeFormer (non-commercial licence)
+    and GFPGAN (invents facial detail) are deliberately not used.
+88. **Colour a part (Bill: Photoshop's colour points "imperfect to the point of annoyance, but in theory it could
+    work very well").** Click a part of the photo (a coat, a car, the sky), choose its colour (the picker starts on
+    the colour shown there): it spreads over that part and keeps the photo's light and shade. Where Photoshop
+    struggles, and what is different here: (1) the spread follows brightness only, by geodesic distance with a
+    squared-step cost, so a fold or a shadow (gradual) costs nothing however deep and the sharp edge of a collar
+    or badge stops it, and the colour blotches an automatic colourizer leaves on a garment cannot cut it up; (2)
+    the colour is laid as a material: the chosen colour's chromaticity at each pixel's own brightness (reflectance
+    times shading), pulled to grey only as far as the gamut needs, so folds stay folds and the brightness does not
+    change (to 0.0001 L* on the test); (3) you see where it goes: a white outline and a light tint of the part
+    while the tool is in hand; Shift-click adds more of the part, Alt-click stops it at a place, Spread sets how
+    strong an edge it may cross, Change colour and Remove in the list. Works with or without the automatic colour
+    (the hints are laid over DDColor's colours). Honest limits: brightness-only spreading leaks where two parts are
+    equally bright with a soft boundary (a pale cheek against a pale wall) and stops at strong edges inside a part
+    (hair strands, deep creases): one Alt-click or Shift-click fixes each, and the outline shows where.
+89. **The Plate Lab, first part: stains and corrosion unmixed (Bill: "go ahead and build the plate lab"; test plate:
+    Levi L. Hill's Hillotype self-portrait, NMAH PG.003999.32, which Bill has worked on for 13 years).** A stain,
+    foxing spot or corrosion bloom is a coloured layer over the picture, so it is measured by its colour instead
+    of painted over (local/stains.py). On a small copy of the whole photo, in log space: the background of warm
+    (log R/B), green-magenta and brightness is a median over 8% of the short side; the stains' colour direction is
+    the weighted median of the strongest warm steps, searched only from -20 to +50 degrees (orange to
+    yellow-brown); the brightness a stain causes per unit of its colour is one robust fit over all stain pixels
+    (opaque cores left out of the fit). Each block is then cleaned with those numbers (so a 100% view equals the
+    export): where a pixel steps from its background along the stain direction (within 40 degrees), the stain's
+    brightness and tint are taken out; the picture under a thin stain stays. Real reds that lean magenta (lips)
+    point another way and are left alone (tested). Evidence for Hillotype colour: Boudreau's colorimetry of his
+    1980s recreation (Pioneers of Photography, 1987, ch. 18; Macbeth MS 1500+, D65, 10 degree observer), colour
+    difference from the plate's background: yellow da -0.78 db +0.28, green -5.09 / -1.25, blue -2.31 / -2.48,
+    red +0.54 / -2.98. All faint (1-5 units) and none toward orange (+a +b), where corrosion lies, so the stain
+    cone leaves them alone. (A screenshot of one of his plates looked strongly pink-orange; that is the
+    reproduction, not the plate.) Boudreau also reports the colour does not change with viewing or lighting
+    angle, unlike tarnish interference colours: a two-angle capture could tell them apart. Not yet handled:
+    hand-applied pigment (Hill used it on some plates) that happens to be orange would be taken for a stain;
+    a shape and texture check (blooms are compact and crusty) is the planned fix. **Honesty:** bloom cores, where the picture may be gone (on a plate the corrosion
+    eats the silver the image is made of), are kept in a map, shown amber by **Show what's lost**, and never
+    filled with invented detail. Panel: Remove stains and corrosion, Stain strength, Sensitivity, Show what's
+    lost, a chip with the share unmixed and the share possibly lost. Synthetic validation (known answer: sepia
+    pictures with orange-brown blooms and opaque cores, add_stains): stain brightness error 0.10 -> 0.01 (log
+    units) and tint error 0.14 -> 0.015 on four seeds; the fit's slope 0.67-0.89 against a true 0.72. Ordering in
+    the scan path: stains, then dust and scratches, then colour. Still to come in the Plate Lab: multi-capture
+    fusion (several lights / polarised / IR) and polarity for plates seen in their mirror state (the "show what
+    changed" view came in decision 90).
+90. **Cognitive Adjustments, batch 1 (Bill: "ready to build in neural filters that run locally?"; the name is his,
+    "tongue in cheek at Adobe").** A new Develop group for tools built from research and run on this PC; each
+    measures what is in the photo and invents nothing. (1) **Remove printing dots** (local/halftone.py): a
+    halftone screen is a lattice of sharp peaks in the spectrum. On a full-resolution 1024 px crop of the middle
+    (each channel and luminance), peaks more than 15 dB above the spectrum's median at their radius, between 1/25
+    and 1/2 cycle per pixel, are kept only if they lie on one lattice (two fundamentals of equal frequency at a
+    right angle, within 4 degrees, and their sums and multiples), so a fence or a fabric is never taken for a
+    screen. Each block then has Gaussian notches (sigma 0.012 cycle/px, so the kernel fits the 48 px context
+    and a 100% view matches the export) cut at those frequencies in log space; notches finer than a preview's
+    pixels are skipped (already averaged). Tested: periods 3.2-6 px at 15-45 degrees found to 0.1 px and 2
+    degrees, the dot texture cut by more than 65%; no screen found on clean photos or on Hill's plate. The chip
+    reports the screen ("a screen every 5.0 px at 45 degrees"). (2) **Colourize**: stage version 2 shows the
+    model a faded or badly exposed photo with its L* stretched (0.5/99.5 percentiles to 6/94; Adobe's advice for
+    its colourizer is to fix brightness and contrast first; here it is automatic and only for the model's eyes),
+    old sidecars keep version 1 and render as before; warm/cool and green/magenta sliders shift the suggested
+    colour by up to 12 b*/a* units, tapered at black and white, the user's own coloured parts untouched. (3)
+    **Show what the automatic tools changed**: the photo rendered with and without printing dots, stains, dust and
+    scratches and colourize, the larger log difference per pixel as a heat map (clear = untouched, yellow to red
+    = more), with the share changed in the status line. Next: colour match as editable settings (and Composite on
+    it), JPEG repair inside the quantisation intervals, depth (Depth Anything V2 Small, Apache 2.0; Base and Large
+    are non-commercial), click-to-select (SAM 2.1 Tiny first, any larger size dropped in is used), relighting.
+91. **Depth from one photo (Cognitive Adjustments; Bill: "go ahead and build everything").** Depth Anything V2
+    Small (Yang et al., NeurIPS 2024; the only Apache-2.0 size, Base/Large/Giant are non-commercial), the
+    onnx-community export folded to 518 x 518 and converted to 8-bit weights (24 MB), run by our NumPy runner:
+    2.9-3.3 s per photo on the build machine, 0.29% from ONNX Runtime on a real photo. local/depth.py. The photo is
+    shown to it as displayed (standard tone curve, sRGB), squeezed to 518 x 518 as the model expects, ImageNet
+    normalisation; its relative inverse depth is stretched back and normalised by the 1/99 percentiles (near = 1,
+    far = 0). Measured once per photo and base settings (memo), from a <= 1024 px copy in the S frame, so masks
+    and blocks sample one map (a 100% view equals the export, tested). Uses: (1) **Depth haze** (-100..100):
+    Koschmieder's I = J t + A (1 - t), t = exp(-k far^2), the haze colour A the median of the brightest third of
+    the farthest 15% of the photo, scaled to its 97th percentile; adding pushes the distance back, taking away
+    inverts the same model with t >= 0.35 so distant noise is not blown up. Scene-linear, after colourize, in both
+    the raw and scan paths; stage version "depth": 1; not in the "what the automatic tools changed" map (it is a
+    choice, not an automatic repair). (2) **Masks > Depth**: a new shape type "depth" (the map as a bitmap in the
+    S frame plus From/To/Softness, 0 = farthest, 100 = nearest), snapped to the photo's edges like the others,
+    with + / - / x refine entries. (3) **Show depth map**: the map rendered through the mask path (so crop,
+    rotation and geometry match the screen) and coloured red/yellow near to blue far. Honest limits in the
+    tooltip: an order, not metres; glass, mirrors and water fool it (the espresso test photo's spoon reads as the
+    saucer). Tests: haze model adds/clears by distance and clearing inverts adding; on the NASA astronaut photo
+    the helmet in front is nearer than the wall by more than 0.4, haze changes the far corner 3x more than the
+    helmet, a near-only depth mask selects the helmet and not the wall; panel round trip.
+92. **Click to select with SAM 2.1, the size selectable (Bill: "i'll get both, and make it user selectable"; then
+    "you could just use the tiny model and i'll test them both later").** local/sam.py. SAM 2.1 (Meta FAIR 2024,
+    Apache 2.0 at every size), from the X-AnyLabeling ONNX exports Bill downloaded. The image encoder is folded
+    to 1024 x 1024 (onnxsim; onnxslim, pure Python, as a fallback) and stored with 16-bit weights: 8-bit moved
+    the features 3-6% and one outline to 0.82 IoU of the original, 16-bit is 0.1% and >= 0.998 IoU. The prompt
+    decoder is kept unfolded so any number of clicks works (the runner now does shape arithmetic and takes named
+    inputs; 0 in an input shape = any size); it adds SAM's own padding point, so no extra one is passed (an extra
+    one changed the scores). As Meta's SAM2ImagePredictor: the photo as displayed squeezed to 1024 x 1024,
+    ImageNet normalisation, clicks in that square, the best of the three outlines by the model's own score, the
+    256 x 256 logits stretched to the photo (up to 2048 px) through a sigmoid for a soft edge. The look at the
+    photo is kept per photo, size and base settings: Tiny 9-10 s here, then 0.15-0.3 s per click. **Masks >
+    Object** and **Colour a part** use it (click, click again to add, Alt-click to take away); a shape records
+    "model": "sam2.1-tiny"; the Spread slider hides for SAM-made colour parts (it has no meaning there). **Masks >
+    Click-to-select**: SAM 2.1 Tiny (fast) / SAM 2.1 Large (finest edges) / Classic (no model, instant); a size
+    that is not installed is listed greyed out with "not installed (Convert Models.bat)"; the choice is
+    remembered. Why not convert Large here: the device bridge refuses files over 400 MB and the Large zip is 805
+    MB, so **Convert Models.bat** (tools/convert_models.py) does it on Bill's PC: it finds model.onnx and the
+    sam2.1_hiera_{tiny,large} zips in models\, unpacks into cache\convert_models (removed afterwards; TEMP and
+    TMP point into cache\tmp, nothing on C:\), folds, converts, then runs each result on a made-up test picture
+    and, with ONNX Runtime installed (it adds onnx, onnxsim and onnxruntime to the app's own Python once), says
+    how far it is from the original; logs to logs\convert_models.log; finished models are skipped unless --force.
+    Large is not shipped (it is too big for GitHub). **push.bat** now lets converted models (models\NAME\*.npz,
+    which .gitignore lets in) through up to 95 MB (GitHub refuses 100 MB); before this, the colour and scratch
+    models (53 and 33 MB) would have stopped the next push. Tests: runner named inputs and shape checks; on the
+    astronaut photo one click outlines the face only (1.5-8% of the photo), a second click adds the suit, the mask
+    renders where clicked, Colour a part outlines the suit, Classic still works; Convert Models finds exactly the
+    three downloads among others; the panel lists Tiny, Large, Classic with uninstalled sizes greyed.
+93. **Colour match from another photo, solved as settings (Cognitive Adjustments).** local/colourmatch.py. Photoshop's
+    Color Transfer and Harmonization return a changed picture; here the answer is ordinary slider values. Nine
+    statistics of the photo as displayed (OKLab): median L, L spread (5th-95th percentile), the mid-tones' mean a
+    and b (the cast), colourfulness (75th percentile of each colour's distance from that cast, so a cast is not
+    counted as saturation; median chroma was tried first and moved too little with Saturation), and the shadows'
+    and highlights' a and b relative to the mid-tones. Nine settings: exposure, contrast (log), white balance as
+    red and blue multipliers (mode "multipliers", temperature/tint filled in for the sliders), saturation, and the
+    shadows and highlights grading wheels as 2-vectors. Solved on ~320 px renders of the real pipeline: a
+    finite-difference Jacobian (one render per setting), then damped Newton steps with Broyden updates, a small
+    pull toward no change (0.12 / limit per setting; 0.6 was too strong and under-matched), each step capped at
+    half a setting's limit, the best kept: 14-20 renders, 0.6-1.1 s on the astronaut photo. Known-answer tests
+    (the same photo developed with known settings as the reference): exposure -0.50 found as -0.499, multipliers
+    [0.9, 1, 1.15] as [0.90, 1, 1.14], saturation -30 as -31; a split tone (shadows 180/40, highlights 40/40)
+    found as 179/34 and 28/32; pixel colour error cut 7-100x. Panel: Match colours to another photo... (the
+    reference's own sidecar is used), Match amount 0-150% (applied as the difference to the same sliders, so
+    other changes stay), a chip with the change in words; Undo works as for any change.
+94. **JPEG repair inside the quantisation intervals (Cognitive Adjustments; JPEG files only).** local/jpegfix.py.
+    A JPEG keeps each 8 x 8 block's DCT coefficients only to within its table's step; decoders show the middle,
+    hence blocks and ringing. The smoothest picture the file allows is found: Huber total variation (eps 2
+    levels) lowered by gradient steps, every block projected back inside its intervals after each step (POCS;
+    a hair inside, 0.48 of a step, so the file's own rounding is kept). In the file's YCbCr: brightness with
+    the brightness table at full size, Cb and Cr at their stored size (sampling read from the file) with the
+    colour table, then brought back; tables and sampling from Pillow (natural order, checked); output 16-bit.
+    20 steps (40 smoothed fine texture at quality 60: PSNR 33.11 at 10 steps, 32.89 at 40). On the astronaut
+    photo: quality 15 PSNR 28.3 -> 29.0 dB, blockiness (edge step over inner step) 1.81 -> 1.32; quality 60
+    32.7 -> 33.1; the repaired brightness plane re-quantises to the file's coefficients (99.997-100%). The IJG
+    quality is estimated from the brightness table for the chip. In the pipeline the repaired pixels replace
+    the decoded ones (once per photo, kept with it) before anything else; stage version "jpeg": 1.
+95. **Relight (Cognitive Adjustments; Bill liked idea 7, relighting).** local/relight.py. Surfaces from the
+    depth map (decision 91): smoothed with a guided filter of itself (keeps steps), the scene's overall slope
+    removed (a Gaussian of 25% of the short side subtracted; at 12% a face's own curvature was lost, without it
+    the photo's floor-to-ceiling depth trend tilted every normal down so a light from above darkened
+    everything), scaled so the steepest 10% tilt ~45 degrees, and steps in depth (outlines) left facing the
+    camera - without that, the wall beside a head glowed. The light already on the photo: brightness ~ c0 + c .
+    n fitted with centred normals (nz ~ 1 almost everywhere made c0 and c_z collinear until centred), Huber
+    weights, trusted by fit quality (R^2/0.3, capped at 1). Gain = new Lambertian shading (ambient from
+    Softness) over the measured one, clipped to 1/3..3, median-normalised (overall brightness kept), raised to
+    Amount, smoothed; multiplied into scene-linear blocks before the depth haze. Controls: Relight (amount),
+    Light from (-180..180, 0 right, 90 top), Light height, Light softness; the chip names both the new light and
+    the measured one. Tests: on a synthetic sphere the measured light is found within 20 degrees and moving it
+    brightens the side it moves to; on the astronaut, light from the left brightens the face's left half and
+    from the right its right half, texture correlation > 0.97 (only light changes), a 100% view equals the
+    whole render.
+96. **Composite (Bill: "Let's add a composite feature to the studio, if only to ensure we are fully featured").**
+    pipeline/composite.py, app/subject_picker.py. Add a subject from another photo...: a dialog shows that photo
+    and click-to-select outlines the subject (Masks' Click-to-select model; Alt- or right-click removes); the
+    outline is kept as a bitmap in the source's sensor frame (so it follows that photo's crop and rotation).
+    Each layer: x, y (middle, fractions of this photo), size (height share), turn, mirror, edge softness, match
+    grain, and a colour match solved between the two whole photos and applied to the SOURCE's settings, so the
+    subject is re-developed under this photo's light as editable settings. Drawn last on the finished picture in
+    every view (whole, zoomed, export), at that view's resolution: the subject is rendered at a quantised scale
+    (renders and outlines cached), its alpha made solid inside (smoothstep 0.25-0.75; the soft SAM logits made
+    suits translucent), warped by one affine; grain adds sqrt(dest^2 - subject^2) of measured noise (MAD of a
+    fine Laplacian of log brightness over the flattest half). Never seen by masks or analysis views. Tests:
+    placed where asked (centre within 6-8%, height within 8%), the rest untouched, a 100% view matches, mirror
+    and turn change it, disabled = no change, masks unaffected, grain raised on a noisy scene, the matched
+    source's statistics within 30% of the scene's residual.
+97. **Auto white balance: Night (SGP-LRD), from RL-AWB (Bill found the code: Apache-2.0).** color/nightwb.py, a
+    vectorised port of the authors' utils/Algorithm.py (copyright header and the licence kept; changes listed in
+    the module): salient grey pixels (local contrast of log channels along (1,1,1), 7 x 7 mean), the two night
+    filters (channel variance of log counts > 0.025; no channel further than 0.35 x the smallest mean log from
+    its mean), brightness confidence (exponent from the skew), Minkowski mean of 3 x 3 local averages over local
+    reflectance; on 14-bit counts of a ~750 px nearest-neighbour copy, as the reference. Checked against the
+    reference code on the same input: 0.0001 degrees apart for three settings. The paper's learned agent (SAC,
+    weights on Dropbox, tunes the grey share N 1-2% and the Minkowski order p 1-40) is replaced by a
+    deterministic pick: all 40 settings of a 5 x 8 grid, the medoid answer used, its median angle to the others
+    reported as the spread. Honest results on synthetic casts (median of 3-4 lights, our noise model, not real
+    night raws): coffee (nothing grey) 2.0 degrees against grey edge 7.4 and grayness 6.1; at 1/5 the light 3.6
+    against 56 and 4.6; astronaut (grey walls) 5.6 against 1.3 and 0.1 - so it is a third method, not a
+    replacement. Auto WB now computes all three; the confidence is the widest disagreement between any two; the
+    chip lists all three temperatures; the picker offers Night (SGP-LRD) with what it is good and weak at. Real
+    night raws (Bill's) decide its worth; the paper's datasets (NCC, LEVI) were not reachable from here.
+98. **Clean for scans and JPEGs, with raw shooting encouraged (Bill: "make sure Clean states clearly that it
+    performs better on Raw files and that we encourage raw shooting").** local/scanclean.py. Clean was raw-only;
+    the Multinex trial (decision 97's session) showed the gap. On a scan there is no sensor model, so the noise
+    is measured in the picture: stored values into an orthonormal brightness / colour basis, each plane split
+    into starlet bands; per band and per brightness bin (bins follow the picture's own brightness spread, so a
+    dark photo gets its bins in the dark), the quietest tenth of block deviations, corrected by the same
+    statistic for pure noise (texture can only add to a block), clipped blocks left out. Coarse bands are mostly
+    picture even in quiet blocks (coffee measured 2.4/3.3/3.8 where noise implied 0.5/0.2/0.1), so they are
+    capped by the finest band times white noise's band ratio times 2.5 (JPEG q75 noise: 2.2x at band 1); JPEG
+    colour (half size, low-passed: noise flat over bands 0-2, measured) is recognised by its finest band being
+    under 0.35 of brightness's and capped at the finest band's level instead. Removal: the raw starlet
+    denoiser's two-pass empirical Wiener rule with that noise per pixel, brightness and colour strengths, keep
+    grain, the 4.5-sigma safeguard. Results (grain-free references, known noise): +4 to +10 dB without JPEG, +0.5
+    to +6.5 dB through JPEG q90; a clean picture is barely touched (> 38 dB). On the Multinex trial photos at
+    equal brightness: Studio exposure + JPEG repair 24.6 dB / SSIM 0.54, + Clean 26.0 dB / 0.735, Multinex
+    LOL-v2-real 23.9 dB / 0.738 - Clean ties its structure score and keeps the texture and colour it painted
+    over. Some speckle survives in extreme pushes (a JPEG's own artifacts). In the pipeline: after JPEG repair,
+    before everything else, once per setting (the noise measurement kept per photo); in strips with 160 px of
+    context on every core (identical to one piece, tested): 24 MP in 18 s on 2 cores here. Panel: Clean now
+    works on scans (row banding and the method picker stay raw-only), with an amber note: Clean does its best
+    work on raw files, why, and "For the cleanest results, shoot raw"; the group's subtitle says the raw data is
+    the best place to remove noise and to shoot raw; the noise chip shows the level measured in the picture; the
+    old "Clean works on raws only" help line is gone; README updated the same way.

@@ -621,7 +621,7 @@ class LibraryPage(QWidget):
         return [e["path"] for e in self.model.all]
 
     def choose_folder(self):
-        d = QFileDialog.getExistingDirectory(self, "Choose a folder of raw files", self.settings.get("folder", ""))
+        d = QFileDialog.getExistingDirectory(self, "Choose a folder of photos", self.settings.get("folder", ""))
         if d:
             self.load_folder(d)
 
