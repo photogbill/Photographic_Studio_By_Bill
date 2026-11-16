@@ -7,6 +7,7 @@ Super-Res Stack, Lenses, Cameras, Export, Help. The interface talks to the engin
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import sys
@@ -21,11 +22,12 @@ from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QImage, QKe
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
                                QFileDialog, QFrame, QInputDialog,
                                QGridLayout, QHBoxLayout, QLabel, QListView, QListWidget, QListWidgetItem, QMainWindow,
-                               QMessageBox, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox,
-                               QStackedWidget, QVBoxLayout, QWidget)
+                               QMenu, QMessageBox, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox,
+                               QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
 from .. import __version__, log as slog, paths
 from . import theme as T
+from . import zoom as Z
 from .widgets import (CurveEditor, DetailMeter, FilmicPlot, GradeWheel, GroupDialog, HueRing, SwatchRow, oklch_colour,
                       srgb8_hue)
 
@@ -124,6 +126,115 @@ class ValueSlider(QWidget):
         self.set_value(self.default)
 
 
+class ElideLabel(QLabel):
+    """A label that shortens its text with "..." when there is no room (the photo's name in Develop's top bar: a
+    long file name used to push the window wider than a 1366-pixel laptop screen). The full text is the tooltip."""
+
+    def __init__(self, text="", name=None, min_width=60):
+        super().__init__()
+        if name:
+            self.setObjectName(name)
+        self._full = ""
+        self.setMinimumWidth(min_width)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)   # full name, or less
+        self.setText(text)
+
+    def setText(self, text):                        # noqa: N802 (Qt name)
+        self._full = text or ""
+        self.setToolTip(self._full)
+        self._elide()
+
+    def text(self):
+        return self._full
+
+    def sizeHint(self):
+        return QSize(self.fontMetrics().horizontalAdvance(self._full) + 8, super().sizeHint().height())
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._elide()
+
+    def _elide(self):
+        QLabel.setText(self, self.fontMetrics().elidedText(self._full, Qt.TextElideMode.ElideMiddle,
+                                                           max(10, self.width())))
+
+
+class FlexBar(QFrame):
+    """A top bar whose less-used controls fold into a "..." menu when the window is narrow, so the bar never sets
+    the window's minimum width. On Linux a maximized or full-screen window whose minimum width grows past the
+    screen is dropped back to a normal window: in 0.1.3 every opened photo did that (its file name widened the
+    bar, already 1,521 pixels with the panel and sidebar)."""
+
+    TITLE_ROOM = 170                                # the title's share counted when deciding to fold
+
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("topbar")
+        self.lay = QHBoxLayout(self)
+        self.more = QToolButton()
+        self.more.setText("⋯")
+        self.more.setToolTip("More: the controls there is no room for")
+        self.more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.more_menu = QMenu(self.more)
+        self.more_menu.aboutToShow.connect(self._fill_more)
+        self.more.setMenu(self.more_menu)
+        self.more.hide()
+        self.title = None
+        self.fixed: list = []                       # always shown
+        self.folds: list = []                       # (widget, fill(menu)) folded first
+        self._busy = False
+        self.folded = False
+
+    def setup(self, title, folds, fixed):
+        self.title = title
+        self.folds, self.fixed = list(folds), list(fixed)
+        self.lay.addWidget(title)
+        self.lay.addStretch(1)
+        for w, _ in self.folds:
+            self.lay.addWidget(w)
+        self.lay.addWidget(self.more)
+        for w in self.fixed:
+            self.lay.addWidget(w)
+        self._set_minimum()
+
+    def _widths(self):
+        m = self.lay.contentsMargins()
+        sp = self.lay.spacing()
+        fixed = m.left() + m.right() + sum(w.sizeHint().width() + sp for w in self.fixed)
+        folds = sum(w.sizeHint().width() + sp for w, _ in self.folds)
+        return fixed, folds, self.more.sizeHint().width() + sp
+
+    def _set_minimum(self):
+        fixed, _, more = self._widths()
+        self.setMinimumWidth(fixed + more + self.title.minimumWidth() + self.lay.spacing())
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._fit()
+
+    def _fit(self):
+        if self._busy or self.title is None:
+            return
+        self._busy = True
+        try:
+            fixed, folds, more = self._widths()
+            title = min(self.title.sizeHint().width(), self.TITLE_ROOM)
+            fold = self.width() < fixed + folds + title
+            if fold != self.folded or self.more.isVisible() != fold:
+                self.folded = fold
+                for w, _ in self.folds:
+                    w.setVisible(not fold)
+                self.more.setVisible(fold)
+                log.debug("top bar %s at %d px", "folded" if fold else "unfolded", self.width())
+        finally:
+            self._busy = False
+
+    def _fill_more(self):
+        self.more_menu.clear()
+        for _, fill in self.folds:
+            fill(self.more_menu)
+
+
 class Group(QWidget):
     """A collapsible panel group (Clean, Light, Colour, ...). Click the header to fold it away."""
 
@@ -197,8 +308,12 @@ class Histogram(QWidget):
 
 
 class Viewer(QWidget):
-    """The big live image: fit to window, before/after wipe, a 100% loupe where you click, the crop frame, and the
-    mask tools (brush, gradient, radial, click-an-object, colour pick) with a red overlay of the selected mask."""
+    """The big live image: fit to window or any zoom up to 400% (wheel around the pointer, click for 100%, drag to
+    move, a navigator in the corner), before/after wipe, the crop frame, and the mask tools (brush, gradient,
+    radial, click-an-object, colour pick) with a red overlay of the selected mask.
+
+    Zoomed, the whole-photo preview (``after``) is drawn enlarged at once and a sharp render of the part on screen
+    (``tile``, at ``tile_uv`` on the photo) is laid over it when it arrives, so the photo always follows the mouse."""
     clicked = Signal(float, float)
     crop_changed = Signal(object)
     stroke_done = Signal(object)                 # brush: [(u, v), ...]
@@ -208,8 +323,7 @@ class Viewer(QWidget):
     spot_moved = Signal(int, str, float, float)  # retouch: spot index, "dst" | "src", moved by (du, dv)
     spot_picked = Signal(int)                    # retouch: spot selected (-1 = none)
     spot_deleted = Signal(int)                   # retouch: Alt-click on a spot
-    pan_done = Signal(float, float)              # 100% view dragged by (du, dv) of the photo
-    zoom_at = Signal(float, float, bool)         # mouse wheel: (u, v, zoom in?)
+    view_changed = Signal()                      # zoom or position changed (sent once the movement settles)
     eyes_done = Signal(object)                   # portrait: the two eye clicks [(u, v), (u, v)]
     sculpt_done = Signal(object)                 # portrait: a sculpting stroke [(u, v), ...]
     shape_drawn = Signal(float, float, float, float)   # portrait: a new shape from one end to the other
@@ -221,7 +335,7 @@ class Viewer(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.after = self.before = self.loupe = self.loupe_before = None
+        self.after = self.before = None
         self.split = None
         self._busy = False
         self.busy_since = 0.0                      # perf_counter() when the current work started
@@ -243,11 +357,22 @@ class Viewer(QWidget):
         self.brush_scale = 1.0                     # S-frame long edge / displayed long edge (crops)
         self._pts = []
         self._mouse = None
-        self.win = None                            # 100% view: (u0, v0, u1, v1) of the photo shown; None = fit
+        self._cursor_before = None                 # the tool's cursor while a drag moves the photo
+        self.zs = Z.ZoomState()                    # the zoom and where the photo sits (zoom.py)
+        self.tile = None                           # sharp render of part of the photo (QImage), when zoomed
+        self.tile_uv = None                        # where it sits on the photo: (u0, v0, u1, v1)
+        self.tile_scale = 0.0                      # the scale it was rendered at
+        self._press = None                         # (position, centre u, v) of a left press that may become a click
+        self._space = False                        # Space held: dragging moves the photo, whatever the tool
+        self._nav = None                           # the navigator's box (QRectF) while zoomed
+        self._nav_drag = False
+        self.zoom_flash = 0.0                      # when the zoom last changed (its hint shows for a moment)
+        self._settle = QTimer(self, singleShot=True, interval=140, timeout=self._settled)
+        self._hint_timer = QTimer(self, singleShot=True, interval=3200, timeout=self.update)   # hides the hint
         self.spots = []                            # retouch spots to draw: {"pts", "src", "r", "kind", "sel", "auto"}
         self.show_spots = False
         self._sdrag = None                         # (index, "dst" | "src", start uv)
-        self._pan = None                           # (start pos, current pos)
+        self._pan = None                           # (start position, start centre) while the photo is dragged
         self.faces = []                            # portrait: [{"lines": [[(u, v), ...], ...], "how"}]
         self.show_faces = False
         self.shapes = []                           # sculpt shapes: [{"outline": [(u, v), ...], "sel", "tool"}]
@@ -328,12 +453,130 @@ class Viewer(QWidget):
         p.restore()
 
     def _fit(self, img: QImage) -> QRectF:
-        r = QRectF(self.rect()).adjusted(18, 18, -18, -18)
+        r = QRectF(self.rect()).adjusted(Z.MARGIN, Z.MARGIN, -Z.MARGIN, -Z.MARGIN)
         if img is None or img.width() == 0:
             return r
         k = min(r.width() / img.width(), r.height() / img.height())
         w, h = img.width() * k, img.height() * k
         return QRectF(r.center().x() - w / 2, r.center().y() - h / 2, w, h)
+
+    # -------------------------------------------------------------------------- zoom and position
+    @property
+    def zoomed(self) -> bool:
+        return self.zs.z is not None and self.zs.ready
+
+    def photo_rect(self) -> QRectF:
+        """The whole photo on screen (logical pixels); zoomed, it is bigger than the view and mostly outside it."""
+        if self.zoomed:
+            return QRectF(*self.zs.photo_rect())
+        return self._fit(self.after)
+
+    def _sync_view(self):
+        self.zs.set_view(self.width(), self.height(), self.devicePixelRatioF())
+
+    def _view_moved(self, entered: bool = False):
+        """Repaint at once; tell the page (for a sharp render) once the movement settles."""
+        if entered:
+            self.zoom_flash = time.perf_counter()
+            self._hint_timer.start()
+        if not self.tool and self._pan is None:
+            self.setCursor(Qt.CursorShape.OpenHandCursor if self.zoomed else Qt.CursorShape.ArrowCursor)
+        self.update()
+        self._settle.start()
+
+    def _settled(self):
+        self.view_changed.emit()
+
+    def set_zoom(self, z, anchor=None):
+        """Zoom to ``z`` (device pixels per photo pixel, 1.0 = 100%; None = fit), keeping the photo point under
+        ``anchor`` (a view position, QPointF) in place; without one, the middle of the view."""
+        if self.after is None or self.crop_mode:
+            return
+        self._sync_view()
+        was = self.zoomed
+        self.zs.zoom_to(z, None if anchor is None else (anchor.x(), anchor.y()))
+        self._view_moved(entered=not was and self.zoomed)
+
+    def zoom_step(self, direction: int, anchor=None):
+        if self.after is None or self.crop_mode:
+            return
+        self._sync_view()
+        was = self.zoomed
+        self.zs.step(direction, None if anchor is None else (anchor.x(), anchor.y()))
+        self._view_moved(entered=not was and self.zoomed)
+
+    def toggle_zoom(self, anchor=None):
+        """A click or Z: the whole photo <-> 100% at that point (200% for photos smaller than the view)."""
+        if self.zoomed:
+            self.set_zoom(None)
+        else:
+            self._sync_view()
+            fz = self.zs.fit_z()
+            self.set_zoom(1.0 if fz < 0.95 else min(self.zs.max_z(), fz * 2.0), anchor)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._sync_view()
+        if self.zoomed:
+            self._settle.start()
+
+    def _draw_part(self, p, target: QRectF, img: QImage):
+        """Draw ``img`` stretched over ``target`` (which may be far bigger than the view): only the visible part."""
+        vis = target.intersected(QRectF(self.rect()))
+        if vis.isEmpty() or img is None or img.width() == 0 or target.width() <= 0 or target.height() <= 0:
+            return
+        sx, sy = img.width() / target.width(), img.height() / target.height()
+        src = QRectF((vis.left() - target.left()) * sx, (vis.top() - target.top()) * sy, vis.width() * sx,
+                     vis.height() * sy)
+        p.drawImage(vis, img, src)
+
+    NAV_SIZE = 168                                  # the navigator's long edge, logical pixels
+
+    def _nav_box(self) -> QRectF | None:
+        if self.after is None or not self.zoomed:
+            return None
+        w0, h0 = self.after.width(), self.after.height()
+        k = self.NAV_SIZE / float(max(w0, h0, 1))
+        nw, nh = w0 * k, h0 * k
+        return QRectF(self.width() - nw - 18, self.height() - nh - 18, nw, nh)
+
+    def _paint_navigator(self, p):
+        """Where you are: the whole photo small in the corner, the part on screen outlined (click or drag in it to
+        go somewhere else)."""
+        box = self._nav_box()
+        self._nav = box
+        if box is None:
+            return
+        p.save()
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(QPen(QColor(255, 255, 255, 40), 1))
+        p.setBrush(QColor(0, 0, 0, 190))
+        p.drawRoundedRect(box.adjusted(-5, -5, 5, 5), 7, 7)
+        p.drawImage(box, self.after)
+        x, y, w, h = self.zs.visible_window()
+        ow, oh = max(self.zs.ow, 1), max(self.zs.oh, 1)
+        vr = QRectF(box.left() + x / ow * box.width(), box.top() + y / oh * box.height(), w / ow * box.width(),
+                    h / oh * box.height())
+        shade = QPainterPath()
+        shade.addRect(box)
+        hole = QPainterPath()
+        hole.addRect(vr)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(0, 0, 0, 120))
+        p.drawPath(shade.subtracted(hole))
+        p.setPen(QPen(QColor(T.CYAN), 1.6))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRect(vr)
+        p.restore()
+
+    def _nav_jump(self, pos):
+        box = self._nav or self._nav_box()
+        if box is None:
+            return
+        u = min(max((pos.x() - box.left()) / box.width(), 0.0), 1.0)
+        v = min(max((pos.y() - box.top()) / box.height(), 0.0), 1.0)
+        self.zs.centre_on(u, v)
+        self.update()
 
     def paintEvent(self, e):
         p = QPainter(self)
@@ -349,12 +592,21 @@ class Viewer(QWidget):
             if self.busy:                                    # opening a photo: the slowest render of all
                 self._paint_busy(p, self._fit(None))
             return
-        r = self._fit(self.after)
-        if self._pan is not None:                            # dragging the 100% view: show it moving
-            d = self._pan[1] - self._pan[0]
-            r = r.translated(d.x(), d.y())
-        p.drawImage(r, self.after)
-        if self.split is not None and self.before is not None and self.win is None:
+        r = self.photo_rect()
+        if self.zoomed:
+            # the whole-photo preview, enlarged: the photo follows the mouse at once; the sharp tile goes on top
+            self._draw_part(p, r, self.after)
+            if self.tile is not None and self.tile_uv is not None:
+                u0, v0, u1, v1 = self.tile_uv
+                tr = QRectF(r.left() + u0 * r.width(), r.top() + v0 * r.height(), (u1 - u0) * r.width(),
+                            (v1 - v0) * r.height())
+                if self.zs.z >= 2.0:                         # 200% and up: photo pixels as crisp squares
+                    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
+                self._draw_part(p, tr, self.tile)
+                p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        else:
+            p.drawImage(r, self.after)
+        if self.split is not None and self.before is not None and not self.zoomed:
             x = r.left() + r.width() * self.split
             p.save()
             p.setClipRect(QRectF(r.left(), r.top(), x - r.left(), r.height()))
@@ -366,23 +618,8 @@ class Viewer(QWidget):
             p.drawEllipse(QPointF(x, r.center().y()), 7, 7)
             self._tag(p, QPointF(r.left() + 12, r.top() + 12), "Before (as shot)")
             self._tag(p, QPointF(r.right() - 12, r.top() + 12), "After", right=True)
-        if self.loupe is not None:
-            lw = min(self.loupe.width(), int(self.width() * 0.45))
-            lh = int(lw * self.loupe.height() / max(self.loupe.width(), 1))
-            box = QRectF(self.width() - lw - 26, self.height() - lh - 26, lw, lh)
-            p.setPen(QPen(QColor(T.CYAN), 2))
-            p.setBrush(QColor("#000"))
-            p.drawRect(box.adjusted(-2, -2, 2, 2))
-            src = QRectF(0, 0, lw, lh)                      # true 100%: no scaling of the loupe pixels
-            p.drawImage(box, self.loupe, src)
-            self._tag(p, QPointF(box.left() + 8, box.top() + 8), "100%  (click elsewhere to move, Esc to close)")
         if self.overlay is not None and (self.tool is not None or self.show_overlay):
-            if self.win is None:
-                p.drawImage(r, self.overlay)
-            else:
-                u0, v0, u1, v1 = self.win
-                ow, oh = self.overlay.width(), self.overlay.height()
-                p.drawImage(r, self.overlay, QRectF(u0 * ow, v0 * oh, (u1 - u0) * ow, (v1 - v0) * oh))
+            self._draw_part(p, r, self.overlay)
         if self.spots and (self.tool == "spot" or self.show_spots):
             self._paint_spots(p, r)
         if self.faces and (self.show_faces or self.tool == "eyes"):
@@ -391,12 +628,16 @@ class Viewer(QWidget):
             self._paint_shapes(p, r)
         if self.tool:
             self._paint_tool(p, r)
-        if self.win is not None:
-            self._tag(p, QPointF(r.right() - 12, r.top() + 12), "100%  (drag to move, wheel or Z for the whole "
-                      "photo)", right=True)
+        if self.zoomed:
+            self._paint_navigator(p)
+            hint = ("   drag to move  ·  wheel to zoom  ·  click, Z or Esc for the whole photo"
+                    if time.perf_counter() - self.zoom_flash < 3.0 else "")
+            self._tag(p, QPointF(self.width() - 14, 12), Z.label(self.zs.z) + hint, right=True)
+        else:
+            self._nav = None
         if self.crop_mode:
             self._paint_crop(p, r)
-        elif self.comp_outside and self.win is None:
+        elif self.comp_outside and not self.zoomed:
             self._paint_comp(p, r)
         if self.busy:
             self._paint_busy(p, r)
@@ -405,26 +646,16 @@ class Viewer(QWidget):
 
     # -------------------------------------------------------------------------- mask tools
     def _uv(self, pos):
-        """Widget position -> position on the whole photo (0..1), also in the 100% view."""
-        r = self._fit(self.after)
-        fu, fv = (pos.x() - r.left()) / r.width(), (pos.y() - r.top()) / r.height()
-        if self.win is None:
-            return (fu, fv)
-        u0, v0, u1, v1 = self.win
-        return (u0 + fu * (u1 - u0), v0 + fv * (v1 - v0))
+        """Widget position -> position on the whole photo (0..1), at any zoom."""
+        r = self.photo_rect()
+        return ((pos.x() - r.left()) / max(r.width(), 1e-6), (pos.y() - r.top()) / max(r.height(), 1e-6))
 
     def _px(self, uv, r):
-        if self.win is not None:
-            u0, v0, u1, v1 = self.win
-            uv = ((uv[0] - u0) / (u1 - u0), (uv[1] - v0) / (v1 - v0))
         return QPointF(r.left() + uv[0] * r.width(), r.top() + uv[1] * r.height())
 
     def _long_px(self, r):
-        """The whole photo's long edge in widget pixels (bigger than the widget in the 100% view)."""
-        if self.win is None:
-            return max(r.width(), r.height())
-        u0, v0, u1, v1 = self.win
-        return max(r.width() / max(u1 - u0, 1e-6), r.height() / max(v1 - v0, 1e-6))
+        """The whole photo's long edge in widget pixels (bigger than the widget when zoomed)."""
+        return max(r.width(), r.height())
 
     def _paint_spots(self, p, r):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -464,7 +695,7 @@ class Viewer(QWidget):
         for the selected spot, so a source never hides another spot."""
         if not self.spots:
             return None
-        r = self._fit(self.after)
+        r = self.photo_rect()
         L = self._long_px(r)
         here = self._px(uv, r)
         best = None
@@ -512,7 +743,7 @@ class Viewer(QWidget):
             p.drawPath(self._shape_path(sh["outline"], r))
 
     def _shape_at(self, uv):
-        r = self._fit(self.after)
+        r = self.photo_rect()
         here = self._px(uv, r)
         for k in range(len(self.shapes) - 1, -1, -1):
             if self._shape_path(self.shapes[k]["outline"], r).contains(here):
@@ -813,7 +1044,7 @@ class Viewer(QWidget):
                       colour=T.CYAN)
 
     def _crop_press(self, pos):
-        r = self._fit(self.after)
+        r = self.photo_rect()
         c = self._crop_rect(r)
         corners = {"tl": c.topLeft(), "tr": c.topRight(), "bl": c.bottomLeft(), "br": c.bottomRight()}
         for k, pt in corners.items():
@@ -825,7 +1056,7 @@ class Viewer(QWidget):
 
     def _crop_move(self, pos):
         kind, start, (x0, y0, x1, y1) = self._cdrag
-        r = self._fit(self.after)
+        r = self.photo_rect()
         dx, dy = (pos.x() - start.x()) / r.width(), (pos.y() - start.y()) / r.height()
         if kind == "move":
             w, h = x1 - x0, y1 - y0
@@ -866,9 +1097,20 @@ class Viewer(QWidget):
     def mousePressEvent(self, e):
         if self.after is None:
             return
-        pan_button = e.button() in (Qt.MouseButton.MiddleButton, Qt.MouseButton.RightButton)
-        if self.win is not None and (pan_button or (not self.tool and not self.picking)):
-            self._pan = (e.position(), e.position())          # move around the 100% view
+        pos, btn = e.position(), e.button()
+        left = btn == Qt.MouseButton.LeftButton
+        if self.zoomed and left and self._nav is not None and self._nav.contains(pos):
+            self._nav_drag = True                          # the navigator: go where you click, follow a drag
+            self._nav_jump(pos)
+            return
+        pan_button = btn in (Qt.MouseButton.MiddleButton, Qt.MouseButton.RightButton)
+        free = not self.tool and not self.picking and not self.crop_mode
+        if self.zoomed and (pan_button or (left and (self._space or free))):
+            # move the photo: it follows the mouse at once (no waiting for a render)
+            self._pan = (pos, (self.zs.cu, self.zs.cv))
+            self._press = pos if (left and free and not self._space) else None   # no drag = a click
+            self._cursor_before = self.cursor()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
             return
         if pan_button:
             return
@@ -876,51 +1118,122 @@ class Viewer(QWidget):
             self._tool_press(e)
             return
         if self.crop_mode:
-            self._crop_press(e.position())
+            self._crop_press(pos)
             return
-        r = self._fit(self.after)
-        if self.split is not None and abs(e.position().x() - (r.left() + r.width() * self.split)) < 12:
+        r = self.photo_rect()
+        if self.split is not None and abs(pos.x() - (r.left() + r.width() * self.split)) < 12:
             self._drag = True
             return
-        if r.contains(e.position()):
-            self.clicked.emit(*self._uv(e.position()))
+        if r.contains(pos):
+            if self.picking:
+                self.clicked.emit(*self._uv(pos))          # an eyedropper is waiting: the click picks
+            else:
+                self._press = pos                          # released without a drag: zoom to 100% here
 
-    picking = False                                # an eyedropper is waiting: clicks pick, they do not pan
+    picking = False                                # an eyedropper is waiting: clicks pick, they do not zoom or pan
+
+    def mouseDoubleClickEvent(self, e):
+        # the first click of a double-click already zoomed in; a second would zoom straight back out
+        if self.tool or self.crop_mode or self.picking:
+            super().mouseDoubleClickEvent(e)
 
     def wheelEvent(self, e):
         if self.after is None or self.crop_mode:
             return
-        uv = self._uv(e.position())
-        self.zoom_at.emit(min(max(uv[0], 0.0), 1.0), min(max(uv[1], 0.0), 1.0), e.angleDelta().y() > 0)
+        d = e.angleDelta().y() or e.angleDelta().x()
+        if not d:
+            return
+        self._sync_view()
+        was = self.zoomed
+        self.zs.wheel(d, (e.position().x(), e.position().y()))   # around the pointer, any amount (touchpads too)
+        self._view_moved(entered=not was and self.zoomed)
+
+    def event(self, e):
+        # touchpad pinch (macOS, Linux Wayland): zoom around the fingers
+        if e.type() == e.Type.NativeGesture and self.after is not None and not self.crop_mode:
+            try:
+                if e.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
+                    self._sync_view()
+                    was = self.zoomed
+                    z = self.zs.current() * (1.0 + float(e.value()))
+                    self.zs.zoom_to(z, (e.position().x(), e.position().y()))
+                    self._view_moved(entered=not was and self.zoomed)
+                    return True
+            except (AttributeError, TypeError):
+                pass
+        return super().event(e)
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key.Key_Space and not e.isAutoRepeat():
+            self._space = True                             # Space + drag moves the photo, even with a tool
+            if self.zoomed and self._pan is None:
+                self._cursor_before = self.cursor()
+                self.setCursor(Qt.CursorShape.OpenHandCursor)
+            return
+        super().keyPressEvent(e)
+
+    def keyReleaseEvent(self, e):
+        if e.key() == Qt.Key.Key_Space and not e.isAutoRepeat():
+            self._space = False
+            if self._pan is None and getattr(self, "_cursor_before", None) is not None:
+                self.setCursor(self._cursor_before)
+                self._cursor_before = None
+            return
+        super().keyReleaseEvent(e)
 
     def mouseMoveEvent(self, e):
+        pos = e.position()
+        if self.after is not None and not self.tool:
+            self._mouse = self._uv(pos)                    # where Z zooms to
+        if self._nav_drag:
+            self._nav_jump(pos)
+            return
         if self._pan is not None:
-            self._pan = (self._pan[0], e.position())
+            start, (cu0, cv0) = self._pan
+            self.zs.cu, self.zs.cv = cu0, cv0
+            self.zs.pan_by(pos.x() - start.x(), pos.y() - start.y())
+            if self._press is not None and abs(pos.x() - self._press.x()) + abs(pos.y() - self._press.y()) > 4:
+                self._press = None                         # a drag, not a click
             self.update()
             return
+        if self._press is not None and abs(pos.x() - self._press.x()) + abs(pos.y() - self._press.y()) > 4:
+            self._press = None
         if self.tool and self.after is not None:
             self._tool_move(e)
             return
         if self.crop_mode and self._cdrag is not None and self.after is not None:
-            self._crop_move(e.position())
+            self._crop_move(pos)
             return
         if self._drag and self.after is not None:
-            r = self._fit(self.after)
-            self.split = min(max((e.position().x() - r.left()) / r.width(), 0.0), 1.0)
+            r = self.photo_rect()
+            self.split = min(max((pos.x() - r.left()) / r.width(), 0.0), 1.0)
             self.update()
 
     def mouseReleaseEvent(self, e):
-        if self._pan is not None:
-            start, end = self._pan
-            self._pan = None
-            r = self._fit(self.after)
-            if self.win is not None and (abs(end.x() - start.x()) > 2 or abs(end.y() - start.y()) > 2):
-                u0, v0, u1, v1 = self.win
-                du = -(end.x() - start.x()) / r.width() * (u1 - u0)
-                dv = -(end.y() - start.y()) / r.height() * (v1 - v0)
-                self.pan_done.emit(du, dv)
-            self.update()
+        pos = e.position() if e is not None else QPointF()
+        left = e is not None and e.button() == Qt.MouseButton.LeftButton
+        if self._nav_drag:
+            self._nav_drag = False
+            self._view_moved()
             return
+        if self._pan is not None:
+            click = self._press is not None and left
+            self._pan, self._press = None, None
+            before = getattr(self, "_cursor_before", None)
+            if before is not None and (self.tool or self._space):
+                self.setCursor(before)
+            self._cursor_before = None
+            if click:
+                self.toggle_zoom(pos)                      # zoomed and clicked without a drag: the whole photo
+            else:
+                self._view_moved()
+            return
+        if self._press is not None and left:
+            self._press = None
+            if not self.tool and not self.crop_mode and not self.picking:
+                self.toggle_zoom(pos)
+                return
+        self._press = None
         if self.tool and self.after is not None:
             self._tool_release(e)
             return
@@ -953,23 +1266,23 @@ class DevelopPage(QWidget):
         self._rsel = -1
         self.token = 0
         self.judge_bw = False                               # view only: "Judge in black and white"
-        self._render_live = False              # a preview render is running (only one at a time)
+        self._render_live = False              # a render is running (only one at a time)
         self._render_again = False             # the controls changed while it ran: render once more when it ends
         self._render_img = None                # the photo that render belongs to
+        self._dirty_base = False               # the whole-photo preview needs rendering for the current settings
+        self._dirty_tile = False               # the zoomed view's sharp tile does
         self.before_img = None
-        self.loupe_pt = None
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
         centre = QVBoxLayout()
         centre.setContentsMargins(0, 0, 0, 0)
         centre.setSpacing(0)
-        bar = QFrame()
-        bar.setObjectName("topbar")
-        bl = QHBoxLayout(bar)
-        bl.setContentsMargins(14, 8, 14, 8)
-        self.title = label("Develop", "h2")
-        self.badges = QHBoxLayout()
+        bar = FlexBar()
+        bl = bar.lay
+        bl.setContentsMargins(12, 8, 12, 8)
+        bl.setSpacing(5)                            # fits a 1366-pixel laptop screen with the panel open
+        self.title = ElideLabel("Develop", "h2", min_width=40)
         self.ba = QPushButton("Before / After")
         self.ba.setCheckable(True)
         self.ba.setToolTip("Wipe between the photo as shot and your edit (B)")
@@ -990,26 +1303,55 @@ class DevelopPage(QWidget):
         self.ver.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         self.ver.addItem("Master", 0)
         self.ver.activated.connect(self._version_picked)
-        self.copy_b = QPushButton("Copy settings")
+        self.copy_b = QPushButton("Copy")
         self.copy_b.setToolTip("Copy this photo's settings - you choose which groups (Ctrl+Shift+C)")
         self.copy_b.clicked.connect(self.copy_settings)
         self.paste_b = QPushButton("Paste")
         self.paste_b.setToolTip("Paste the copied settings onto this photo (Ctrl+Shift+V). To paste onto many "
                                 "photos at once, select them in the Library and press Paste settings.")
         self.paste_b.clicked.connect(self.paste_settings)
-        self.zoom_b = QPushButton("100%")
-        self.zoom_b.setCheckable(True)
-        self.zoom_b.setToolTip("Look at the photo at 100% (Z or the mouse wheel). Drag to move around; the masks "
-                               "and retouch tools work here too.")
-        self.zoom_b.toggled.connect(self.toggle_zoom)
-        bl.addWidget(self.title)
-        bl.addLayout(self.badges)
-        bl.addStretch(1)
-        for w in (self.ver, self.copy_b, self.paste_b, self.undo_b, self.redo_b, self.zoom_b, self.ba, exp, self.mig):
-            bl.addWidget(w)
+        self.zoom_b = QToolButton()
+        self.zoom_b.setText("Fit")
+        self.zoom_b.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self.zoom_b.setToolTip("Zoom. Click: 100% / the whole photo (or click the photo, or Z). The mouse wheel "
+                               "zooms around the pointer; drag the photo to move it (or the middle or right "
+                               "button, or Space + drag with a tool). Ctrl+= in, Ctrl+- out, Ctrl+0 fit, Ctrl+1 "
+                               "100%. The arrow lists the steps.")
+        self.zoom_b.clicked.connect(lambda: self.viewer.toggle_zoom(self._zoom_anchor()))
+        zm = QMenu(self.zoom_b)
+        for text, z in (("Fit: the whole photo   Ctrl+0", None), ("25%", 0.25), ("33%", 1 / 3), ("50%", 0.5),
+                        ("67%", 2 / 3), ("100%   Ctrl+1", 1.0), ("200%", 2.0), ("400%", 4.0)):
+            zm.addAction(text, lambda z=z: self.viewer.set_zoom(z, self._zoom_anchor()))
+        self.zoom_b.setMenu(zm)
+        def fill_versions(menu):
+            sub = menu.addMenu("Virtual copies")
+            for i in range(self.ver.count()):
+                a = sub.addAction(self.ver.itemText(i))
+                a.setCheckable(isinstance(self.ver.itemData(i), int))
+                a.setChecked(i == self.ver.currentIndex())
+                a.triggered.connect(lambda _=False, i=i: (self.ver.setCurrentIndex(i), self._version_picked(i)))
+
+        def fill_button(btn, text):
+            def fill(menu):
+                a = menu.addAction(text)
+                a.setEnabled(btn.isEnabled())
+                if btn.isCheckable():
+                    a.setCheckable(True)
+                    a.setChecked(btn.isChecked())
+                    a.triggered.connect(lambda on: btn.setChecked(on))
+                else:
+                    a.triggered.connect(btn.click)
+            return fill
+        bar.setup(self.title, [(self.ver, fill_versions),
+                               (self.copy_b, fill_button(self.copy_b, "Copy settings...   Ctrl+Shift+C")),
+                               (self.paste_b, fill_button(self.paste_b, "Paste settings   Ctrl+Shift+V")),
+                               (self.ba, fill_button(self.ba, "Before / After   B"))],
+                  [self.undo_b, self.redo_b, self.zoom_b, exp, self.mig])
+        self.bar = bar
         centre.addWidget(bar)
         self.viewer = Viewer()
-        self.viewer.clicked.connect(self.open_loupe)
+        self.viewer.clicked.connect(self._photo_clicked)
+        self.viewer.view_changed.connect(self._view_changed)
         self.viewer.crop_changed.connect(self._crop_drawn)
         self.viewer.stroke_done.connect(self._stroke_done)
         self.viewer.drag_done.connect(self._drag_done)
@@ -1018,8 +1360,6 @@ class DevelopPage(QWidget):
         self.viewer.spot_moved.connect(self._spot_moved)
         self.viewer.spot_picked.connect(self._spot_picked)
         self.viewer.spot_deleted.connect(self._spot_delete)
-        self.viewer.pan_done.connect(self._panned)
-        self.viewer.zoom_at.connect(self._zoom_at)
         self.viewer.eyes_done.connect(self._eyes_clicked)
         self.viewer.sculpt_done.connect(self._sculpt_stroke)
         self.viewer.shape_drawn.connect(self._shape_drawn)
@@ -1027,7 +1367,6 @@ class DevelopPage(QWidget):
         self.viewer.shape_moved.connect(self._shape_moved)
         self._portrait: dict = {}                   # the edit's "portrait": faces, sliders, sculpting
         self._shsel = -1                            # selected sculpt shape (index into the sculpt list)
-        self.zoom_c = None                          # 100% view centre (u, v) on the photo; None = fit
         self._spots: list = []                      # retouch spots (the edit's "retouch" list)
         self._ssel = -1
         self.rt_kind = "heal"
@@ -1055,7 +1394,7 @@ class DevelopPage(QWidget):
         QShortcut(QKeySequence("B"), self, activated=self.ba.toggle)
         QShortcut(QKeySequence("Ctrl+Z"), self, activated=self.do_undo)
         QShortcut(QKeySequence("Ctrl+Y"), self, activated=self.do_redo)
-        QShortcut(QKeySequence("Esc"), self, activated=self.close_loupe)
+        QShortcut(QKeySequence("Esc"), self, activated=self._escape)
         QShortcut(QKeySequence("C"), self, activated=self.crop_b.toggle)
         QShortcut(QKeySequence("O"), self, activated=self.cycle_overlay)
         QShortcut(QKeySequence("Shift+O"), self, activated=self.turn_overlay)
@@ -1063,7 +1402,11 @@ class DevelopPage(QWidget):
         QShortcut(QKeySequence(Qt.Key.Key_Enter), self, activated=lambda: self.crop_b.setChecked(False))
         QShortcut(QKeySequence("Ctrl+Shift+C"), self, activated=self.copy_settings)
         QShortcut(QKeySequence("Ctrl+Shift+V"), self, activated=self.paste_settings)
-        QShortcut(QKeySequence("Z"), self, activated=self.zoom_b.toggle)
+        QShortcut(QKeySequence("Z"), self, activated=lambda: self.viewer.toggle_zoom(self._zoom_anchor()))
+        for keys, how in (("Ctrl+=", 1), ("Ctrl++", 1), ("Ctrl+-", -1)):
+            QShortcut(QKeySequence(keys), self, activated=lambda d=how: self.viewer.zoom_step(d, self._zoom_anchor()))
+        QShortcut(QKeySequence("Ctrl+0"), self, activated=lambda: self.viewer.set_zoom(None))
+        QShortcut(QKeySequence("Ctrl+1"), self, activated=lambda: self.viewer.set_zoom(1.0, self._zoom_anchor()))
         QShortcut(QKeySequence(Qt.Key.Key_Delete), self, activated=lambda: self._spot_delete(self._ssel))
         self._refresh_history()
 
@@ -3007,8 +3350,6 @@ class DevelopPage(QWidget):
             self.crop_b.setChecked(False)
         self.viewer.tool = kind
         if kind:
-            self.loupe_pt = None
-            self.viewer.loupe = None
             self.viewer.brush_frac = self.b_size.value() / 100.0
             self.viewer.brush_scale = self._brush_scale()
         else:
@@ -3393,12 +3734,12 @@ class DevelopPage(QWidget):
         if self.image is None:
             self.crop_b.setChecked(False)
             return
-        if on and self.zoom_c is not None:
-            self.zoom_b.setChecked(False)
+        if on and self.viewer.zoomed:
+            self.viewer.set_zoom(None)
         self.viewer.crop_mode = on
         self.viewer.crop = tuple(self.edit.geometry.crop or (0.0, 0.0, 1.0, 1.0))
         self.viewer.crop_ratio = self._aspect_ratio()
-        self.close_loupe()
+        self._escape(keep_zoom=True)
         self.render_now()
 
     def _crop_drawn(self, crop):
@@ -3541,7 +3882,8 @@ class DevelopPage(QWidget):
         self.show_fix_report([])
         self.viewer.after = None
         self.viewer.message = f"Opening {os.path.basename(path)} ..."
-        self.viewer.loupe = None
+        self.viewer.zs.z = None                             # a new photo opens whole
+        self.viewer.tile = self.viewer.tile_uv = None
         self.viewer.update()
         self.title.setText(os.path.basename(path))
 
@@ -3556,12 +3898,9 @@ class DevelopPage(QWidget):
         self.image, edit, steps = res
         self.version = 0
         self._ssel = -1
-        if self.zoom_c is not None:
-            self.zoom_c = None
-            self.viewer.win = None
-            self.zoom_b.blockSignals(True)
-            self.zoom_b.setChecked(False)
-            self.zoom_b.blockSignals(False)
+        self.viewer.zs.z = None
+        self.viewer.tile = self.viewer.tile_uv = None
+        self.zoom_b.setText("Fit")
         self._reset_history(edit, steps)
         self.controls_from_edit(self.edit)
         self._canonical()
@@ -3644,31 +3983,78 @@ class DevelopPage(QWidget):
         self.work_chip.setStyleSheet(f"color:{colour}; border-color:{T.alpha(colour, 0.45 if v.busy else 0.33)};")
 
     def render_now(self):
+        """The settings changed (or something they depend on did): render again. The zoomed view's sharp tile goes
+        first when zoomed (it is what you are looking at), then the whole-photo preview (the navigator, the
+        histogram, and what shows round the tile while you move)."""
+        if self.image is None:
+            return
+        self._dirty_base = True
+        self._dirty_tile = True
+        self._pump()
+
+    def _view_changed(self):
+        """The viewer zoomed or moved (once the movement settles): a sharp tile if the part on screen needs one."""
+        v = self.viewer
+        self.zoom_b.setText(Z.label(v.zs.z) if v.zoomed else "Fit")
+        if v.zoomed and self.ba.isChecked():
+            self.ba.setChecked(False)               # the before/after wipe is for the whole photo
+        if not v.zoomed:
+            v.tile = v.tile_uv = None               # (a new zoom renders a new tile; this one may be stale)
+            v.update()
+        self._pump()
+
+    def _tile_needed(self, edit):
+        """(x, y, w, h, scale) of the sharp render the zoomed view needs, or None (fit, the preview is sharp
+        enough at this zoom, or the tile already on screen holds everything visible)."""
+        from .. import engine as E
+        v = self.viewer
+        if not v.zoomed or v.crop_mode or v.after is None:
+            return None
+        ow, oh = E.output_size(self.image, edit)
+        if (ow, oh) != (v.zs.ow, v.zs.oh):
+            v.zs.set_photo(ow, oh)
+        if v.zs.z <= v.after.width() / float(ow) * 1.05:
+            return None                              # the whole-photo preview already has these pixels
+        req = v.zs.tile_request()
+        if req is None:
+            return None
+        if not self._dirty_tile and Z.covers(v.tile_uv, v.tile_scale, v.zs.visible_window(), ow, oh, req[4]):
+            return None
+        return req
+
+    def _pump(self):
+        """Start the next render, if one is due and none is running: the tile, then the preview."""
         if self.image is None:
             return
         if self._render_live:
-            # One preview render at a time. Dragging a slider used to start a new render on every pause, and they
-            # all ran at once, fighting over the CPU, so the last one (the one you wanted) came back slowest.
-            # Now the newest settings wait for the running render and go next; anything in between is skipped.
             self._render_again = True
             self.viewer.busy = True
             return
-        from .. import engine as E
-        self.token += 1
+        self._render_again = False
         edit = self.shown_edit()
+        req = self._tile_needed(edit)
+        if req is not None:
+            self._start_tile(edit, req)
+        elif self._dirty_base or self.viewer.after is None:
+            self._start_base(edit)
+        else:
+            self.viewer.busy = False
+            self.viewer.update()
+
+    def _start_base(self, edit):
+        from .. import engine as E
+        self._dirty_base = False
+        self.token += 1
         tok, img, sc = self.token, self.image, self.preview_scale(edit)
         self._render_live, self._render_img = True, img
+        ow, oh = E.output_size(img, edit)
+        self.viewer.zs.set_photo(ow, oh)
         # "before" = as shot, but with the same straighten / perspective / crop, so the wipe lines up
         bkey = (json.dumps(edit.geometry.__dict__, sort_keys=True, default=str), round(sc, 4), self.judge_bw)
         need_before = self.before_img is None or bkey != self.before_key
         self.viewer.busy = True
         self.viewer.update()
         t0 = time.perf_counter()
-
-        if self.zoom_c is not None and not self.viewer.crop_mode:
-            self._render_zoom(tok, img, edit, t0)
-            return
-
         bw = self.judge_bw
 
         def work():
@@ -3684,91 +4070,53 @@ class DevelopPage(QWidget):
                     b8 = bw8(b8)
             return a8, b8, bkey, time.perf_counter() - t0
         run_bg(work, tok, self._rendered, self._render_failed)
-        if self.loupe_pt is not None:
-            self.open_loupe(*self.loupe_pt)
+
+    def _start_tile(self, edit, req):
+        from .. import engine as E
+        self._dirty_tile = False
+        self.token += 1
+        tok, img = self.token, self.image
+        self._render_live, self._render_img = True, img
+        x, y, w, h, scale = req
+        ow, oh = E.output_size(img, edit)
+        uv = (x / ow, y / oh, (x + w) / ow, (y + h) / oh)
+        self.viewer.busy = True
+        t0 = time.perf_counter()
+        bw = self.judge_bw
+        log.debug("zoom tile: %dx%d+%d+%d at %.3f", w, h, x, y, scale)
+
+        def work():
+            a8 = display8(E.render_window(img, edit, (x, y, w, h), scale))
+            return (bw8(a8) if bw else a8), uv, scale, time.perf_counter() - t0
+        run_bg(work, tok, self._tile_rendered, self._render_failed)
+
+    def _tile_rendered(self, tok, res):
+        self._render_live = False
+        if tok == self.token and self._render_img is self.image and self.viewer.zoomed:
+            a8, uv, scale, dt = res
+            self.viewer.tile, self.viewer.tile_uv, self.viewer.tile_scale = to_qimage(a8), uv, scale
+            self.viewer.update()
+            self.status.emit(f"{Z.label(self.viewer.zs.z)} view rendered in {dt:.1f} s")
+        self._pump()
 
     def _render_finished(self) -> bool:
-        """Bookkeeping when a preview render ends. True = newer settings were waiting and have been started (keep
-        the indicator on); False = nothing waiting."""
+        """Bookkeeping when a render ends; starts the next one if any is due. True when one was started."""
         self._render_live = False
-        if self._render_again:
-            self._render_again = False
-            self.render_now()
-            return self._render_live
-        return False
+        self._pump()
+        return self._render_live
 
     def _render_failed(self, tok, err):
         self.status.emit(f"Render problem: {err}")
-        if not self._render_finished():
-            self.viewer.busy = False
+        self._render_live = False
+        self._pump()
 
-    # ------------------------------------------------------------------------------------ 100% view
-    def _render_zoom(self, tok, img, edit, t0):
-        from .. import engine as E
-        dpr = self.devicePixelRatioF()
-        W = int(min(3200, max(200, (self.viewer.width() - 36) * dpr)))
-        H = int(min(2400, max(150, (self.viewer.height() - 36) * dpr)))
-        u, v = self.zoom_c
-        x, y, w, h = E.view_window(img, edit, u, v, W, H)
-        ow, oh = E.output_size(img, edit)
-        win = (x / ow, y / oh, (x + w) / ow, (y + h) / oh)
-        self.zoom_c = ((x + w / 2.0) / ow, (y + h / 2.0) / oh)       # clamped at the edges, as the window is
-
-        bw = self.judge_bw
-
-        def work():
-            a8 = display8(E.render_view(img, edit, u, v, W, H))
-            return (bw8(a8) if bw else a8), win, time.perf_counter() - t0
-        run_bg(work, tok, self._zoom_rendered, self._render_failed)
-
-    def _zoom_rendered(self, tok, res):
-        current = tok == self.token and self._render_img is self.image
-        more = self._render_finished()
-        if not current or self.zoom_c is None:
-            if not more and not self._render_live:
-                self.viewer.busy = False
-            return
-        a8, win, dt = res
-        self.viewer.after = to_qimage(a8)
-        self.viewer.win = win
-        self._refresh_spot_view()
-        if not more:
-            self.viewer.busy = False
-        self.viewer.update()
-        self.status.emit(f"100% view rendered in {dt:.1f} s")
-
-    def toggle_zoom(self, on):
-        if self.image is None:
-            self.zoom_b.blockSignals(True)
-            self.zoom_b.setChecked(False)
-            self.zoom_b.blockSignals(False)
-            return
-        if on:
-            if self.viewer.crop_mode:
-                self.crop_b.setChecked(False)
-            m = self.viewer._mouse
-            self.zoom_c = m if (m and 0 <= m[0] <= 1 and 0 <= m[1] <= 1) else (self.loupe_pt or (0.5, 0.5))
-            self.loupe_pt = None
-            self.viewer.loupe = None
-            if self.ba.isChecked():
-                self.ba.setChecked(False)
-        else:
-            self.zoom_c = None                  # the 100% picture stays until the whole photo is rendered
-        self.render_now()
-
-    def _zoom_at(self, u, v, zoom_in):
-        if zoom_in and self.zoom_c is None:
-            self.viewer._mouse = (u, v)
-            self.zoom_b.setChecked(True)
-        elif not zoom_in and self.zoom_c is not None:
-            self.zoom_b.setChecked(False)
-
-    def _panned(self, du, dv):
-        if self.zoom_c is None:
-            return
-        u, v = self.zoom_c
-        self.zoom_c = (min(max(u + du, 0.0), 1.0), min(max(v + dv, 0.0), 1.0))
-        self.render_now()
+    def _zoom_anchor(self):
+        """Where Z and the zoom keys zoom to: the pointer when it is over the photo, else the middle."""
+        v = self.viewer
+        m = v._mouse
+        if m is None or not (0.0 <= m[0] <= 1.0 and 0.0 <= m[1] <= 1.0) or not v.underMouse():
+            return None
+        return v._px(m, v.photo_rect())
 
     # ------------------------------------------------------------------------------------ lens glow (raw/glow.py)
     def _fill_glow(self, current: str):
@@ -4174,8 +4522,6 @@ class DevelopPage(QWidget):
                 self._set_mask_tool(None)
             if self.viewer.crop_mode:
                 self.crop_b.setChecked(False)
-            self.loupe_pt = None
-            self.viewer.loupe = None
             self.viewer.tool = kind
             self.viewer._pts = []
             self.sculpt_kind = sub if kind == "sculpt" else None
@@ -4506,14 +4852,12 @@ class DevelopPage(QWidget):
                 self.crop_b.setChecked(False)
             self.rt_kind = kind
             self.viewer.tool = "spot"
-            self.loupe_pt = None
-            self.viewer.loupe = None
             self.viewer.brush_scale = self._brush_scale()
             self.viewer.brush_frac = self.rt_size.value() / 100.0
             self.viewer.setCursor(Qt.CursorShape.BlankCursor)
             if self._ssel < 0:
                 self.rt_feather.set_value({"heal": 25, "clone": 50, "pupil": 25}.get(kind, 30), emit=False)
-            if self.zoom_c is None:
+            if not self.viewer.zoomed:
                 self.status.emit("Retouch: zoom to 100% (Z or the mouse wheel) to see small dust spots.")
         elif self.viewer.tool == "spot":
             self.viewer.tool = None
@@ -4724,7 +5068,6 @@ class DevelopPage(QWidget):
             return
         a8, b8, bkey, dt = res
         self.viewer.after = to_qimage(a8)
-        self.viewer.win = None
         self._refresh_spot_view()
         self._refresh_portrait_view()
         self._glow_refresh()
@@ -4742,34 +5085,18 @@ class DevelopPage(QWidget):
         self.curve.set_histogram(a8)
         self.status.emit(f"Rendered in {dt:.1f} s")
 
-    def open_loupe(self, u, v):
+    def _photo_clicked(self, u, v):
+        """A click on the photo while an eyedropper waits (other clicks zoom, in the viewer itself)."""
         if self.image is None or self.viewer.crop_mode:
             return
         if self.pick == "wb":
             self._pick_white_at(u, v)
-            return
-        if self.pick == "range":
+        elif self.pick == "range":
             self._pick_range_at(u, v)
-            return
-        from .. import engine as E
-        self.loupe_pt = (u, v)
-        w, h = E.output_size(self.image, self.edit)
-        lw, lh = (720, 480) if w >= h else (480, 720)
-        img, edit = self.image, self.edit
-        self.viewer.busy = True
-        self.viewer.update()
-        bw = self.judge_bw
-        run_bg(lambda: (bw8 if bw else (lambda a: a))(display8(E.render_view(img, edit, u, v, lw, lh))), (u, v),
-               self._loupe_ready)
 
-    def _loupe_ready(self, pt, a8):
-        if pt != self.loupe_pt:
-            return
-        self.viewer.loupe = to_qimage(a8)
-        self.viewer.busy = False
-        self.viewer.update()
-
-    def close_loupe(self):
+    def _escape(self, keep_zoom: bool = False):
+        """Esc: put down the eyedropper or tool in hand; with nothing in hand, back to the whole photo."""
+        busy_tool = bool(self.pick) or bool(self.viewer.tool)
         if self.pick:
             self._set_pick(None)
         if self.viewer.tool in ("eyes", "sculpt", "shape"):
@@ -4778,11 +5105,13 @@ class DevelopPage(QWidget):
             self._set_spot_tool(None)
         elif self.viewer.tool:
             self._set_mask_tool(None)
-        self.loupe_pt = None
-        self.viewer.loupe = None
+        if not busy_tool and not keep_zoom and self.viewer.zoomed:
+            self.viewer.set_zoom(None)
         self.viewer.update()
 
     def toggle_before(self, on):
+        if on and self.viewer.zoomed:
+            self.viewer.set_zoom(None)              # the wipe compares the whole photo
         self.viewer.split = 0.5 if on else None
         self.viewer.update()
 
@@ -4834,9 +5163,24 @@ class DevelopPage(QWidget):
 # ============================================================================================ Export
 # ============================================================================================ other workspaces
 class InfoPage(QWidget):
+    """A page of text cards (Help, Cameras, Lenses...). It scrolls: without that, a window shorter than all the
+    cards squeezed every card to a sliver of clipped text (a friend's first look at Help, on Linux), and the
+    page's height became the whole window's minimum (1,042 pixels, taller than a laptop screen)."""
+
     def __init__(self, title, subtitle, phase=None, bullets=(), colour=T.CYAN):
         super().__init__()
-        v = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        content = QWidget()
+        content.setObjectName("infopage")
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
+        self.scroll = scroll
+        v = QVBoxLayout(content)
         v.setContentsMargins(40, 34, 40, 34)
         head = QHBoxLayout()
         head.addWidget(label(title, "h1"))
@@ -4857,6 +5201,8 @@ class InfoPage(QWidget):
             cl.addWidget(label(text, "dim", wrap=True))
             cl.addStretch(1)
             self.cards.addWidget(c, i // 3, i % 3)
+        for col in range(3):
+            self.cards.setColumnStretch(col, 1)        # equal columns (a narrow one made tall, half-empty rows)
         v.addLayout(self.cards)
         self.body = QVBoxLayout()
         v.addLayout(self.body)
@@ -5011,8 +5357,10 @@ class HelpPage(InfoPage):
                                         "From the raw (true noise and detail)."),
                              ("Process picks", "Exports your picks (or the selected photos) in the background, each "
                                                "with its own edit, or Make it good on photos not edited yet."),
-                             ("Develop", "B before/after, click the photo for a 100% loupe, Esc closes it, "
-                                         "Ctrl+Z / Ctrl+Y undo and redo, double-click a slider to reset it."),
+                             ("Develop", "B before/after, Ctrl+Z / Ctrl+Y undo and redo, double-click a slider "
+                                         "to reset it, Esc puts a tool down, F11 full screen. On a narrow window "
+                                         "Copy, Paste, Before / After and the virtual copies are under the ⋯ "
+                                         "button."),
                              ("Colours mean something", "Cyan = measured on your camera. Violet = shared profile. "
                                                         "Amber = estimated from the photo."),
                              ("Make it good", "Noise clean-up for the photo's ISO, Fix lens, and gentle "
@@ -5054,8 +5402,12 @@ class HelpPage(InfoPage):
                              ("Body sculpting", "Push, Shrink, Grow brushes; shape tools (breast lift & size, butt "
                                                 "improvement tool, slim waist, tummy, arm, thigh): drag along the "
                                                 "area, then set Lift, Size or Slim. Every warp is capped."),
-                             ("100% view", "Z, the 100% button or the mouse wheel. Drag to move around; right- or "
-                                           "middle-drag moves it while a tool is on."),
+                             ("Zoom and move", "Click the photo for 100% there, click again for the whole photo. "
+                                               "The mouse wheel zooms around the pointer, from the whole photo to "
+                                               "400%. Drag to move (with a tool on: middle- or right-drag, or "
+                                               "Space + drag). The map in the corner jumps where you click. Z, "
+                                               "Ctrl+= / Ctrl+-, Ctrl+0 whole photo, Ctrl+1 100%, Esc whole photo. "
+                                               "The photo moves at once; the sharp detail follows a moment later."),
                              ("Sidecars", "Edits live in NAME.CR3.psb.json beside each raw. The raw is never "
                                           "touched."),
                              ("Working...", "While the photo is being worked on, a bar moves along its top edge and "
@@ -5202,6 +5554,7 @@ class MainWindow(QMainWindow):
             self.stack.addWidget(p)
         h.addWidget(self.stack, 1)
         self.setCentralWidget(root)
+        QShortcut(QKeySequence("F11"), self, activated=self.toggle_full_screen)
         self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
         self.nav.currentRowChanged.connect(self._nav_changed)
         self.nav.setCurrentRow(0)
@@ -5425,14 +5778,64 @@ class MainWindow(QMainWindow):
                 img.drop_cache()
             return out
         self.statusBar().showMessage(f"Exporting {len(items)} photo(s) in the background...")
-        run_bg(work, dest, self._exported, lambda _, e: self.statusBar().showMessage(f"Export problem: {e}"))
+        run_bg(work, dest, self._exported, lambda _, e: self.statusBar().showMessage(f"Export problem: {e}"),
+               keep=True)
 
     def _exported(self, dest, out):
         self.statusBar().showMessage(f"Exported {len(out)} file(s) to {dest}", 10000)
         QDesktopServices.openUrl(QUrl.fromLocalFile(dest))
 
+    def toggle_full_screen(self):
+        """F11: full screen and back (to maximized if it was)."""
+        if self.isFullScreen():
+            self.showMaximized() if self._was_max else self.showNormal()
+        else:
+            self._was_max = self.isMaximized()
+            self.showFullScreen()
+
+    _was_max = False
+
+    def show_as_last_time(self):
+        """Open as it was closed: the same place and size, maximized or full screen again."""
+        import base64
+        geo = self.settings.get("window_geometry")
+        if geo:
+            try:
+                self.restoreGeometry(base64.b64decode(geo))
+            except Exception:                          # noqa: BLE001  (an odd saved value: default size)
+                log.debug("window geometry not restored")
+        state = self.settings.get("window_state", "")
+        if state == "full":
+            self.showFullScreen()
+        elif state == "max":
+            self.showMaximized()
+        else:
+            self.show()
+
+    def _remember_window(self):
+        import base64
+        state = "full" if self.isFullScreen() else ("max" if self.isMaximized() else "normal")
+        self.settings.set("window_state", state)
+        self.settings.set("window_geometry", base64.b64encode(bytes(self.saveGeometry())).decode("ascii"))
+
     def closeEvent(self, e):
+        from . import common as C
+        busy = C.kept_jobs_running()
+        if busy:
+            ask = QMessageBox(QMessageBox.Icon.Question, "Photographic Studio",
+                              f"{busy} export or import job(s) are still writing files. Closing now leaves them "
+                              "unfinished.", parent=self)
+            wait = ask.addButton("Let them finish", QMessageBox.ButtonRole.RejectRole)
+            ask.addButton("Close anyway", QMessageBox.ButtonRole.DestructiveRole)
+            ask.exec()
+            if ask.clickedButton() is wait:
+                self.statusBar().showMessage("Still working: the Studio can close when the export or import is "
+                                             "done.", 10000)
+                e.ignore()
+                return
+            log.warning("closed while %d export/import job(s) were still running", busy)
         self.develop.save_sidecar()
+        self._remember_window()
         self.library.meta.stop()
         self.library.loader.reset()
         self.library.writer.wait(5000)                 # ratings typed just before closing are saved
@@ -5444,10 +5847,17 @@ class MainWindow(QMainWindow):
 
 
 def _excepthook(t, v, tb):
+    from . import common as C
+    if C._SHUTTING_DOWN:
+        log.debug("exception while closing (ignored): %s", v)
+        return
     log.error("unhandled exception in the app\n%s", "".join(traceback.format_exception(t, v, tb)))
+    import threading
+    if QApplication.instance() is None or threading.current_thread() is not threading.main_thread():
+        return                                     # a message box only from the window's own thread
     try:
         QMessageBox.critical(None, "Photographic Studio", f"Something went wrong: {v}\n\nDetails are in "
-                             f"logs\\studio.log (Help > Copy diagnostic report).")
+                             f"{os.path.join('logs', 'studio.log')} (Help > Copy diagnostic report).")
     except Exception:
         pass
 
@@ -5458,21 +5868,71 @@ def run(argv=None) -> int:
     app = QApplication.instance() or QApplication(argv or sys.argv)
     app.setApplicationName("Photographic Studio By Bill")
     app.setStyleSheet(T.QSS)
+    lock = _single_instance(app)
+    if lock is None:
+        return 0
     w = MainWindow()
-    w.show()
+    w.show_as_last_time()
     log.info("app started")
     code = app.exec()
-    finish_jobs()
-    return code
+    clean = finish_jobs()
+    log.info("app closed (exit %s%s)", code, "" if clean else "; previews still rendering were dropped")
+    lock.unlock()
+    # A preview render still running when Python tears down crashed the exit (seen on Linux: "The Studio stopped
+    # with an error" after closing it mid-render). Everything worth keeping is saved by now (sidecars, settings,
+    # ratings; export and import jobs were waited for), so leave without tearing down.
+    logging.shutdown()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(int(code))
 
 
-def finish_jobs(timeout_ms: int = 30000) -> None:
-    """Let background work end before Python shuts down (a job still running then can crash the exit)."""
+def _single_instance(app):
+    """One Studio at a time (a slow start tempted a second click, and two windows on the same photos fight over
+    sidecars). Returns the held lock, or None when the person chose not to open a second one."""
+    from PySide6.QtCore import QLockFile
+    try:
+        d = paths.get("SETTINGS")
+        d.mkdir(parents=True, exist_ok=True)
+        lock = QLockFile(str(d / "studio.lock"))
+        lock.setStaleLockTime(0)                   # never stale by age; a dead owner is still detected
+        # after an update the old window may still be closing: give it time to let go
+        if lock.tryLock(15000 if os.environ.get("STUDIO_AFTER_UPDATE") else 1500):
+            return lock
+    except Exception:                              # noqa: BLE001  (a lock problem must never stop the Studio)
+        slog.log_exception("single-instance lock", log)
+        return _NoLock()
+    box = QMessageBox(QMessageBox.Icon.Information, "Photographic Studio",
+                      "Photographic Studio is already open (look for its window, or wait a moment if you just "
+                      "started it).")
+    box.addButton("OK", QMessageBox.ButtonRole.AcceptRole)
+    another = box.addButton("Open another window anyway", QMessageBox.ButtonRole.ActionRole)
+    box.exec()
+    if box.clickedButton() is another:
+        log.info("second window opened on request")
+        return _NoLock()
+    log.info("already open: second start declined")
+    return None
+
+
+class _NoLock:
+    def unlock(self):
+        pass
+
+
+def finish_jobs(timeout_ms: int = 1500) -> bool:
+    """At exit: no new background work; jobs not started are dropped; export / import jobs (keep=True) are waited
+    for; previews are given ``timeout_ms`` and then abandoned. True when nothing is left running."""
+    from . import common as C
     from .library import EXTRA_POOLS
+    C.begin_shutdown()
     POOL.clear()                                   # jobs not started yet are dropped
     for p in EXTRA_POOLS:
         p.clear()
-    if not POOL.waitForDone(timeout_ms):
-        log.warning("background work still running at exit")
+    t_end = time.time() + 3600
+    while any(j.keep and j.running for j in list(C._LIVE)) and time.time() < t_end:
+        POOL.waitForDone(250)                      # files the person asked for are finished
+    done = POOL.waitForDone(timeout_ms)
     for p in EXTRA_POOLS:
-        p.waitForDone(5000)
+        done = p.waitForDone(500) and done
+    return done

@@ -20,6 +20,7 @@ from . import theme as T
 log = slog.get("app")
 POOL = QThreadPool.globalInstance()
 _LIVE: set = set()
+_SHUTTING_DOWN = False                               # the Studio is closing: no new background work
 
 
 # ============================================================================================ background jobs
@@ -29,9 +30,12 @@ class _Sig(QObject):
 
 
 class Job(QRunnable):
-    def __init__(self, fn, token=None, on_done=None, on_fail=None):
+    def __init__(self, fn, token=None, on_done=None, on_fail=None, keep=False):
         super().__init__()
         self.fn, self.token, self.sig = fn, token, _Sig()
+        self.keep = keep                             # writes files the person asked for: finished before exit
+        self.running = False
+        self.finished = False
         if on_done:
             self.sig.done.connect(on_done)
         if on_fail:
@@ -39,18 +43,49 @@ class Job(QRunnable):
         _LIVE.add(self)
 
     def run(self):
+        self.running = True
         try:
             r = self.fn()
-            self.sig.done.emit(self.token, r)
+            self._emit(self.sig.done, self.token, r)
         except Exception as e:                       # every exception is logged with its traceback (rule 0.3.5)
-            slog.log_exception("background job failed", log)
-            self.sig.failed.emit(self.token, str(e))
+            if not _SHUTTING_DOWN:
+                slog.log_exception("background job failed", log)
+            self._emit(self.sig.failed, self.token, str(e))
         finally:
-            QTimer.singleShot(0, lambda: _LIVE.discard(self))
+            self.running = False
+            self.finished = True
+            if _SHUTTING_DOWN:
+                _LIVE.discard(self)
+            else:
+                QTimer.singleShot(0, lambda: _LIVE.discard(self))
+
+    @staticmethod
+    def _emit(signal, *args):
+        # the window the result was for may be gone (the Studio closing): drop the result, do not crash the exit
+        try:
+            signal.emit(*args)
+        except RuntimeError:
+            pass
 
 
-def run_bg(fn, token=None, on_done=None, on_fail=None):
-    POOL.start(Job(fn, token, on_done, on_fail))
+def run_bg(fn, token=None, on_done=None, on_fail=None, keep=False):
+    """Run ``fn`` in the background; ``on_done(token, result)`` / ``on_fail(token, message)`` come back on the
+    window's thread. ``keep=True`` for work that writes files the person asked for (export, import, process picks,
+    measured profiles): closing the Studio waits for it (after asking). Everything else (previews, measurements of
+    the open photo) is simply dropped when the Studio closes."""
+    if _SHUTTING_DOWN:
+        return
+    POOL.start(Job(fn, token, on_done, on_fail, keep))
+
+
+def kept_jobs_running() -> int:
+    """How many background jobs that write the person's files are still at work."""
+    return sum(1 for j in list(_LIVE) if j.keep and not j.finished)
+
+
+def begin_shutdown() -> None:
+    global _SHUTTING_DOWN
+    _SHUTTING_DOWN = True
 
 
 def to_qimage(a: np.ndarray) -> QImage:

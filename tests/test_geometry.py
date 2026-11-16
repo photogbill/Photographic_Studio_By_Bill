@@ -124,6 +124,60 @@ def test_view_window_matches_the_full_render():
     assert np.abs(v - full[y:y + 80, x:x + 120]).max() < 1e-4
 
 
+def test_render_window_matches_the_full_render_at_any_scale():
+    """Develop's zoomed view renders only the part on screen: it must be the same pixels as that part of the whole
+    photo rendered at the same scale (warped, crop-only and plain), and render_view at 100%."""
+    img = _img(320, 480)
+    for setup in ("plain", "crop", "warp"):
+        e = E.Edit()
+        if setup == "crop":
+            e.geometry.crop = [0.1, 0.05, 0.9, 0.95]
+        elif setup == "warp":
+            e.geometry.rotate = 3.0
+            e.geometry.vertical = 20
+        ow, oh = E.output_size(img, e)
+        full = E.render(img, e)
+        x, y, w, h = ow // 4, oh // 3, ow // 2, oh // 3
+        win = E.render_window(img, e, (x, y, w, h), 1.0)
+        assert win.shape[:2] == (h, w)
+        assert np.abs(win - full[y:y + h, x:x + w]).max() < 1e-4, setup
+        assert np.abs(win - E.render_view(img, e, (x + w / 2) / ow, (y + h / 2) / oh, w, h)).max() < 1e-4
+        sc = 0.75                                                     # on a shared pixel grid: x, y, w, h by 4
+        x, y, w, h = x // 4 * 4, y // 4 * 4, w // 4 * 4, h // 4 * 4
+        part = E.render_window(img, e, (x, y, w, h), sc)
+        whole = E.render(img, e, scale=sc)
+        X, Y = round(x * sc), round(y * sc)
+        hh, ww = part.shape[:2]
+        assert abs(ww - w * sc) <= 1.01 and abs(hh - h * sc) <= 1.01
+        inner = (slice(4, hh - 4), slice(4, ww - 4))                  # resampling edges aside
+        assert np.abs(part[inner] - whole[Y:Y + hh, X:X + ww][inner]).mean() < 0.01, setup
+
+
+def test_half_size_region_is_cut_from_the_cached_whole_frame():
+    """A zoomed view up to 60% renders half-size: its region comes out of the whole frame the preview already
+    worked out (no second decode), and matches a region worked out on its own."""
+    from studio.engine.pipeline import pipeline as P
+    img = _img(320, 480)
+    e = E.Edit()
+    region = (37, 51, 120, 90)
+    fresh = P.linear_rgb(img, e, region, half_size=True, cache=False)
+    P.linear_rgb(img, e, None, half_size=True)                    # what the preview leaves behind
+    calls = []
+    real = P.lin.normalise
+    P.lin.normalise = lambda *a, **k: calls.append(1) or real(*a, **k)
+    try:
+        cut = P.linear_rgb(img, e, region, half_size=True)
+    finally:
+        P.lin.normalise = real
+    assert not calls                                              # no decoding: cut from the cache
+    assert cut.shape == fresh.shape and np.abs(cut - fresh).max() < 1e-4
+    ow, oh = E.output_size(img, e)
+    a = E.render_window(img, e, (40, 60, 160, 120), 0.4)
+    img.drop_cache()
+    b = E.render_window(img, e, (40, 60, 160, 120), 0.4)
+    assert a.shape == b.shape and np.abs(a - b).max() < 1e-3
+
+
 def test_lens_tag_does_not_invalidate_the_raw_cache():
     a, b = E.Edit(), E.Edit()
     b.lens.tag = "Laack 13.5cm Anastigmat"

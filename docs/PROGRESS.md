@@ -458,3 +458,35 @@ Updated 2026-11-15 (session 11: Phase 4b, plan section 24). Plan: BUILD_PLAN.md 
     itself), and only if it cannot open offers `sudo rpm-ostree install <packages>` (default no, reboot needed).
     Tested with a stand-in rpm-ostree: window opens, nothing offered; X11 library missing, the layer is offered
     and not run without a yes.
+85. **Zoom and pan rebuilt** (a friend: "the denoising was efficient, but zooming and dragging is very clunky").
+    Measured cause: two states only (fit or a rendered 100% window); the wheel jumped straight to 100%, and every
+    drag ended with the photo snapping back for the next window's render (2.2 s with Clean on, R5). Now: any zoom
+    from fit to 400% (wheel around the pointer, stopping once at exactly 100%; Ctrl+= / Ctrl+- through Fit, 25,
+    33, 50, 67, 100, 200, 300, 400%; Ctrl+0 / Ctrl+1; the toolbar button and its menu; touchpad pinch). Clicking
+    the photo toggles Fit and 100% at that point (as in Lightroom); a drag moves it; middle or right drag, or
+    Space + drag, move it with a tool in hand; Esc with nothing in hand goes back to fit; a navigator in the corner
+    shows where you are and jumps where you click. The photo follows at once: the whole-photo preview already in
+    memory is drawn enlarged (5-8 ms a frame), and a sharp render of just the part on screen plus 8% (app/zoom.py
+    `tile_request`, engine `render_window`) is laid over it when ready; small nudges reuse it. Up to 60% the tile
+    is cut from the half-size whole frame the preview already made (0.1-0.3 s instead of 3-7 s). The engine now
+    keeps stage 1-12 results for the last whole frame and the last region separately (one slot made the tile and
+    the preview evict each other: a tone slider while zoomed re-did the denoise twice). The 100% loupe inset is
+    retired (the real zoom does its job). Develop's top bar is compacter and the file name shortens with "...",
+    so the window fits a 1366-pixel screen (it needed 1,521).
+86. **A friend's first Linux test (0.1.3), four fixes.** (1) *Opening a photo dropped the window out of full screen.*
+    Cause: the window's minimum size grew past her screen (Develop needed 1,521 pixels across and more with a long
+    file name; the Help page alone made the whole window at least 1,042 high), and a Linux window manager puts such a
+    window back to normal size. Now 1,235 x 486 on every page and unchanged by opening a photo: Develop's top bar
+    folds Copy, Paste, Before / After and the virtual copies into a ⋯ menu when narrow, the file name shortens with
+    "...", the text pages scroll, the Library hint wraps and its filters are a little narrower. The window also
+    opens as it was closed (place, size, maximized or full screen), and F11 toggles full screen. (2) *"The help
+    section is a hot mess" and its "buttons don't work".* The cards were squeezed to slivers of clipped text (no
+    scrolling), so they looked like broken buttons; now the page scrolls and every card shows its whole text in
+    equal columns; the stale "100% view" card is now "Zoom and move". (3) *"The Studio stopped with an error" on
+    closing.* Reproduced: closed during a Clean render, the process waited 37 s, then the render's worker pool refused
+    work after Python had started shutting down and the error handler tried to show a message box with no
+    application left: exit code 134, which the launcher reported. Now previews are dropped at once, export and
+    import jobs are finished (the Studio asks before closing over them), no new work starts, and the process leaves
+    without tearing Qt down once everything is saved: exit 0 within about 1.5 s. One Studio at a time (a lock
+    beside the settings; "Open another window anyway" is offered), since a slow start invited a second click. (4)
+    *Zooming and dragging took up to ten seconds*: 0.1.3 predates decision 85.

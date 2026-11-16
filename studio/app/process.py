@@ -168,4 +168,4 @@ def run_process(page, files: list, spec, dest: str, mode: str) -> None:
         page.prog_text.setText(f"Process picks stopped: {err}")
         page.prog_text.setStyleSheet(f"color:{T.RED};")
     run_bg(lambda: process_files(files, spec, dest, mode, cancel, lambda i, nm: sig.step.emit(i, nm)), "process",
-           done, fail)
+           done, fail, keep=True)

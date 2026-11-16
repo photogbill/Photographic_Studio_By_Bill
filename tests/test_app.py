@@ -204,13 +204,13 @@ def test_colour_wheel_picker_and_widgets():
     app, M, page = _page()
     page.last_a8 = np.tile(np.array([230, 140, 40], np.uint8), (60, 90, 1))          # an orange photo
     page._set_pick("range")
-    page.open_loupe(0.5, 0.5)
+    page._photo_clicked(0.5, 0.5)
     assert page.pick is None and len(page._ranges) == 1 and 45 < page._ranges[0]["hue"] < 80
     page.r_shift.set_value(25)
     assert page.edit.colour.ranges[0]["shift"] == 25 and page.steps[-1][0] == "Colour: colour wheel changed"
     page.last_a8 = np.full((60, 90, 3), 128, np.uint8)                                # grey: refused
     page._set_pick("range")
-    page.open_loupe(0.5, 0.5)
+    page._photo_clicked(0.5, 0.5)
     assert len(page._ranges) == 1
     cv = W.CurveEditor()
     cv.resize(300, 230)
@@ -434,14 +434,17 @@ def test_zoom_view_maps_clicks_to_the_whole_photo():
     v = page.viewer
     v.after = M.to_qimage(np.zeros((100, 150, 3), np.uint8))
     v.resize(600, 400)
-    r = v._fit(v.after)
+    v.zs.set_photo(1500, 1000)
+    v._sync_view()
+    r = v.photo_rect()
     centre = QPointF(r.center().x(), r.center().y())
     assert np.allclose(v._uv(centre), (0.5, 0.5), atol=0.01)
-    v.win = (0.2, 0.4, 0.4, 0.6)                                         # a 100% window of the photo
-    assert np.allclose(v._uv(centre), (0.3, 0.5), atol=0.01)
+    v.set_zoom(1.0, v._px((0.3, 0.5), r))                                # 100%, (0.3, 0.5) kept where it was
+    r = v.photo_rect()
     p = v._px((0.3, 0.5), r)
-    assert abs(p.x() - centre.x()) < 1 and abs(p.y() - centre.y()) < 1
-    assert v._long_px(r) > 4 * max(r.width(), r.height())
+    assert np.allclose(v._uv(p), (0.3, 0.5), atol=1e-6)
+    assert v._long_px(r) == 1500 and r.width() > v.width()             # 100%: photo pixels = screen pixels
+    assert page.zoom_b.text() in ("Fit", "100%")
 
 
 def test_glow_mode_from_the_light_panel(tmp_path, monkeypatch):
@@ -736,3 +739,69 @@ def test_auto_hdr_and_denoise_safeguard_controls():
     from studio.engine.presets import looks
     assert "hdr" in looks.BRIGHTNESS_KEYS and "hdr" in looks.GROUPS["light"][1]
     app.processEvents()
+
+
+def test_window_fits_small_screens_on_every_page_even_with_a_long_file_name():
+    """On Linux a maximized or full-screen window whose minimum size grows past the screen is put back to a normal
+    window: in 0.1.3 every opened photo did that (Develop needed 1,521 pixels across, and the Help page made the
+    whole window at least 1,042 high). Now: at most 1280 x 600 on every page, and opening a photo changes nothing."""
+    from PySide6.QtWidgets import QApplication
+    from studio.app import main as M
+    from studio.app import theme as T
+    app = QApplication.instance() or QApplication([])
+    app.setStyleSheet(T.QSS)
+    M.Settings.set = lambda self, k, v: self.d.__setitem__(k, v)
+    w = M.MainWindow()
+    w.resize(1280, 720)
+    w.show()
+    for i in range(len(M.NAV)):
+        w.nav.setCurrentRow(i)
+        app.processEvents()
+        assert w.minimumSizeHint().width() <= 1280 and w.minimumSizeHint().height() <= 600, M.NAV[i][1]
+    w.nav.setCurrentRow(1)
+    before = w.minimumSizeHint()
+    page = w.findChildren(M.DevelopPage)[0]
+    page.title.setText("2026-11-15_Kelly_candlelit_portrait_Laack_135mm_final_final_v3.CR3")
+    app.processEvents()
+    assert w.minimumSizeHint() == before
+    assert page.title.toolTip().endswith("v3.CR3") and page.title.text().endswith("v3.CR3")
+    w.close()
+
+
+def test_develop_bar_folds_into_a_menu_when_narrow():
+    app, M, page = _page()
+    page.resize(1000, 700)
+    page.show()
+    app.processEvents()
+    bar = page.bar
+    assert bar.folded and bar.more.isVisible() and not page.copy_b.isVisible()
+    bar._fill_more()
+    texts = [a.text() for a in bar.more_menu.actions()]
+    assert texts[0] == "Virtual copies" and any(t.startswith("Before / After") for t in texts)
+    ba = [a for a in bar.more_menu.actions() if a.text().startswith("Before / After")][0]
+    ba.trigger()
+    assert page.ba.isChecked()                                            # the menu works the real button
+    page.ba.setChecked(False)
+    page.resize(1700, 900)
+    app.processEvents()
+    assert not bar.folded and page.copy_b.isVisible() and not bar.more.isVisible()
+    assert bar.minimumWidth() < 700                                       # the bar never sets the window's width
+
+
+def test_help_page_scrolls_and_shows_every_card_whole():
+    from PySide6.QtWidgets import QApplication, QLabel
+    from studio.app import main as M
+    from studio.app import theme as T
+    app = QApplication.instance() or QApplication([])
+    app.setStyleSheet(T.QSS)
+    h = M.HelpPage()
+    h.resize(1040, 680)
+    h.show()
+    app.processEvents()
+    assert h.minimumSizeHint().height() < 200                             # it scrolls instead of growing
+    texts = [lb for lb in h.findChildren(QLabel) if lb.wordWrap() and lb.text() and lb.objectName() == "dim"]
+    assert len(texts) > 15
+    for lb in texts:                                                      # no card squeezed to a sliver
+        assert lb.height() >= lb.heightForWidth(lb.width()) - 1, lb.text()[:40]
+    import shiboken6
+    shiboken6.delete(h)                              # gone now, not at interpreter exit in an arbitrary order

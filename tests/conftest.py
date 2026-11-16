@@ -171,9 +171,24 @@ def find_sample_raws(limit=6) -> list:
     return files[:limit]
 
 
+_EXIT = {"status": 0}
+
+
 def pytest_sessionfinish(session, exitstatus):
     """Wait for the Studio's background jobs (renders, reports) before the interpreter exits."""
     import sys
     m = sys.modules.get("studio.app.main")
     if m is not None:
-        m.finish_jobs()
+        m.finish_jobs(timeout_ms=60000)             # tests wait for everything (the app itself does not)
+    _EXIT["status"] = int(exitstatus)
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_unconfigure(config):
+    """End the test process the way the Studio itself ends: without Python tearing Qt down. With the hundreds of
+    widgets the tests make, that final teardown destroyed Qt objects in an order that segfaulted after every test
+    had passed (exit code 139 with "441 passed"); the pass / fail status is kept."""
+    if "PySide6.QtWidgets" in sys.modules:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(_EXIT["status"])

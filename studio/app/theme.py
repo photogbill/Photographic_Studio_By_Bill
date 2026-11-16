@@ -82,6 +82,13 @@ QListView#grid, QListView {{ background: {BG2}; border: 1px solid {LINE}; border
 QToolButton {{ background: {PANEL2}; border: 1px solid {LINE}; border-radius: 8px; padding: 7px 14px; }}
 QToolButton:hover {{ border-color: {CYAN}; }}
 QToolButton::menu-indicator {{ image: none; width: 0; }}
+QToolButton[popupMode="1"] {{ padding-right: 26px; }}
+QToolButton::menu-button {{ border: none; border-left: 1px solid {LINE}; width: 20px;
+    border-top-right-radius: 8px; border-bottom-right-radius: 8px; }}
+QToolButton::menu-button:hover {{ background: #0c2230; }}
+QToolButton::menu-arrow {{ width: 8px; height: 8px; }}
+QFrame#topbar QPushButton, QFrame#topbar QToolButton {{ padding: 7px 9px; }}
+QFrame#topbar QToolButton[popupMode="1"] {{ padding-right: 24px; }}
 QMenu {{ background: {PANEL2}; border: 1px solid {LINE}; padding: 4px; }}
 QMenu::item {{ padding: 6px 18px; border-radius: 6px; }}
 QMenu::item:selected {{ background: #12324a; }}

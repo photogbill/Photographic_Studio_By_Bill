@@ -415,7 +415,8 @@ class LibraryPage(QWidget):
         self.progress = self._build_progress()
         root.addWidget(self.progress)
         self.hint = label("Double-click or Enter to develop.  Space: Review.  Keys: 0-5 rate, P pick, X reject, "
-                          "U clear flag.  Ratings live in the sidecar beside each raw, never in a catalogue.", "dim")
+                          "U clear flag.  Ratings live in the sidecar beside each raw, never in a catalogue.", "dim",
+                          wrap=True)                # wraps on a narrow window instead of widening it
         self.hint.setContentsMargins(18, 6, 18, 8)
         root.addWidget(self.hint)
         self.placeholder = QPixmap()
@@ -497,14 +498,14 @@ class LibraryPage(QWidget):
         for c in (self.filter, self.cam_f, self.lens_f, self.iso_f, self.date_f):
             c.setMaximumWidth(170)
             c.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-            c.setMinimumContentsLength(6)
+            c.setMinimumContentsLength(5)           # (the window fits a 1280-pixel-wide screen)
         self.unrated = QCheckBox("Not rated yet")
         self.unrated.setToolTip("Only photos with no stars and no pick / reject flag")
         self.search = QLineEdit()
         self.search.setPlaceholderText("File name...")
         self.search.setClearButtonEnabled(True)
         self.search.setMaximumWidth(130)
-        self.search.setMinimumWidth(90)
+        self.search.setMinimumWidth(80)
         self.sort = QComboBox()
         self.sort.setToolTip("Sort by")
         self.sort.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
@@ -1205,7 +1206,7 @@ class LibraryPage(QWidget):
                 msg += "\n\nSkipped: " + "; ".join(f"{os.path.basename(p)} ({why})" for p, why in rep["skipped"][:8])
             QMessageBox.information(self, "Measure lens glow", msg)
         run_bg(lambda: E.measure_glow_profile(files, lens.strip()), "glow", done,
-               lambda _, err: QMessageBox.warning(self, "Measure lens glow", f"Problem: {err}"))
+               lambda _, err: QMessageBox.warning(self, "Measure lens glow", f"Problem: {err}"), keep=True)
 
     def learn_dust(self):
         files = self.selected_files()
@@ -1230,7 +1231,7 @@ class LibraryPage(QWidget):
         QMessageBox.information(self, "Learn dust map", f"Learning from {len(files)} photos in the background "
                                 "(about 2-4 seconds each). A message appears when it is done.")
         run_bg(lambda: E.learn_dust_map(files), "dust", done,
-               lambda _, err: QMessageBox.warning(self, "Learn dust map", f"Problem: {err}"))
+               lambda _, err: QMessageBox.warning(self, "Learn dust map", f"Problem: {err}"), keep=True)
 
     # ------------------------------------------------------------------------------------ import from card
     def import_from_card(self, card=None):

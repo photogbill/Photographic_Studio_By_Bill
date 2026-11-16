@@ -694,7 +694,7 @@ class ImportDialog(QDialog):
 
         def work():
             return I.run_import(plan, on_progress=self.sig.progress.emit, cancel=cancel)
-        run_bg(work, "import", self._finished, self._failed)
+        run_bg(work, "import", self._finished, self._failed, keep=True)
 
     def _progress(self, info: dict):
         tot = max(1, info["bytes_total"])

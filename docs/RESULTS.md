@@ -768,3 +768,27 @@ v1 and v2 agree to 1.6 px on average (3.5% of the eye spacing) on the clean phot
 agree to 0.3 px in the centre and 0.1 px in the radius. Speed: v1 66 ms, v2 166 ms per face (two passes, each on the
 crop as given and an evened-out copy). Limits of this test: one real face; the damage is simulated. Shipped: v2 when
 present (decision 83).
+
+### Zoom and pan (app/zoom.py, engine render_window)
+Canon R5 raw (5463 x 8191), Clean on, Develop view 1240 x 795, after the whole-photo preview was made.
+
+Before: the wheel went from fit straight to a rendered 100% window; each drag ended with the photo jumping back
+until the next window was rendered, 2.2 s (1800 x 1100 window).
+
+After: the photo is redrawn from the preview in memory on every wheel notch or drag step, 5.5-7.7 ms a frame
+(5.1 ms at 400%); a drag shows no jump on release (screenshots mid-drag and after release identical). The sharp
+render of the part on screen (plus 8%) follows:
+
+| Zoom | Tile rendered | Time |
+|---|---|---|
+| 26% | 5151 x 3548 output px at 0.26 | 0.33 s |
+| 37% | 3888 x 2493 at 0.37 | 0.23 s |
+| 52% | 2767 x 1775 at 0.50 | 0.12 s (5.2 s before tiles up to 60% were cut from the preview's half-size frame) |
+| 74% | 1945 x 1247 at 0.74 | 2.8 s |
+| 100% | 1440 x 923 at 1.00 | 1.6-1.8 s |
+| 200% | 720 x 462 at 1.00 | 0.7 s |
+
+A 37% tile against the same part of the whole photo rendered at 37%: mean difference 0.0009 (0-1 scale). A tone
+slider while zoomed: tile 0.14 s, then the preview 0.6 s (both from their own cache; with the old single cache
+slot each render evicted the other's denoised data). Develop's minimum window width: 1,521 px before, 1,353 after
+(a long file name now shortens instead of widening the window).

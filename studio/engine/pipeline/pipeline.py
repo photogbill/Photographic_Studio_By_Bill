@@ -1,7 +1,8 @@
 """The develop pipeline (section 3): stages 1-3, 5, 7, 8, 10-16 and 21 so far.
 
 render(image, edit, region, scale)   -> display-referred linear ProPhoto float32 (HxWx3), oriented upright
-render_view(image, edit, u, v, w, h) -> a w x h window of the finished photo at 100% (the loupe)
+render_view(image, edit, u, v, w, h) -> a w x h window of the finished photo at 100%
+render_window(image, edit, window, scale) -> any window of the finished photo at any scale (Develop's zoom)
 output_size(image, edit)             -> size of the finished photo (after straighten / perspective / crop)
 
 Order: linearise, banding, raw denoise, white balance, lateral CA (raw planes), demosaic, camera matrix,
@@ -46,8 +47,10 @@ class Image:
     def __init__(self, raw: RawImage):
         self.raw = raw
         self._levels: dict = {}
-        self._cache_key = None
-        self._cache_val = None
+        # stages 1-12, kept for the last whole frame and the last region separately: Develop zoomed renders both
+        # (the part on screen, then the whole-photo preview), and one slot made each evict the other, so every
+        # tone-slider change redid the denoise on both
+        self._lin_cache: dict = {}
         self._lock = threading.Lock()
         self._jpeg = None
         self._noise = {}
@@ -216,7 +219,7 @@ class Image:
         return self._blur[algo]
 
     def drop_cache(self):
-        self._cache_key = self._cache_val = None
+        self._lin_cache = {}
 
 
 SAFEGUARD_K = 4.5           # denoise safeguard: photosites moved by more than this many sigma are restored
@@ -268,9 +271,19 @@ def linear_rgb(image: Image, edit: Edit, region=None, half_size: bool = False, c
     the part they show, see _render_plain)."""
     sharpen_on = sharpen and edit.sharpen.enabled and not half_size and edit.sharpen.amount > 0
     key = (edit.raw_key(), tuple(region) if region else None, half_size, sharpen_on)
+    slot = "whole" if region is None else "region"
     with image._lock:
-        if cache and image._cache_key == key:
-            return image._cache_val
+        hit = image._lin_cache.get(slot) if cache else None
+        if hit is not None and hit[0] == key:
+            return hit[1]
+        whole = image._lin_cache.get("whole") if (cache and region is not None and half_size) else None
+    if whole is not None and whole[0] == (edit.raw_key(), None, True, sharpen_on):
+        # a half-size region (a zoomed view up to 60%) is part of the half-size whole frame the preview already
+        # made: cut it out instead of decoding and denoising that part again (seconds with Clean on)
+        x, y, w, h = _crop_box(image, region)
+        cut = whole[1][y // 2:y // 2 + h // 2, x // 2:x // 2 + w // 2]
+        if cut.shape[:2] == (h // 2, w // 2):
+            return np.ascontiguousarray(cut)
     raw = image.raw
     lv = image.levels(edit.use_optical_black)
     x, y, w, h = _crop_box(image, region)
@@ -374,7 +387,7 @@ def linear_rgb(image: Image, edit: Edit, region=None, half_size: bool = False, c
     rgb = np.ascontiguousarray(rgb)
     if cache:
         with image._lock:
-            image._cache_key, image._cache_val = key, rgb
+            image._lin_cache[slot] = (key, rgb)
     return rgb
 
 
@@ -983,6 +996,23 @@ def render_view(image: Image, edit: Edit | None, u: float, v: float, w: int = 72
     if warp.warped:
         return _render_warp(image, edit, warp, (x, y, w, h), 1.0)
     return _render_plain(image, edit, _window_to_s(image, warp, (x, y, w, h)), 1.0)
+
+
+def render_window(image: Image, edit: Edit | None, window, scale: float = 1.0) -> np.ndarray:
+    """A window of the finished photo, (x, y, w, h) in full-size output pixels, at ``scale`` (<= 1): the sharp
+    part of Develop's zoomed view. The same pixels as that part of render(scale=scale); at scale 1 the same as
+    render_view. ``scale`` <= 0.5 takes the fast half-size path, as previews do."""
+    edit = edit or Edit()
+    warp = make_warp(image, edit)
+    ow, oh = warp.output_size
+    x, y, w, h = (int(round(v)) for v in window)
+    x, y = min(max(x, 0), ow - 1), min(max(y, 0), oh - 1)
+    w, h = max(1, min(w, ow - x)), max(1, min(h, oh - y))
+    scale = float(min(max(scale, 0.02), 1.0))
+    with slog.stage("render.window", log, window=f"{w}x{h}+{x}+{y}", scale=round(scale, 3)):
+        if warp.warped:
+            return _render_warp(image, edit, warp, (x, y, w, h), scale)
+        return _render_plain(image, edit, _window_to_s(image, warp, (x, y, w, h)), scale)
 
 
 def _window_to_s(image: Image, warp, window):

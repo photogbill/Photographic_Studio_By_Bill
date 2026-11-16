@@ -211,16 +211,26 @@ def restart_into_update(root: Path | None = None) -> bool:
         if not sh.exists():
             return False
         subprocess.Popen(["bash", str(sh)], cwd=str(root), start_new_session=True, close_fds=True,  # noqa: S603,S607
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         env=_restart_env())
         log.info("restarting into the update (start-studio.sh)")
         return True
     bat = root / "Start Studio.bat"
     if not bat.exists():
         return False
     flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    subprocess.Popen(["cmd", "/c", str(bat)], cwd=str(root), creationflags=flags, close_fds=True)   # noqa: S603
+    subprocess.Popen(["cmd", "/c", str(bat)], cwd=str(root), creationflags=flags, close_fds=True,   # noqa: S603
+                     env=_restart_env())
     log.info("restarting into the update")
     return True
+
+
+def _restart_env() -> dict:
+    """The new Studio waits for this one to finish closing (it holds the one-window lock until then)."""
+    import os
+    env = dict(os.environ)
+    env["STUDIO_AFTER_UPDATE"] = "1"
+    return env
 
 
 def run_msi(msi: Path, passive: bool = True) -> bool:
