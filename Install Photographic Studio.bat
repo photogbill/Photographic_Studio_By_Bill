@@ -27,9 +27,22 @@ if exist "%HERE%\studio\__init__.py" (
   set "DEST=%HERE%"
   goto :confirm
 )
-rem  Otherwise: a folder on D: if the PC has one (keeps C: free), else beside this file.
-set "DEST=%HERE%\Photographic Studio"
-if exist "D:\" set "DEST=D:\Photographic Studio"
+rem  A new install: YOU pick where the Studio goes (Bill, 2026-11-16). The folder
+rem  window opens straight away, starting at a suggested place: D: when it is a real
+rem  internal drive with room (keeps C: free), else the folder this file is in. D: is
+rem  often something else: a memory card in the reader, a USB stick, a DVD, or a small
+rem  recovery partition that is nearly full, so it is only suggested when it is none of those.
+set "SUGGEST=%HERE%"
+set "DOK="
+for /f "usebackq delims=" %%R in (`powershell -NoProfile -Command "try { $d = New-Object System.IO.DriveInfo 'D:'; if ($d.IsReady -and $d.DriveType -eq 'Fixed' -and $d.AvailableFreeSpace -gt 5GB) { 'yes' } } catch { }"`) do set "DOK=%%R"
+if /i "%DOK%"=="yes" set "SUGGEST=D:"
+set "SUGGESTSEL=%SUGGEST%\"
+set "DEST=%SUGGEST%\Photographic Studio"
+echo  Where should Photographic Studio go? A window opens now: pick a drive or a
+echo  folder, and a folder called "Photographic Studio" is made inside it.
+echo  (No window? Look behind this one. Cancel in it to see the suggested folder.)
+echo.
+goto :browse
 
 :confirm
 echo  Install folder:  %DEST%
@@ -50,11 +63,13 @@ goto :begin
 
 :browse
 set "PICK="
-for /f "usebackq delims=" %%P in (`powershell -NoProfile -STA -Command "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = 'Where should Photographic Studio go? A folder called Photographic Studio is made inside the one you pick.'; $d.ShowNewFolderButton = $true; if ($d.ShowDialog() -eq 'OK') { $d.SelectedPath }"`) do set "PICK=%%P"
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -STA -Command "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = 'Where should Photographic Studio go? A folder called Photographic Studio is made inside the one you pick.'; $d.ShowNewFolderButton = $true; if ($env:SUGGESTSEL) { $d.SelectedPath = $env:SUGGESTSEL }; $o = New-Object System.Windows.Forms.Form; $o.TopMost = $true; if ($d.ShowDialog($o) -eq 'OK') { $d.SelectedPath }"`) do set "PICK=%%P"
 echo.
 if not defined PICK goto :confirm
 if "%PICK:~-1%"=="\" set "PICK=%PICK:~0,-1%"
 set "DEST=%PICK%\Photographic Studio"
+rem  A folder that is already called Photographic Studio, or already holds the Studio, is used as it is.
+for %%I in ("%PICK%") do if /i "%%~nxI"=="Photographic Studio" set "DEST=%PICK%"
 if exist "%PICK%\studio\__init__.py" set "DEST=%PICK%"
 goto :confirm
 
@@ -67,6 +82,21 @@ echo  git (push.bat / git pull) instead, or pick another folder (press B).
 echo.
 goto :confirm
 :begin_ok
+rem  Room for it: about 1.5 GB while installing (the Studio, its models, Python and
+rem  the packages). Checked before anything is downloaded. An update of a Studio
+rem  that is already here needs far less, so it is not held up by this.
+if exist "%DEST%\studio\__init__.py" goto :room_ok
+set "ROOM="
+for /f "usebackq delims=" %%R in (`powershell -NoProfile -Command "try { $d = New-Object System.IO.DriveInfo ([System.IO.Path]::GetPathRoot($env:DEST)); if ($d.IsReady -and $d.AvailableFreeSpace -lt 2GB) { 'low' } } catch { }"`) do set "ROOM=%%R"
+if /i not "%ROOM%"=="low" goto :room_ok
+echo.
+echo  PROBLEM: the drive for
+echo     %DEST%
+echo  has less than 2 GB free, and the Studio needs about 1.5 GB to install.
+echo  Pick a folder on another drive (press B), or free some space first.
+echo.
+goto :confirm
+:room_ok
 if not exist "%DEST%" mkdir "%DEST%" 2>nul
 if not exist "%DEST%\_installer" mkdir "%DEST%\_installer" 2>nul
 if exist "%DEST%\_installer\" goto :handover

@@ -41,9 +41,10 @@ log = slog.get("engine.retouch")
 LUMA = np.array([0.2880, 0.7119, 0.0001], np.float32)
 EPS = 2e-3                     # log offset (scene-linear, 1 = clip): about 9 stops below white
 MAX_UNKNOWNS = 160_000         # membrane solved exactly up to this many pixels, on a reduced grid above
-KINDS = ("heal", "clone", "redeye", "pupil")
-DEFAULT_FEATHER = {"heal": 0.25, "clone": 0.5, "redeye": 0.3, "pupil": 0.25}
-NO_SOURCE = ("redeye", "pupil")                # spots that work on the destination alone
+KINDS = ("heal", "clone", "redeye", "pupil", "fill")
+DEFAULT_FEATHER = {"heal": 0.25, "clone": 0.5, "redeye": 0.3, "pupil": 0.25, "fill": 0.15}
+NO_SOURCE = ("redeye", "pupil", "fill")        # spots that work on the destination alone
+FILL_RING = 2.0                                # a fill spot reads this many radii of photo around itself
 
 
 def active(spots) -> list:
@@ -113,6 +114,12 @@ class Shape:
     def source_inside_frame(self, ring: float = 4.0) -> bool:
         x0, y0, x1, y1 = self.box(ring)
         return x0 + self.ox >= 0 and y0 + self.oy >= 0 and x1 + self.ox <= self.sw and y1 + self.oy <= self.sh
+
+
+def fill_seed(spot: dict) -> int:
+    """A fill spot's random seed: fixed by where it is, so the same spot always fills the same way."""
+    import zlib
+    return zlib.crc32(repr([[round(float(v), 6) for v in p] for p in spot.get("pts", [])]).encode()) & 0x7FFFFFFF
 
 
 def clamp_source(spot: dict, sw: int, sh: int) -> list:
@@ -250,7 +257,8 @@ def patch(spot: dict, fetch, sw: int, sh: int, step: int = 1, parity=(0, 0)):
     Returns (H, alpha, gx, gy): the retouched values and their blend weight on the grid starting at S (gx, gy), or
     None when the spot is off the frame."""
     shp = Shape(spot, sw, sh, step)
-    x0, y0, x1, y1 = shp.box(4.0 * step)
+    ring = max(4.0 * step, FILL_RING * shp.R) if shp.kind == "fill" else 4.0 * step
+    x0, y0, x1, y1 = shp.box(ring)
     x0 -= (x0 - parity[0]) % step
     y0 -= (y0 - parity[1]) % step
     x1 += (-(x1 - x0)) % step
@@ -291,6 +299,10 @@ def patch(spot: dict, fetch, sw: int, sh: int, step: int = 1, parity=(0, 0)):
         H = heal(D, S, inside, step)
     elif shp.kind == "clone":
         H = S.astype(np.float32)
+    elif shp.kind == "fill":
+        from . import fill as fl
+        H, rep = fl.fill(D, inside, method=str(spot.get("method", "auto")), seed=fill_seed(spot))
+        log.info("retouch fill: %s (%d px at step %d)", rep["text"], int(inside.sum()), step)
     elif shp.kind == "pupil":
         from .eyes import pupil_fix
         d = shp.distance(X, Y) / shp.R

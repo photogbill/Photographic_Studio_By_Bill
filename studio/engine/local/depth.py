@@ -63,15 +63,15 @@ def model():
 def predict(srgb01: np.ndarray) -> tuple[np.ndarray, float]:
     """Relative depth (near = 1, far = 0) of a display-encoded sRGB image (h, w, 3, 0..1), at its own size;
     (depth, milliseconds)."""
-    import cv2
+    from ..imgops import resize_cubic, resize_linear
     h, w = srgb01.shape[:2]
-    img = cv2.resize(np.ascontiguousarray(srgb01, np.float32), (SIZE, SIZE), interpolation=cv2.INTER_CUBIC)
+    img = resize_cubic(srgb01, SIZE, SIZE)
     x = ((img - np.array([0.485, 0.456, 0.406], np.float32)) / np.array([0.229, 0.224, 0.225], np.float32))
     x = np.ascontiguousarray(x.transpose(2, 0, 1)[None], np.float32)
     t = time.perf_counter()
     d = model()(x)["predicted_depth"][0]
     ms = (time.perf_counter() - t) * 1000.0
-    d = cv2.resize(d.astype(np.float32), (w, h), interpolation=cv2.INTER_LINEAR)
+    d = resize_linear(d, w, h)
     lo, hi = np.percentile(d, [1.0, 99.0])
     return np.clip((d - lo) / max(hi - lo, 1e-6), 0.0, 1.0).astype(np.float32), ms
 

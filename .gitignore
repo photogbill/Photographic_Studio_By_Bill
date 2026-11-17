@@ -121,6 +121,7 @@
 /calibration/
 /private/
 /logs/
+/error_reports/
 /reports/
 /outputs/
 /build/
@@ -160,3 +161,7 @@ node_modules/
 #    and are never shared. (/Photos/ above is the default Photos folder beside the app, build plan section 24.)
 *.psb.json
 *.PSB.JSON
+
+# 7. The test raws copied from Bill's drives (test_raws/README.txt). Photos, so never shared: the whole folder
+#    stays out, notes included. Kept last so nothing above can let a file back in.
+/test_raws/

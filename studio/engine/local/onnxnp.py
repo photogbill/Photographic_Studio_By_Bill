@@ -19,7 +19,11 @@ OPS = ("Add", "AveragePool", "BatchNormalization", "Concat", "Conv", "DepthToSpa
        "ConvTranspose", "Resize", "MaxPool", "ReduceMean", "Gather", "Slice", "Squeeze", "Unsqueeze", "Expand",
        "Tile", "Cast", "Where", "Equal", "Greater", "Less", "Not", "Neg", "Sin", "Cos", "Exp", "Clip", "Mod",
        "ReduceSum", "ReduceMax", "Abs", "Floor", "Max", "Min", "ScatterND", "OneHot", "ConstantOfShape", "Range",
-       "Shape")
+       "Shape",
+       # LaMa (Fourier convolutions: the DFT layer, opset 17; dilated convolutions in some exports)
+       "DFT", "LeakyRelu", "Atan", "Atan2", "Reciprocal",
+       # LaMa as Carve exported it (Carve/LaMa-ONNX lama_fp32.onnx): the Fourier transform written as products
+       "Einsum")
 
 
 class GraphError(ValueError):
@@ -95,9 +99,12 @@ def _conv(x, w, b, a):
     p = a.get("pads", [0, 0, 0, 0])
     d = a.get("dilations", [1, 1])
     g = a.get("group", 1)
-    if d != [1, 1]:
-        raise GraphError("dilated convolution is not supported")
     n, c, h, wd = x.shape
+    co, ci, kh0, kw0 = w.shape
+    if d != [1, 1]:                                      # dilated: the kernel spread out with zeros between taps
+        wz = np.zeros((co, ci, (kh0 - 1) * d[0] + 1, (kw0 - 1) * d[1] + 1), w.dtype)
+        wz[:, :, ::d[0], ::d[1]] = w
+        w = wz
     co, ci, kh, kw = w.shape
     xp = np.pad(x, ((0, 0), (0, 0), (p[0], p[2]), (p[1], p[3])))
     oh = (h + p[0] + p[2] - kh) // s[0] + 1
@@ -474,4 +481,50 @@ def _run2(op, x, a):
         return np.arange(np.asarray(x[0]).ravel()[0], np.asarray(x[1]).ravel()[0], np.asarray(x[2]).ravel()[0])
     if op == "Shape":
         return np.asarray(np.shape(x[0]), np.int64)
+    if op == "DFT":
+        return _dft(x, a)
+    if op == "LeakyRelu":
+        al = a.get("alpha", 0.01)
+        return np.where(x[0] > 0, x[0], al * x[0]).astype(np.float32)
+    if op == "Atan":
+        return np.arctan(x[0]).astype(np.float32)
+    if op == "Atan2":
+        return np.arctan2(x[0], x[1]).astype(np.float32)
+    if op == "Reciprocal":
+        return (1.0 / x[0]).astype(np.float32)
+    if op == "Einsum":
+        eq = a.get("equation", "")
+        eq = eq.decode("utf-8") if isinstance(eq, bytes) else str(eq)
+        return np.einsum(eq.replace(" ", ""), *[np.asarray(v) for v in x], optimize=True).astype(np.float32)
     return None
+
+
+def _dft(x, a):
+    """ONNX DFT (opset 17 / 20): the last dimension holds 1 (real) or 2 (real, imaginary) values. ``axis`` is an
+    attribute (17) or the third input (20); ``dft_length`` the second input; ``inverse`` and ``onesided`` as the spec:
+    a one-sided forward transform keeps n // 2 + 1 bins, a one-sided inverse rebuilds a real signal from them.
+    The inverse is scaled by 1 / n, like numpy.fft.ifft."""
+    sig = np.asarray(x[0])
+    n_in = None
+    if len(x) > 1 and x[1] is not None and np.asarray(x[1]).size:
+        n_in = int(np.asarray(x[1]).ravel()[0])
+    axis = a.get("axis", 1)
+    if len(x) > 2 and x[2] is not None and np.asarray(x[2]).size:
+        axis = int(np.asarray(x[2]).ravel()[0])
+    axis = axis if axis >= 0 else sig.ndim + axis       # (the complex dimension is the last one)
+    inverse = bool(a.get("inverse", 0))
+    onesided = bool(a.get("onesided", 0))
+    z = sig[..., 0] + (1j * sig[..., 1] if sig.shape[-1] == 2 else 0)
+    if not inverse:
+        if onesided:
+            out = np.fft.rfft(np.real(z) if sig.shape[-1] == 1 else z, n=n_in, axis=axis) if sig.shape[-1] == 1 \
+                else np.fft.fft(z, n=n_in, axis=axis)[(slice(None),) * axis + (slice(0, (n_in or z.shape[axis]) // 2 + 1),)]
+        else:
+            out = np.fft.fft(z, n=n_in, axis=axis)
+    else:
+        if onesided:
+            n = n_in or 2 * (z.shape[axis] - 1)
+            out = np.fft.irfft(z, n=n, axis=axis).astype(np.complex64)
+        else:
+            out = np.fft.ifft(z, n=n_in, axis=axis)
+    return np.stack([out.real, out.imag], -1).astype(np.float32)

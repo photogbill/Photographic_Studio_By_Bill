@@ -5,11 +5,14 @@ files without importing the whole Develop workspace.
 """
 from __future__ import annotations
 
+import functools
 import io
 import json
+import os
+import weakref
 
 import numpy as np
-from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
+from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal
 from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton,
                                QVBoxLayout, QWidget)
@@ -23,13 +26,52 @@ _LIVE: set = set()
 _SHUTTING_DOWN = False                               # the Studio is closing: no new background work
 
 
+# ============================================================================================ error reports
+class _Bus(QObject):
+    """Announcements from anywhere (any thread) to the window."""
+    report_saved = Signal(str)                       # an error report file was written: its path
+
+
+BUS = _Bus()
+
+
+def report_problem(what: str, exc: BaseException | None = None) -> str | None:
+    """Call inside ``except`` for a failure that should not happen: writes the dated report file into
+    error_reports/ (log.save_error_report) and tells the window, which shows where it is. Expected problems
+    (log.expected_problem: an unreadable raw, a read-only card, no internet) are left to the message the person
+    already gets. Returns the report's path, or None."""
+    if exc is not None and slog.expected_problem(exc):
+        return None
+    if _SHUTTING_DOWN:
+        return None
+    path = slog.save_error_report(what)
+    if path is None:
+        return None
+    try:
+        BUS.report_saved.emit(str(path))
+    except RuntimeError:                             # the window is gone
+        pass
+    return str(path)
+
+
 # ============================================================================================ background jobs
 class _Sig(QObject):
     done = Signal(object, object)
     failed = Signal(object, str)
 
 
+def _forget(ref, *_):
+    """A job's result has been handed over: let the job go (see Job)."""
+    job = ref()
+    if job is not None:
+        _LIVE.discard(job)
+
+
 class Job(QRunnable):
+    """One piece of background work. ``_LIVE`` keeps the job (and the object its signals come from) alive until
+    the result has been delivered on the window's thread; then it is forgotten. The work function is dropped as
+    soon as it has run: it usually holds the opened photo (hundreds of MB), which must not outlive the photo."""
+
     def __init__(self, fn, token=None, on_done=None, on_fail=None, keep=False):
         super().__init__()
         self.fn, self.token, self.sig = fn, token, _Sig()
@@ -40,24 +82,31 @@ class Job(QRunnable):
             self.sig.done.connect(on_done)
         if on_fail:
             self.sig.failed.connect(on_fail)
+        # connected last, so it runs after on_done / on_fail, on the same (window) thread. It holds only a weak
+        # reference: a strong one would tie the job to its own signal and it would never be freed.
+        release = functools.partial(_forget, weakref.ref(self))
+        self.sig.done.connect(release)
+        self.sig.failed.connect(release)
         _LIVE.add(self)
 
     def run(self):
         self.running = True
+        fn, self.fn = self.fn, None
         try:
-            r = self.fn()
+            r = fn()
+            del fn
             self._emit(self.sig.done, self.token, r)
+            del r
         except Exception as e:                       # every exception is logged with its traceback (rule 0.3.5)
             if not _SHUTTING_DOWN:
                 slog.log_exception("background job failed", log)
+                report_problem(f"Background work failed ({str(self.token)[:160]})", e)
             self._emit(self.sig.failed, self.token, str(e))
         finally:
             self.running = False
             self.finished = True
-            if _SHUTTING_DOWN:
+            if _SHUTTING_DOWN:                       # nobody is left to hand the result to
                 _LIVE.discard(self)
-            else:
-                QTimer.singleShot(0, lambda: _LIVE.discard(self))
 
     @staticmethod
     def _emit(signal, *args):
@@ -134,10 +183,14 @@ class Settings:
 
     def set(self, k, v):
         self.d[k] = v
+        # written whole under another name, then swapped in: a crash or a full disk mid-write cannot leave half a
+        # file (which would read as "no settings" on the next start: Photos folder, update choice, presets gone)
+        tmp = self.path.with_name(self.path.name + ".partial")
         try:
-            self.path.write_text(json.dumps(self.d, indent=2), encoding="utf-8")
-        except OSError:
-            pass
+            tmp.write_text(json.dumps(self.d, indent=2), encoding="utf-8")
+            os.replace(tmp, self.path)
+        except (OSError, TypeError, ValueError) as err:
+            log.warning("settings not saved (%s): %s", k, err)
 
 
 # ============================================================================================ small widgets

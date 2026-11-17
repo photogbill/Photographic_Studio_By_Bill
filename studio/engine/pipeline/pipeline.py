@@ -52,6 +52,15 @@ class Image:
         # tone-slider change redid the denoise on both
         self._lin_cache: dict = {}
         self._lock = threading.Lock()
+        # One measurement of each kind at a time. Opening a photo starts the first render and the noise, lateral-CA
+        # and blur measurements together; without these each thread that needed a measurement made its own (the CA
+        # estimate ran twice on every photo opened). A second thread now waits and uses the first one's result.
+        # Order (never the other way round, so they cannot deadlock): blur -> noise / CA / rows -> levels.
+        self._levels_lock = threading.RLock()
+        self._noise_lock = threading.RLock()
+        self._rows_lock = threading.RLock()
+        self._ca_lock = threading.RLock()
+        self._blur_lock = threading.RLock()
         self._jpeg = None
         self._noise = {}
         self._rows = None
@@ -147,8 +156,10 @@ class Image:
 
     def levels(self, use_optical_black: bool = True) -> lin.Levels:
         if use_optical_black not in self._levels:
-            with slog.stage("linearize.levels", log):
-                self._levels[use_optical_black] = lin.levels(self.raw, use_optical_black)
+            with self._levels_lock:
+                if use_optical_black not in self._levels:
+                    with slog.stage("linearize.levels", log):
+                        self._levels[use_optical_black] = lin.levels(self.raw, use_optical_black)
         return self._levels[use_optical_black]
 
     @property
@@ -165,6 +176,12 @@ class Image:
     def noise_model(self, use_optical_black: bool = True):
         """Noise model for this frame: estimated from the image itself (amber tier) with the read noise
         pinned to the masked border. Calibrated profiles (cyan) will take precedence once they exist."""
+        if use_optical_black in self._noise:
+            return self._noise[use_optical_black]
+        with self._noise_lock:
+            return self._noise_model(use_optical_black)
+
+    def _noise_model(self, use_optical_black: bool):
         if use_optical_black not in self._noise and getattr(self.raw, "is_scan", False):
             self._noise[use_optical_black] = _scan_noise_model(self)
         if use_optical_black not in self._noise:
@@ -193,12 +210,20 @@ class Image:
         if getattr(self.raw, "is_scan", False):
             return None
         if self._rows is None:
-            from ..raw.banding import measure_rows
-            self._rows = measure_rows(self.raw, self.levels(use_optical_black)) or False
+            with self._rows_lock:
+                if self._rows is None:
+                    from ..raw.banding import measure_rows
+                    self._rows = measure_rows(self.raw, self.levels(use_optical_black)) or False
         return self._rows or None
 
     def lateral_ca(self):
         """Lateral CA measured once on the whole frame (as-shot white balance), then reused for every region."""
+        if self._ca is not None:
+            return self._ca
+        with self._ca_lock:
+            return self._lateral_ca()
+
+    def _lateral_ca(self):
         if self._ca is None and getattr(self.raw, "is_scan", False):
             from ..lens.auto import LateralCA
             self._ca = LateralCA(red=(0.0, 0.0), blue=(0.0, 0.0), tiles=0, confidence="none", max_shift_px=0.0)
@@ -224,10 +249,12 @@ class Image:
             from ..detail import sharpen as shp
             return shp.DEFAULT_BLUR                    # a scan's blur is the scanner's; no mosaic to measure
         if algo not in self._blur:
-            with slog.stage("sharpen.measure_blur", log, demosaic=algo):
-                self._blur[algo] = _measure_capture_blur(self, algo)
-            b = self._blur[algo]
-            log.info("capture blur %.2f px (%s, %d edges)", b.sigma, b.confidence, b.edges)
+            with self._blur_lock:
+                if algo not in self._blur:
+                    with slog.stage("sharpen.measure_blur", log, demosaic=algo):
+                        b = _measure_capture_blur(self, algo)
+                    log.info("capture blur %.2f px (%s, %d edges)", b.sigma, b.confidence, b.edges)
+                    self._blur[algo] = b
         return self._blur[algo]
 
     def drop_cache(self):
@@ -375,20 +402,46 @@ def linear_rgb(image: Image, edit: Edit, region=None, half_size: bool = False, c
             with slog.stage("lens.lateral_ca", log, corner_px=round(ca.max_shift_px, 2)):
                 mos = correct_lateral_ca(mos, pat, ca, full_shape=(raw.height, raw.width), origin=(y0, x0))
     algo = "half" if half_size else edit.demosaic
-    if getattr(edit, "green_eq", False):
-        with slog.stage("green_equilibrate", log):
-            mos = dm.green_equilibrate(mos, pat)
-    with slog.stage("demosaic", log, algorithm=algo, mp=round(mos.size / 1e6, 1)):
-        rgb = dm.demosaic(mos, pat, algo)
+    ir = edit.infrared if (edit.infrared or {}).get("on") else None
+    if ir is not None and ir.get("mono_raw"):      # 850 nm and deeper: every photosite a luminance sample
+        from ..color import infrared as irm
+        gains = _mono_gains(image, edit, mult)
+        gy, gx = (y0 - 0) // 2, (x0 - 0) // 2
+        g = gains[:, :, gy:gy + mos.shape[0] // 2, gx:gx + mos.shape[1] // 2]
+        ab = None
+        if not half_size:                          # one noise model for every region (hot-pixel test)
+            try:
+                nm = image.noise_model(edit.use_optical_black)
+                mm = float(np.mean(mult))
+                ab = (float(np.mean(nm.a)) * mm, float(np.mean(nm.b)) * mm * mm)
+            except Exception:                      # noqa: BLE001 - the array's own estimate is the fallback
+                slog.log_exception("infrared: noise model unavailable for the mono raw", log)
+                slog.save_error_report("Infrared mono raw: measuring the noise model")
+        with slog.stage("infrared.mono_raw", log, half=half_size, mp=round(mos.size / 1e6, 1)):
+            rgb = irm.mono_mosaic(mos, pat, half_size, g, ab)
+    else:
+        if getattr(edit, "green_eq", False):
+            with slog.stage("green_equilibrate", log):
+                mos = dm.green_equilibrate(mos, pat)
+        with slog.stage("demosaic", log, algorithm=algo, mp=round(mos.size / 1e6, 1)):
+            rgb = dm.demosaic(mos, pat, algo)
     del mos
     prof = None
-    if edit.profile:
+    if ir is not None:                             # infrared: its own matrix step (color/infrared.py)
+        from ..color import infrared as irm
+        if edit.profile:
+            log.info("infrared: camera profile %r not used (made for visible light)", edit.profile)
+        with slog.stage("camera_matrix.infrared", log, profile=ir.get("profile"), bw=(ir.get("bw") or {}).get("on")):
+            irm.apply_camera(rgb, irm.normalise(ir), raw, strips=_strips)
+    elif edit.profile:
         from ..color import dcp
         try:
             prof = dcp.load(edit.profile)
         except (OSError, ValueError) as err:
             log.warning("camera profile %r unusable (%s); using the camera matrix", edit.profile, err)
-    if prof is not None:
+    if ir is not None:
+        pass
+    elif prof is not None:
         from ..color import dcp
         M, g = dcp.camera_to_working(prof, mult)
         with slog.stage("camera_matrix", log, profile=prof.name, weight=round(g, 3)):
@@ -407,6 +460,22 @@ def linear_rgb(image: Image, edit: Edit, region=None, half_size: bool = False, c
             g = fo.gain_map(edit.lens.vignette_model, edit.lens.vignette_amount, rgb.shape[0], rgb.shape[1],
                             (x0 - cx0, y0 - cy0), (cw0, ch0), step)
             rgb *= g[..., None]
+    if ir is not None and (ir.get("hotspot") or {}).get("model") and float(ir["hotspot"].get("amount", 0)) > 0:
+        from ..lens import hotspot as hs           # the infrared hot spot (lens/hotspot.py), like the falloff
+        cx0, cy0, cw0, ch0 = raw.crop
+        step = 2.0 if half_size else 1.0
+        with slog.stage("infrared.hotspot", log):
+            g = hs.gain_map(ir["hotspot"]["model"], float(ir["hotspot"]["amount"]), rgb.shape[0], rgb.shape[1],
+                            (x0 - cx0, y0 - cy0), (cw0, ch0), step)
+            rgb *= g[..., None]
+    fl = edit.flare or {}
+    if fl.get("on") and fl.get("ghosts") and float(fl.get("amount", 0)) > 0:
+        from ..local import flare as flm           # lens-flare ghosts: the smooth added light subtracted
+        F, kf = flare_map(image, edit)
+        cx0, cy0, cw0, ch0 = raw.crop
+        with slog.stage("flare.remove", log, ghosts=sum(1 for g in fl["ghosts"] if g.get("on", True))):
+            rgb = flm.apply(rgb, F, kf, float(fl["amount"]), origin=(x0 - cx0, y0 - cy0),
+                            step=2.0 if half_size else 1.0, full_shape=(ch0, cw0))
     if edit.lens.defringe and edit.lens.defringe_strength > 0:
         from ..lens.auto import defringe
         with slog.stage("lens.defringe", log):        # before the crop, so region renders match the full frame
@@ -449,6 +518,67 @@ def linear_rgb(image: Image, edit: Edit, region=None, half_size: bool = False, c
         with image._lock:
             image._lin_cache[slot] = (key, rgb)
     return rgb
+
+
+def _without_flare(edit: Edit) -> Edit:
+    e = Edit.from_dict(edit.to_dict())
+    e.flare = None
+    e.sharpen.enabled = False
+    return e
+
+
+def flare_map(image: Image, edit: Edit):
+    """The flare ghosts' added light for the whole frame (local/flare.py), measured once per raw settings and set
+    of ghosts on a half-size render without flare removal, so a region render subtracts exactly what the whole
+    frame does. Returns (field at proxy size, proxy factor relative to the full camera-crop frame)."""
+    import json as _json
+    base = _without_flare(edit)
+    key = ("flare", base.raw_key(), _json.dumps((edit.flare or {}).get("ghosts"), sort_keys=True))
+    with image._lock:
+        if key in image._memo:
+            return image._memo[key]
+    from ..local import flare as flm
+    rgb = linear_rgb(image, base, None, half_size=True, cache=False)
+    with slog.stage("flare.field", log):
+        F, k, clipped = flm.flare_field(rgb, (edit.flare or {}).get("ghosts") or [])
+    r = (F, k * 2)
+    with image._lock:
+        image._memo = {kk: v for kk, v in image._memo.items() if kk[0] != "flare"}
+        image._memo[key] = r
+        image.flare_report = flm.report_clipped(clipped)
+    return r
+
+
+def find_flare(image: Image, edit: Edit) -> dict:
+    """Find flare ghosts in the photo (local/flare.py): on a half-size render without flare removal."""
+    from ..local import flare as flm
+    rgb = linear_rgb(image, _without_flare(edit), None, half_size=True, cache=False)
+    with slog.stage("flare.find", log):
+        return flm.find_ghosts(rgb)
+
+
+def _mono_gains(image: Image, edit: Edit, mult) -> np.ndarray:
+    """The infrared mono raw's per-CFA-position gains for the whole sensor, measured once per white balance, so a
+    region render divides by exactly what the whole frame does (color/infrared.py: mono_gain_maps)."""
+    key = ("irgain", tuple(np.round(np.asarray(mult, float), 6)), edit.use_optical_black)
+    with image._lock:
+        if key in image._memo:
+            return image._memo[key]
+    from ..color import infrared as irm
+    raw = image.raw
+    lv = image.levels(edit.use_optical_black)
+    with slog.stage("infrared.mono_gains", log):
+        mos = lin.normalise(raw, lv, (0, 0, raw.width // 2 * 2, raw.height // 2 * 2))
+        pat = raw.cfa_rgb
+        for i in (0, 1):
+            for j in (0, 1):
+                mos[i::2, j::2] *= np.float32(mult[pat[i, j]])
+        g = irm.mono_gain_maps(mos, pat)
+        del mos
+    with image._lock:
+        image._memo = {k: v for k, v in image._memo.items() if k[0] != "irgain"}
+        image._memo[key] = g
+    return g
 
 
 # ------------------------------------------------------------------------------------------ scans (io/scanfile.py)
@@ -656,7 +786,7 @@ def apply_colourize(image: Image, edit: Edit, rgb: np.ndarray, ox: int, oy: int,
     st = cz.settings(edit.colourize)
     _, _, cw, ch = image.raw.crop
     blk, k_map = None, max(cw, ch) / 256.0
-    if st["on"]:
+    if st["on"] and cz.available():                  # without the model, hints still colour their parts
         ab, cw, ch, _ = colour_map(image, edit)
         blk = np.stack([_prior_block((ab[..., c], cw, ch), ox, oy, rgb.shape[0], rgb.shape[1], step)
                         for c in range(2)], axis=-1)
@@ -906,6 +1036,38 @@ def depth_shape(image: Image, edit: Edit, lo: float = 0.0, hi: float = 0.4, soft
     D = depth_map(image, edit)[0]
     return {"type": "depth", "op": "add", "w": int(D.shape[1]), "h": int(D.shape[0]),
             "data": mk.encode_bitmap(np.round(D * 255).astype(np.uint8)), "lo": lo, "hi": hi, "soft": soft}
+
+
+CHANNEL_SOURCES = {"r": "Red", "g": "Green", "b": "Blue", "r-b": "Red minus blue", "r/b": "Red / blue",
+                   "g/r": "Green / red", "b/g": "Blue / green"}
+
+
+def channel_shape(image: Image, edit: Edit, source: str = "r/b", lo: float = 0.5, hi: float = 1.0,
+                  soft: float = 0.1) -> dict:
+    """A Channel mask shape (masks.py, "channel"): one white-balanced raw camera channel, or a difference or ratio of
+    two (before any infrared mix), as a bitmap of the S frame scaled 0..1 between its 1st and 99th percentile. In a
+    590-720 nm frame the red and blue photosites see different mixes of visible and infrared light, so their ratio
+    separates infrared-bright foliage from sky and skin (measured from the raw: cyan)."""
+    from ..color.infrared import camera_half_wb
+    from ..local import masks as mk
+    cam = camera_half_wb(image, edit).astype(np.float32)
+    k = max(1, int(math.ceil(max(cam.shape[:2]) / 1024.0)))
+    if k > 1:
+        h, w = cam.shape[0] // k * k, cam.shape[1] // k * k
+        cam = cam[:h, :w].reshape(h // k, k, w // k, k, 3).mean(axis=(1, 3))
+    R, G, B = cam[..., 0], cam[..., 1], cam[..., 2]
+    eps = np.float32(1e-4)
+    q = {"r": R, "g": G, "b": B, "r-b": R - B, "r/b": np.log2((R + eps) / (B + eps)),
+         "g/r": np.log2((G + eps) / (R + eps)), "b/g": np.log2((B + eps) / (G + eps))}.get(source)
+    if q is None:
+        raise ValueError(f"unknown channel source {source!r}")
+    if source in ("r", "g", "b"):
+        q = np.power(np.maximum(q, 0.0), 1 / 2.2)
+    a, b = np.percentile(q, 1), np.percentile(q, 99)
+    v = np.clip((q - a) / max(float(b - a), 1e-6), 0.0, 1.0)
+    return {"type": "channel", "op": "add", "source": source, "w": int(v.shape[1]), "h": int(v.shape[0]),
+            "data": mk.encode_bitmap(np.round(v * 255).astype(np.uint8)), "vmin": float(a), "vmax": float(b),
+            "lo": lo, "hi": hi, "soft": soft}
 
 
 def depth_view(image: Image, edit: Edit, scale: float = 0.25) -> np.ndarray:
@@ -1211,6 +1373,8 @@ def _scan_linear(image: Image, edit: Edit, region, half_size: bool) -> np.ndarra
         params = film_params(image, edit)
         with slog.stage("film.positive", log, kind=params.get("kind")):
             rgb = fm.positive(disp, params, scene=True)
+    elif getattr(raw, "scene_linear", False):       # a stacking tool's result (io/intermediate.py): scene light
+        rgb = np.ascontiguousarray(disp, np.float32)
     else:
         rgb = scan_to_scene(disp)
     mult = wb_multipliers(image, edit)
@@ -1718,6 +1882,10 @@ def _post(image: Image, edit: Edit, out: np.ndarray, frame: Frame, lut) -> np.nd
     if not grade.is_identity(edit.colour):                  # stage 17 (per pixel, in OKLCh)
         c = edit.colour
         _strips(out, lambda s: s.__setitem__(Ellipsis, grade.apply(s, c)))
+    pal = (edit.infrared or {}).get("palette") if (edit.infrared or {}).get("on") else None
+    if pal and float(pal.get("amount", 0)) > 0:             # infrared: colour by brightness (added colour)
+        from ..color.infrared import apply_palette
+        _strips(out, lambda s: s.__setitem__(Ellipsis, apply_palette(s, pal)))
     for m, a in zip(act, alphas):                           # local colour, then local detail
         cm = mk.colour_of(m)
         if not grade.is_identity(cm):

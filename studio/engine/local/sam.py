@@ -76,8 +76,8 @@ def _graph(size: str, which: int):
 def encode(srgb01: np.ndarray, size: str) -> tuple[dict, float]:
     """Look at a display-encoded sRGB photo (h, w, 3, 0..1): the image embedding (three feature maps) and
     milliseconds."""
-    import cv2
-    img = cv2.resize(np.ascontiguousarray(srgb01, np.float32), (SIZE, SIZE), interpolation=cv2.INTER_LINEAR)
+    from ..imgops import resize_linear
+    img = resize_linear(srgb01, SIZE, SIZE)
     x = (img - np.array([0.485, 0.456, 0.406], np.float32)) / np.array([0.229, 0.224, 0.225], np.float32)
     x = np.ascontiguousarray(x.transpose(2, 0, 1)[None], np.float32)
     t = time.perf_counter()
@@ -101,6 +101,6 @@ def decode(feats: dict, size: str, fg: list, bg: list | None = None) -> tuple[np
 
 def bitmap(logits: np.ndarray, h: int, w: int) -> np.ndarray:
     """The outline stretched to (h, w) as a soft-edged uint8 mask (255 inside)."""
-    import cv2
-    up = cv2.resize(logits, (w, h), interpolation=cv2.INTER_LINEAR)
+    from ..imgops import resize_linear
+    up = resize_linear(logits, w, h)
     return np.round(255.0 / (1.0 + np.exp(-np.clip(up, -30, 30)))).astype(np.uint8)

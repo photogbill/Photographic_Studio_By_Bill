@@ -56,13 +56,15 @@ def _pad4(b: bytes) -> bytes:
 
 
 @lru_cache(maxsize=None)
-def profile_bytes(key: str) -> bytes:
-    """ICC profile for one of the spaces in spaces.SPACES (by key: 'adobergb', 'srgb', 'prophoto', ...)."""
+def profile_bytes(key: str, linear: bool = False) -> bytes:
+    """ICC profile for one of the spaces in spaces.SPACES (by key: 'adobergb', 'srgb', 'prophoto', ...).
+    ``linear``: the same primaries with a straight-line tone curve (linear-light 32-bit files, such as the
+    stacking tools' results)."""
     space = SPACES[key]
     M = space.to_xyz_d50
-    trc = _curv_tag(space)
+    trc = (b"curv" + b"\0" * 4 + struct.pack(">I", 0)) if linear else _curv_tag(space)
     tags = [
-        (b"desc", _desc_tag(space.name)),
+        (b"desc", _desc_tag(space.name + (" (linear)" if linear else ""))),
         (b"cprt", _text_tag(COPYRIGHT)),
         (b"wtpt", _xyz_tag(xy_to_XYZ(space.white_xy))),
         (b"rXYZ", _xyz_tag(M[:, 0])),

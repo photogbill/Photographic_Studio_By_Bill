@@ -151,6 +151,7 @@ def cmd_develop(a) -> int:
     spec.validate()
     print(f"Developing {len(files)} raw file(s) -> {out_dir}")
     done, failed = 0, 0
+    taken: set = set()                      # two files with the same name do not replace each other
     builder = CompareBuilder(a.compare_dir or os.path.join(out_dir, f"compare_{stamp}"),
                              apply_flags(engine.Edit(), a)) if a.compare else None
     for i, f in enumerate(files, 1):
@@ -184,7 +185,7 @@ def cmd_develop(a) -> int:
                     print(f"      dust map: {len(spots)} spot(s) healed")
             p = None
             if not a.compare_only:
-                p = engine.export(img, edit, spec, out_dir=out_dir)
+                p = engine.export(img, edit, spec, out_dir=out_dir, taken=taken)
                 print(f"      wrote {os.path.basename(p)}  ({img.meta.model or 'camera ?'}, {img.meta.iso_label}, "
                       f"{time.perf_counter() - t0:.1f} s)")
             if builder is not None:
@@ -197,7 +198,9 @@ def cmd_develop(a) -> int:
             failed += 1
             slog.log_exception(f"develop failed: {f}", log)
             print(f"      PROBLEM with {os.path.basename(f)}: {e}")
-            print("      (details are in logs\\studio.log)")
+            rep = None if slog.expected_problem(e) else slog.save_error_report(
+                f"Develop Raws could not develop {os.path.basename(f)}")
+            print(f"      (an error report was saved: {rep})" if rep else "      (details are in logs\\studio.log)")
     if builder is not None and builder.cards:
         page = builder.write()
         print(f"Comparison page: {page}")

@@ -32,6 +32,7 @@ _EXPORTS = {
     "s_to_view": ".pipeline.pipeline", "view_window": ".pipeline.pipeline", "render_window": ".pipeline.pipeline", "auto_source": ".pipeline.pipeline",
     "film_params": ".pipeline.pipeline", "film_measure": ".pipeline.pipeline", "film_base_at": ".pipeline.pipeline",
     "is_scan_image": ".pipeline.pipeline", "colour_hint_area": ".pipeline.pipeline", "stain_lost_shape": ".pipeline.pipeline", "change_map": ".pipeline.pipeline", "depth_shape": ".pipeline.pipeline", "sam_features": ".pipeline.pipeline", "colour_match_solve": ".pipeline.pipeline", "jpeg_repairable": ".pipeline.pipeline", "colour_match_apply": ".pipeline.pipeline", "depth_view": ".pipeline.pipeline", "colour_at": ".pipeline.pipeline", "SCAN_EXTENSIONS": ".io.scanfile",
+    "channel_shape": ".pipeline.pipeline", "find_flare": ".pipeline.pipeline", "CHANNEL_SOURCES": ".pipeline.pipeline",
     "find_dust": ".pipeline.pipeline", "dust_from_map": ".pipeline.pipeline", "learn_dust_map": ".pipeline.pipeline",
     "glow_report": ".pipeline.pipeline", "measure_glow_profile": ".pipeline.pipeline",
     "glow_profiles": ".pipeline.pipeline", "pick_glow_profile": ".pipeline.pipeline",

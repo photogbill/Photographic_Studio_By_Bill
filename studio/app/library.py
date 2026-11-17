@@ -19,10 +19,10 @@ from PySide6.QtCore import (QAbstractListModel, QModelIndex, QObject, QRect, QRe
                             QThreadPool, QTimer, QUrl, Signal)
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QFileDialog,
-                               QFileSystemModel, QFrame, QHBoxLayout, QInputDialog, QLineEdit, QListView, QListWidget,
-                               QListWidgetItem, QMenu, QMessageBox, QProgressBar, QPushButton, QSlider, QSplitter,
-                               QStackedWidget, QStyle, QStyledItemDelegate, QToolButton, QTreeView, QVBoxLayout,
-                               QWidget)
+                               QFileSystemModel, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListView,
+                               QListWidget, QListWidgetItem, QMenu, QMessageBox, QProgressBar, QPushButton, QSlider,
+                               QSplitter, QStackedWidget, QStyle, QStyledItemDelegate, QToolButton, QTreeView,
+                               QVBoxLayout, QWidget)
 
 from . import theme as T
 from .common import (GLOW_HOWTO, STARS, LensDialog, Settings, chip, label, log, run_bg, tag_lens,  # noqa: F401
@@ -49,9 +49,11 @@ class _Runner(QRunnable):
     def run(self):
         try:
             self.fn()
-        except Exception:                             # noqa: BLE001  (logged with its traceback, rule 0.3.5)
+        except Exception as err:                      # noqa: BLE001  (logged with its traceback, rule 0.3.5)
             from .. import log as slog
+            from .common import report_problem
             slog.log_exception("library background work failed", log)
+            report_problem("Library background work failed", err)
 
 
 EXTRA_POOLS: list = []                            # pools the app waits for at exit (see main.finish_jobs)
@@ -315,6 +317,17 @@ class PhotoDelegate(QStyledItemDelegate):
                 p.setPen(QColor(col))
                 p.drawText(br, Qt.AlignmentFlag.AlignCenter, txt)
                 bx += 24
+        if e.get("stack") and not self.strip:           # a stacking tool's result: what it is, in a small chip
+            p.setFont(QFont("Segoe UI", 7))
+            fmc = p.fontMetrics()
+            txt = str(e["stack"])
+            br = QRectF(ir.left() + 4, ir.bottom() - 20, fmc.horizontalAdvance(txt) + 12, 16)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(0, 0, 0, 190))
+            p.drawRoundedRect(br, 5, 5)
+            p.setPen(QColor(T.CYAN))
+            p.drawText(br, Qt.AlignmentFlag.AlignCenter, txt)
+            p.setFont(opt.font)
         if e.get("pick") in (1, -1):
             br = QRectF(ir.right() - 24, ir.top() + 4, 20, 18)
             p.setPen(Qt.PenStyle.NoPen)
@@ -353,6 +366,7 @@ class LibraryPage(QWidget):
     export_requested = Signal(list)
     process_requested = Signal(list)
     folder_loaded = Signal(str)
+    send_to = Signal(str, list)                      # "focus" | "superres" | "dualpixel" | "infrared" | "panorama"
 
     def __init__(self, settings: Settings):
         super().__init__()
@@ -403,6 +417,14 @@ class LibraryPage(QWidget):
         self.grid.doubleClicked.connect(lambda ix: self.open_photo.emit(ix.data(ROLE_PATH)))
         self.grid.verticalScrollBar().valueChanged.connect(self._schedule_thumbs)
         self.grid.installEventFilter(self)
+        # what an empty grid says (a first start opens on a folder with no photos: without this, a blank panel)
+        self.empty = QLabel("", self.grid)
+        self.empty.setObjectName("dim")
+        self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty.setWordWrap(True)
+        self.empty.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.empty.setStyleSheet("font-size: 15px; background: transparent;")
+        self.empty.hide()
         self._apply_thumb_size()
         split.addWidget(self.grid)
         split.setSizes([250, 1200])
@@ -459,7 +481,16 @@ class LibraryPage(QWidget):
         m.addAction("◎ Tag lens...", self.tag_selected).setToolTip(
             "Tell the Studio which (contactless) lens the selected photos were taken with")
         m.addAction("Paste settings  (Ctrl+Shift+V)", lambda: self.paste_requested.emit(self.selected_files()))
+        m.addAction("Send to Focus Stack", lambda: self._send("focus", 2))
+        m.addAction("Send to Super-Res Stack", lambda: self._send("superres", 2))
+        m.addAction("Open in Dual Pixel Lab", lambda: self._send("dualpixel", 1))
+        m.addAction("Edit in Infrared tab", lambda: self._send("infrared", 1, all_selected=True))
+        m.addAction("Send to Panorama", lambda: self._send("panorama", 2))
+        m.addSeparator()
         m.addAction("Learn dust map", self.learn_dust)
+        m.addAction("Learn IR hot spot", self.learn_hotspot).setToolTip(
+            "From several infrared photos taken with one lens and filter: the bright centre many lenses show in "
+            "infrared, saved on this PC for the Infrared tab")
         m.addAction("Measure lens glow", self.measure_glow)
         m.addSeparator()
         m.addAction("Photos folder...", self.choose_photos_folder)
@@ -499,6 +530,7 @@ class LibraryPage(QWidget):
             c.setMaximumWidth(170)
             c.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
             c.setMinimumContentsLength(5)           # (the window fits a 1280-pixel-wide screen)
+        self.cam_f.setMinimumContentsLength(7)      # "Any camera" whole, not "Any camer"
         self.unrated = QCheckBox("Not rated yet")
         self.unrated.setToolTip("Only photos with no stars and no pick / reject flag")
         self.search = QLineEdit()
@@ -664,6 +696,7 @@ class LibraryPage(QWidget):
         self.path_lbl.setText(folder)
         self.path_lbl.setToolTip(folder)
         self.count.setText("Opening...")
+        self.empty.hide()
         self.model.set_entries([])
         self.pix.clear()
         self.warned_unsaved = False
@@ -699,6 +732,7 @@ class LibraryPage(QWidget):
             if token == self.gen:
                 self.loading = False
                 self.count.setText("0 photos")
+                self._update_empty()
                 QMessageBox.warning(self, "Library", f"Could not open {folder}: {err}")
         from ..engine.io.libindex import list_photos
         run_bg(lambda: list_photos(folder, recursive), gen, listed, failed)
@@ -1027,7 +1061,31 @@ class LibraryPage(QWidget):
         self._update_count()
         self._schedule_thumbs()
 
+    def _place_empty(self):
+        g = self.grid
+        w = min(560, max(200, g.width() - 60))
+        self.empty.setGeometry((g.width() - w) // 2, max(20, g.height() // 2 - 110), w, 220)
+
+    def _update_empty(self):
+        """The message in the middle of an empty grid: nothing in the folder, or nothing passes the filters."""
+        total, shown = len(self.model.all), len(self.model.rows)
+        if self.loading or shown:
+            self.empty.hide()
+            return
+        if total:
+            text = (f"None of the {total} photo{'s' if total != 1 else ''} in this folder match the filters "
+                    f"above.\n\nSet the first filter back to All photos, or clear the others.")
+        else:
+            sub = "" if self.subfolders.isChecked() else "  Tick Include subfolders to look inside its folders."
+            text = (f"No photos in this folder.{sub}\n\nOpen folder... shows a folder of raw photos (or drop one "
+                    f"on this window).\nImport from card... copies a memory card into your Photos folder.")
+        self.empty.setText(text)
+        self._place_empty()
+        self.empty.show()
+        self.empty.raise_()
+
     def _update_count(self):
+        self._update_empty()
         es = self.model.all
         total, shown = len(es), len(self.model.rows)
         picks = sum(1 for e in es if e.get("pick") == 1)
@@ -1037,6 +1095,19 @@ class LibraryPage(QWidget):
                            f"{'s' if rejects != 1 else ''}" + (" · reading..." if self.meta_pending else ""))
 
     # ------------------------------------------------------------------------------------ selection
+    def _send(self, where: str, need: int, all_selected: bool = False):
+        files = self.selected_files()
+        if len(files) < need:
+            self.status_msg(f"Select {'at least two photos' if need > 1 else 'a photo'} first.")
+            return
+        self.send_to.emit(where, files if (need > 1 or all_selected) else files[:1])
+
+    def status_msg(self, text: str):
+        try:
+            self.window().statusBar().showMessage(text, 5000)
+        except Exception:                            # noqa: BLE001  (no window in tests)
+            pass
+
     def selected_files(self) -> list:
         rows = sorted(ix.row() for ix in self.grid.selectionModel().selectedIndexes())
         return [self.model.rows[r]["path"] for r in rows if r < len(self.model.rows)]
@@ -1077,6 +1148,8 @@ class LibraryPage(QWidget):
         if obj is self.grid and ev.type() == QEvent.Type.KeyPress:
             if self._key(ev):
                 return True
+        if obj is self.grid and ev.type() == QEvent.Type.Resize and self.empty.isVisible():
+            self._place_empty()
         return super().eventFilter(obj, ev)
 
     def _key(self, e) -> bool:
@@ -1112,13 +1185,25 @@ class LibraryPage(QWidget):
         m = QMenu(self)
         m.addAction("Open in Develop", lambda: self.open_photo.emit(files[0]))
         m.addAction("Review", self.open_review)
+        m.addSeparator()
+        a = m.addAction(f"Send {len(files)} to Focus Stack", lambda: self.send_to.emit("focus", files))
+        a.setEnabled(len(files) >= 2)
+        a = m.addAction(f"Send {len(files)} to Super-Res Stack", lambda: self.send_to.emit("superres", files))
+        a.setEnabled(len(files) >= 2)
+        m.addAction("Open in Dual Pixel Lab", lambda: self.send_to.emit("dualpixel", files[:1]))
+        m.addAction("Edit in Infrared tab" + (f" ({len(files)} as a shoot)" if len(files) > 1 else ""),
+                    lambda: self.send_to.emit("infrared", files))
+        a = m.addAction(f"Send {len(files)} to Panorama", lambda: self.send_to.emit("panorama", files))
+        a.setEnabled(len(files) >= 2)
+        m.addSeparator()
         m.addAction(f"Process {len(files)} selected...", lambda: self.process_picks("selected"))
         m.addAction("Export...", lambda: self.export_requested.emit(files))
         m.addSeparator()
         m.addAction("◎ Tag lens...", self.tag_selected)
         m.addAction("Paste settings", lambda: self.paste_requested.emit(files))
         m.addSeparator()
-        m.addAction("Show in Explorer", lambda: show_in_explorer(files[0]))
+        m.addAction("Show in Explorer" if sys.platform == "win32" else "Show in its folder",
+                    lambda: show_in_explorer(files[0]))
         m.addAction("Copy path", lambda: QApplication.clipboard().setText("\n".join(files)))
         m.exec(self.grid.viewport().mapToGlobal(pos))
 
@@ -1148,6 +1233,7 @@ class LibraryPage(QWidget):
 
     def close_review(self, path: str | None = None):
         self.body.setCurrentIndex(0)
+        self.review.images.clear()                  # the raws Review opened for 100% views: memory back
         self.hint.setText("Double-click or Enter to develop.  Space: Review.  Keys: 0-5 rate, P pick, X reject, "
                           "U clear flag.  Ratings live in the sidecar beside each raw, never in a catalogue.")
         if path:
@@ -1232,6 +1318,37 @@ class LibraryPage(QWidget):
                                 "(about 2-4 seconds each). A message appears when it is done.")
         run_bg(lambda: E.learn_dust_map(files), "dust", done,
                lambda _, err: QMessageBox.warning(self, "Learn dust map", f"Problem: {err}"), keep=True)
+
+    def learn_hotspot(self):
+        files = self.selected_files()
+        if len(files) < 3:
+            QMessageBox.information(self, "Learn IR hot spot", "Select at least 3 infrared photos (5 or more is "
+                                    "better) taken with one lens and one filter, of different scenes. Plain sky "
+                                    "shows a hot spot best.")
+            return
+        from ..engine.lens import hotspot as HS
+
+        def done(_, rep):
+            if not rep.get("ok"):
+                msg = f"No hot spot saved: {rep.get('reason', 'unknown problem')}."
+            else:
+                from PySide6.QtWidgets import QInputDialog
+                mdl = rep["model"]
+                name, ok = QInputDialog.getText(self, "Learn IR hot spot", f"Found a hot spot of {mdl['stops']:.2f} "
+                                                f"stop in {rep['photos']} photos. Name it (lens + filter):",
+                                                text=(rep.get("lens") or "Lens") + " + filter")
+                if not ok or not name.strip():
+                    return
+                HS.save_profile(name.strip(), mdl, lens=rep.get("lens", ""), camera=rep.get("camera", ""))
+                msg = (f"Saved '{name.strip()}' on this PC (calibration_local). In the Infrared tab, Hot spot > "
+                       "Use a learnt hot spot corrects it in any photo.")
+            if rep.get("skipped"):
+                msg += "\n\nSkipped: " + "; ".join(f"{os.path.basename(p)} ({why})" for p, why in rep["skipped"][:8])
+            QMessageBox.information(self, "Learn IR hot spot", msg)
+        QMessageBox.information(self, "Learn IR hot spot", f"Learning from {len(files)} photos in the background. "
+                                "A message appears when it is done.")
+        run_bg(lambda: HS.learn_from_files(files), "hotspot", done,
+               lambda _, err: QMessageBox.warning(self, "Learn IR hot spot", f"Problem: {err}"), keep=True)
 
     # ------------------------------------------------------------------------------------ import from card
     def import_from_card(self, card=None):

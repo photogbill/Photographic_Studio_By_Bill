@@ -26,7 +26,7 @@ SIDECAR_SUFFIX = ".psb.json"
 # a folder called "outputs" may well hold photos.)
 SKIP_ALWAYS = {"_studio", "$recycle.bin", "system volume information", "__pycache__", ".git", ".venv"}
 FIELDS = ("rating", "pick", "label", "lens_tag", "has_edit", "taken", "camera", "lens", "iso", "exposure", "fnumber",
-          "focal")
+          "focal", "stack")
 
 
 def _skip_dir(name: str) -> bool:
@@ -123,6 +123,9 @@ def read_entry(e: dict) -> dict:
     except Exception as err:                         # noqa: BLE001  (a damaged file still shows, with no details)
         log.debug("library: no metadata for %s: %s", e["path"], err)
         out.update(taken="", camera="", lens="")
+    if e["path"].lower().endswith((".tif", ".tiff")):  # a stacking tool's result says what it is on its card
+        from .intermediate import label, read_info
+        out["stack"] = label(read_info(e["path"])) or None
     return out
 
 

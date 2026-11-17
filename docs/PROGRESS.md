@@ -1,6 +1,134 @@
 # Build progress
 
-Updated 2026-11-15 (session 11: Phase 4b, plan section 24). Plan: BUILD_PLAN.md v2.0.
+Updated 2026-11-17 (session 13: Infrared and Panorama tabs, `BUILD_PLAN_PANO_IR.md`, plus flare ghosts and Fill). Plan: BUILD_PLAN.md v2.0.
+
+## Session 13: Infrared tab, Panorama tab, flare ghosts, Fill (2026-11-17, chat session with Bill)
+
+Built from `BUILD_PLAN_PANO_IR.md`, blocks 1 to 8, then three things Bill asked for during the session: automatic
+lens-flare removal, a content-aware fill ("hopefully better" than Photoshop's: he chose LaMa, results over speed),
+and panoramas whose exposure is so even nobody can tell they are stitched. Tests on the Linux test machine: see the
+last line of this section. **Not yet run on Bill's PC.**
+
+* **Infrared tab** (`color/infrared.py`, `lens/hotspot.py`, `stack/fusion.py`, `app/infrared.py`): filter guess with a
+  colour meter (850 frames: "no usable colour", amber guess with its numbers); white balance by Auto foliage, Click
+  foliage, Click neutral or a filter measured once (kept on this PC); looks (swap, blue sky 590, Goldie, colour-infrared
+  film, B&W from the best channel); B&W from the channels (per-channel exposure, contrast, curve, separation, one
+  -300%..+300% mix, keep brightness, live noise meter, B&W recipes per camera and filter); 850 nm mono raw path (no
+  demosaic, per-CFA gains, hot pixels fixed); Detail by scale shared with Develop; channel mixer and profile; hot spot
+  (measure or learn, off until on); colour by brightness (labelled added colour); visible + infrared fusion (detail,
+  CIR, NDVI). Everything lives in the photo's edit: Open in Develop, Apply to the shoot. Develop gained **Channel
+  masks** and an IR white-balance chip; the Library gained Edit in Infrared tab and Learn IR hot spot.
+* **Panorama tab** (`stack/features.py`, `bundle.py`, `project.py`, `seams.py`, `pyramid.py`, `pano.py`,
+  `app/panorama.py`): Harris + MOPS features, RANSAC, Brown-Lowe pair check; rotation bundle adjustment with one focal
+  (estimated when the lens records none) and lens distortion k1; level; five projections plus Auto; per-channel
+  exposure and vignetting solved from the overlaps; seams by dynamic programming with a clipping cost, a **flare
+  guard** (keeps the frame without flare) and a centre pull; multiband blend in tiles that join exactly; largest
+  rectangle crop; views Result / Layout / Seams / Ghosts; build at 100 / 50 / 25%, written as
+  `FIRST_to_LAST_Pano_Studio.tif`, opens in Develop.
+* **Flare ghosts** (`local/flare.py`, Develop > Lens): Find flare ghosts (the line through the centre), a ghost list to
+  untick, Show (amber circles), Subtract the glow with an amount, and Rebuild ghosts with Fill.
+* **Fill** (`local/fill.py`, Retouch > Fill): multi-scale PatchMatch with voting from the photo itself, guided by LaMa
+  when it is installed (`Convert Models.bat` converts `lama_fp32.onnx` from huggingface.co/Carve/LaMa-ONNX; the
+  NumPy runner gained DFT and dilated convolutions), grain matched; method picker Auto / LaMa / PatchMatch with their
+  texts. Each spot fills the same way every time.
+* **LaMa checked on the real model** (a byte-identical copy of Carve's file): the runner needed Einsum, and 8-bit
+  weights painted cyan blobs in the hole, so LaMa is kept in 16 bits and Convert Models judges the hole on its own.
+  Converted and placed in Bill's `models\inpaint` (lama.npz + NOTICE), so Fill uses LaMa on his PC without a download.
+* **Panorama seams checked for lines** (Bill asked): seams now keep away from frame edges (a thin bright line on the
+  5185 set came from a seam on a frame's edge) and all overlaps are levelled together (`pano.seam_levels`), which took
+  out the step where a flare-veiled frame met a clean one. Iraq and 2994 had no lines before and have none now.
+* **Numbers:** `docs/RESULTS.md` (session 13). Iraq set: 138 mm estimated for 135 mm, RMS 2.16 px.
+
+**Bill's filters (answered 2026-11-17):** most XSi infrared frames used one FOTGA 530-750 variable filter (two
+polarisers and a deep red filter; rotate to change), plus an 800 nm filter; next build plan block A handles it.
+**Next:** `BUILD_PLAN_PLATE_GLOW_BURST_MACRO.md`: block F first (Bill: dump a whole card, find the focus stacks, cull
+the frames that hurt, stack them all; he hand-holds and focuses by hand), then Best of burst, Macro planner, Plate
+Reader, Glow guard (the Laack is in storage).
+**Waits for Bill:** his eye on the Iraq stitch next to his own; Fill tried on his own flare photos (LaMa is in place);
+the tabs on his PC.
+
+**Not built from the plan:** preset tiles with live thumbnails (a list with texts instead); the per-channel curve
+editor on the page (the engine has curves); GPano metadata for 360 panoramas; leaving a frame out by clicking its
+outline (the tray ticks do it); adding a flare ghost by clicking.
+
+Tests: **629 passed, 11 skipped** on the Linux test machine (21 minutes, 2 cores), with LaMa installed (its test runs)
+and the overlap-levelling test.
+
+## Session 12: Dual Pixel Lab, Focus Stack, Super-Res Stack (2026-11-16 evening, chat session with Bill)
+
+Built from `BUILD_PLAN_TABS.md`, blocks 0 to 8 (block 9's retouch brush and DP badge not reached). The three tabs are
+real pages: frames go in (Library right-click, Tools menu, or drop), a preview appears, a full-size result is written
+as `FIRST_to_LAST_<tag>_Studio.tif` (Dual Pixel: `NAME_DP-<kind>_Studio.<ext>`), and **Open in Develop** opens it with
+every Develop tool. Tests on the Linux test machine: see the last line of this section. **Not yet run on Bill's PC.**
+
+* **Shared foundation.** `engine/stack/align.py` (phase correlation with Fourier refinement, Lucas-Kanade per tile on a
+  B-spline, IRLS fits for shift / similarity / affine / homography, coarse to fine, local flow for hand-held frames,
+  one warp), `stack/frames.py` (probe, checks, scene-linear frames, mosaics, scratch memmaps beside the app),
+  `engine/io/intermediate.py` (32-bit float tiled TIFF, scene-linear ProPhoto with a linear ICC profile, an sRGB preview
+  page for thumbnails, the edit history in its description). `scanfile.py` reads it back as `scene_linear`. Library chip
+  "stack". `lens/auto.py` now uses the one `phase_shift`.
+* **Focus Stack** (`stack/focus.py`, `app/focusstack.py`): Auto / Depth / Pyramid / Average with their texts; magnification
+  order and breathing; Line up locally (on by default) for hand-held stacks; noise-aware sharpness; depth map and
+  confidence views; halo guard; streaming full-size build. Engine has retouch-from-frame strokes; the brush on the page
+  is not built.
+* **Super-Res Stack** (`stack/superres.py`, `stack/astro.py`, `app/superres.py`): modes Hand-held, Tripod, Moon, Night sky;
+  merges Drizzle (1.5x, 2x, or a crop at 2x), Average, Sigma clip, Winsorized; sharpness ranking with a shared noise
+  yardstick; robustness maps (what moved is left out); lateral colour fixed inside the drizzle; coverage chart; rejected
+  view. Night sky: stars found and matched, planes and satellites rejected.
+* **Dual Pixel Lab** (`engine/dualpixel/*`, `app/dualpixel.py`): R5 Dual Pixel CR3 opened directly (track 5 read from a
+  patched temporary copy; bit-identical to DPRSplit's second DNG), CR2 (5D Mark IV) through LibRaw's second frame,
+  or a DPRSplit DNG pair. Shading measured per CFA position; half-views; disparity with confidence; detail map
+  (the two halves' agreement); focus report; highlight recovery from the half (measured gain, about 1 stop);
+  wigglegram, anaglyph, side by side, 16-bit depth PNG.
+* **Also fixed:** colouring a part of a black and white photo did nothing without the DDColor model (`colourize.active`);
+  `register` moved a featureless frame by the noise peak (now identity); **Composite, click-to-select (SAM), Depth haze
+  and JPEG repair imported OpenCV, which the installers do not install** (THIRD_PARTY.md: not used), so they failed on
+  every installed copy: replaced by `engine/imgops.py` (same results as OpenCV to 1e-5), and `tests/test_imgops.py` now
+  fails on any import `requirements.txt` does not cover; `test_composite`'s grain test asked for more
+  grain than the scene had over the subject (the grain match itself is right: subject 0.057 vs scene 0.056).
+* **Test raws** (`test_raws\`, git-ignored, README inside): copied from Bill's drives so the external can go away.
+  Dual Pixel eagle (+ DPRSplit pair), hand-held fly focus stack (9 x R5), hand-held spider burst (12 x 5D4), black
+  light, IR/visible fusion, infrared 850 with 20 candlelit IR portraits, an R5 candlelit desk portrait at three
+  exposures (7 frames, flames clipped), an underexposed R5 kitten, a 5D4 pair.
+
+**Waits for Bill:** a Dual Pixel file with clipped highlights (the eagle has none, so recovery shows nothing on it);
+a 5D Mark IV Dual Pixel CR2 (decoder written, never seen a real one); a tripod focus bracket of a still subject (the fly
+moved, so a leaf/leg ghost remains even with local alignment); a tripod or hand-held burst of a distant detailed scene
+for super-res; a moon burst; a night-sky series. His eye on all three tabs.
+
+**Left for later (plan 3.8, 5.5, 7):** micro-refocus, bokeh shift, ghost/flare control, defect detection from the halves,
+depth masks in Develop from Dual Pixel, feeding the detail map to the denoiser, synthetic aperture, defocus deblurring,
+reflection removal, the long-range re-align; Freeze ground, light-pollution removal, darks and flats, star-sharpness
+weighting, drizzle for sky frames; the kernel and HDR+ merges; the Focus Stack retouch brush on the page; a "DP" badge in
+the Library. (Plan 3.8's "our own CR3 second-track extractor" was built after all: it was the only way to read frame 2.)
+
+**Next:** Bill's eye on the three tabs; then the Infrared / Full Spectrum and Panorama tabs, in a new session, from
+`BUILD_PLAN_PANO_IR.md` (Bill: build them in a separate discussion).
+
+## Polish pass before the wider test round (2026-11-16, chat session with Bill)
+
+Not a build phase: a bug hunt and four decisions from Bill. Tests: `tests/test_polish.py` (each test is a bug a tester
+would have met). 510 tests green on the Linux test machine; **not yet run on Bill's PC, and the Windows installer and
+push scripts could not be run at all there: Bill runs them once before pushing.**
+
+* **Memory:** every background job (and the photo it held) stayed in memory until the Studio closed
+  (`app/common.py: Job`); now a job is forgotten once its result is delivered. One photo in memory at a time.
+* **Export names (Bill's rule):** every export is `NAME_Studio.ext` (`engine/io/export.py: export_name`), and a file
+  the Studio did not write is never replaced (`free_target`, with the `taken` set for batches).
+* **Error reports write themselves:** `error_reports/error_YYYY-MM-DD_HH-MM-SS.txt` (`log.py: save_error_report`,
+  `common.report_problem`; a hard crash is reported at the next start, `log.watch_for_crashes`). Help has the folder button.
+* **Installer:** the person picks the folder (the picker opens first); D: is only suggested when it is an internal
+  drive with room; free space is checked before downloading.
+* **Push comments write themselves:** `docs/NEXT_UPDATE.md` -> `push.bat` comment -> `CHANGELOG.md` and the GitHub
+  release text (`tools/whats_new.py`). Rule 0.3.13: add a line there after any part is built. `CLAUDE.md` says the same.
+* Also: one bad photo no longer ends an export; raws that cannot be opened say why in the viewer (X-Trans, sRAW,
+  Foveon, damaged, a format LibRaw lacks); a sidecar is written only when something changed; measurements asked for
+  together are made once (per-image locks in `pipeline.Image`); empty Library message; Develop panel width;
+  Panasonic RW2 metadata; settings file swapped in whole; README brought up to date.
+* Checked on other makers' raws (rawpy's public samples): Nikon D3S and D4, Canon 5D II, an old Kodak develop
+  correctly. No Sony or X-Trans file was at hand.
+* **Next: `BUILD_PLAN_TABS.md`**: build the Dual Pixel Lab, Focus Stack and Super-Res Stack tabs (Bill: "just build
+  those tabs"). Done in session 12, above.
 
 ## Where things stand
 
@@ -17,12 +145,17 @@ Updated 2026-11-15 (session 11: Phase 4b, plan section 24). Plan: BUILD_PLAN.md 
 | 6b. Plan section 23 (session 10) | **Part built, awaiting Bill's eye** | **Detail by scale** (23.11) replaces the Microcontrast and Texture sliders: six methods, each with its own switch, amount and "best for / weak at" text (Tonal, Local contrast, Crisp, Tonal separation, Veil removal, Broad), stackable under one shared budget per scale; Simple level = Amount + Balance (starts on the Tonal side) + presets (Tonal, Crisp, Both, Soft glow); **Judge in black and white**; a live meter (amber when a guard limits the stack) and the balance number; diffraction note from f/8. **Denoise safeguard** (23.12, on by default, with a count). **Auto HDR** on one raw (23.6): Light / Medium / Heavy / Highlights only / Low-key / Shadows only, Amount 0-150%, three engines (exposure fusion, local Laplacian, Multi-Scale Retinex), noise-aware lift, off until turned on. **Auto white balance** (23.9): Grayness Index beside grey edge, both shown with their agreement, two light sources reported, **Keep the mood**. Method texts on the denoise picker (23.1). **Not built yet from section 23:** 23.2 neural runtime and 23.3 learned denoisers, 23.4 highlight methods (by area, detail transfer, grain match), 23.5 Dual Pixel HDR, 23.7 stacking, 23.8 PDAF line filter (needs a Sony raw that shows striping), 23.9 mixed light and skin estimate. **Session 11 built 23.8's demosaic picker** (see the 23.8 row). Acceptance: Bill's blind test of Detail by scale, in colour and in black and white. |
 | 6c. Demosaic picker (session 11, plan 23.8) | **Built, awaiting Bill's eye** | Develop > Detail (Full): **RCD** (new default), Menon, **LMMSE**, **Dual** (RCD + LMMSE by local contrast), MHC, each with its best-for / weak-at text; **Even out the two greens** (green equilibration, off by default). RCD measured ahead of Menon on every crop, clean and noisy, and twice as fast; older edits keep Menon (their sidecars say so). Not built: the PDAF line filter. |
 | 9d. Eyes (session 11) | **Built, awaiting real portraits** | Find faces now also finds each **iris** (MediaPipe Iris model, which Bill downloaded, run by tinynet; the edge then sets the size; without the model a classical fit). Portrait: **Eye colour** (Blue, Green, Hazel, Grey, Amber, Brown, Violet or Pick a colour; amount; both eyes or one), and in Full **iris brightness, iris clarity, iris colour strength, outer ring, catchlights** (all 0 by default, not part of Younger). **Fix red eye**: red pupils become Red eye spots, pupils the flash blew out white become **Pupil** spots (amber, removable). Retouch > **Pupil**: click a blown pupil or an animal's glowing eye. Checked on NASA's public-domain astronaut portrait (irises found on real eyes, model and fit agree) and drawn eyes (colour hits its hue to within 4 degrees, skin, pupil and catchlight untouched). Not built: an iris placed by hand. |
-| 7, 8 | Not started | Wizards; Dual Pixel Lab. |
-| 9. Local + retouch | **Built (masks session 6, retouch session 7), awaiting Bill's eye** | **Masks** in Develop: Brush (feather, flow, erase, **auto mask**), Gradient, Radial, **Object** (one click selects a leaf; Alt-click takes a part away), **Colour**, **Brightness** and now **Skin** (skin tones of any complexion); shapes combine (add, subtract, only-where), invert, amount; inside each mask: exposure, contrast, highlights, shadows, whites, blacks, temperature, tint, saturation, vibrance, texture, clarity, dehaze, sharpness, noise reduction and now **Smooth skin** (softens blotches and uneven colour, keeps pores and edges). **Retouch** (its own group): **Heal**, **Clone** and **Red eye** spots, clicked or brushed along a hair, source chosen automatically and draggable; **Find dust** (one photo); **Learn dust map** in the Library (the dust on your sensor, learnt from several photos, kept on this PC) and **Dust map** in Develop to heal it in any photo (also `--dust-map` for batch develop). New **100% view** (Z, mouse wheel or the 100% button; drag to move) where every tool works. Still to do: depth and focus range masks (need Dual Pixel, Phase 8), denoise strength and microcontrast per mask, editing a drawn gradient or circle by its handles, content-aware fill for large removals. Acceptance: Bill selects one leaf in two clicks and adjusts it; dust removed automatically. |
+| 7 | Not started | Wizards. |
+| 8. Dual Pixel Lab (session 12) | **Built, awaiting Bill's files and eye** | R5 Dual Pixel CR3 read directly; views, depth, detail map, focus report, highlight recovery, 3D outputs. Needs a DP file with clipped highlights and a 5D4 DP CR2. |
+| 9. Local + retouch | **Built (masks session 6, retouch session 7), awaiting Bill's eye** | **Masks** in Develop: Brush (feather, flow, erase, **auto mask**), Gradient, Radial, **Object** (one click selects a leaf; Alt-click takes a part away), **Colour**, **Brightness** and now **Skin** (skin tones of any complexion); shapes combine (add, subtract, only-where), invert, amount; inside each mask: exposure, contrast, highlights, shadows, whites, blacks, temperature, tint, saturation, vibrance, texture, clarity, dehaze, sharpness, noise reduction and now **Smooth skin** (softens blotches and uneven colour, keeps pores and edges). **Retouch** (its own group): **Heal**, **Clone** and **Red eye** spots, clicked or brushed along a hair, source chosen automatically and draggable; **Find dust** (one photo); **Learn dust map** in the Library (the dust on your sensor, learnt from several photos, kept on this PC) and **Dust map** in Develop to heal it in any photo (also `--dust-map` for batch develop). New **100% view** (Z, mouse wheel or the 100% button; drag to move) where every tool works. Still to do: depth and focus range masks (need Dual Pixel, Phase 8), denoise strength and microcontrast per mask, editing a drawn gradient or circle by its handles (content-aware fill for large removals: built in session 13, Retouch > Fill). Acceptance: Bill selects one leaf in two clicks and adjusts it; dust removed automatically. |
 | 9c. Person mask | **Built (session 9), awaiting a real portrait** | Masks > **Person**: everyone in the photo selected on this PC (MediaPipe person segmentation + BlazePose 33 body points), then a **Part**: whole person, background, skin, face, hair, clothes, arms, legs, torso; snapped to the photo's edges. Also in "Refine" (+ / - / x Person). |
 | 9b. Portrait | **Built (session 9), awaiting a real portrait** | New **Portrait** group in Develop. **Find faces** (Google MediaPipe face detector and 468-point face mesh, run on this PC by the Studio's own NumPy code, no new install; a brightened copy is tried for candle-dark photos) or **Click the eyes** when a face is missed. **Remove blemishes** (one button: red spots and dark spots become Heal spots in Retouch, amber; moles and beauty marks are left alone). Sliders, all 0 by default: **Younger** (all of them at once), **Lines**, **Under eyes**, **Smile lines**, **Even skin**, **Jawline**, **Eyes**, **Teeth**. **Body sculpting**: Push / Shrink / Grow brushes and shape tools (**Breast lift & size**, **Butt improvement tool**, **Slim waist / tummy / arm / thigh**) with Lift, Size, Slim and width sliders; every warp capped. Acceptance: the person in a real portrait looks like themselves on a good day, judged by Bill and the sitter. |
 | Install + updates | **Built (session 9), awaiting Bill's first run on Windows** | **Install Photographic Studio.bat**: one file for people without git or Python (downloads the Studio and a private Python into one folder; run again to update; never touches a git copy). **Release.bat** + GitHub Actions: GitHub builds the **MSI** (Briefcase + WiX) and publishes the release with both installers. **Help > Check for updates** (off until chosen; an installed copy asks once in the sidebar): automatic updates go in when the Studio next starts (.bat copies) or as it closes (MSI). Not yet run on Windows by me: Bill's first install and first release are the test. |
-| 10+ | Not started | |
+| 10. Focus Stack (session 12) | **Built, awaiting Bill's eye** | Four merges, breathing, local alignment for hand-held, halo guard, depth and confidence views. Retouch brush not on the page yet. |
+| 11. Super-Res Stack (session 12) | **Built, awaiting Bill's eye** | Hand-held, tripod, moon, night sky; drizzle 1.5x / 2x / crop; robust merges; coverage chart; rejected view. |
+| 12. Infrared / Full Spectrum (session 13) | **Built, awaiting Bill's eye** | Filter guess and colour meter, white balance beyond the camera, looks, B&W from the channels with a noise meter, 850 nm mono raw path, hot spot, colour by brightness, fusion, Channel masks in Develop. |
+| 13. Panorama (session 13) | **Built, awaiting Bill's eye** | Layout with focal and distortion from the overlaps, five projections, exposure and vignetting evened out, seams with a flare guard, multiband blend. Iraq set: 138 mm for 135 mm, 2.16 px RMS. |
+| 9e. Flare ghosts and Fill (session 13) | **Built, awaiting a real test** | Develop > Lens: find, subtract or rebuild flare ghosts. Retouch > Fill: PatchMatch from the photo, planned by LaMa once converted. |
 
 ## Waiting for you in the outputs folder (already generated)
 

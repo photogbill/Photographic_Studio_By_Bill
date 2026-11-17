@@ -34,7 +34,7 @@ class ExportSpec:
     quality: int = 95               # JPEG quality
     long_edge: int | None = None    # resize so the long edge is this many pixels
     compression: str = "none"       # TIFF: none | zip
-    suffix: str = ""                # added to the file name before the extension
+    suffix: str = "_Studio"         # added to the photo's own name: IMG_0001.CR2 -> IMG_0001_Studio.tif
     gamut_compress: bool = True     # compress out-of-gamut colours smoothly instead of hard clipping
     sharpen_for: str = "none"       # output sharpening: none | screen | glossy | matte (after any resize)
     sharpen_amount: str = "standard"   # low | standard | high
@@ -206,6 +206,99 @@ def write_jpeg(path: str, arr: np.ndarray, icc_bytes: bytes, quality: int, meta:
         ex[0xA434] = str(meta["lens"])
     im.save(path, "JPEG", quality=int(quality), subsampling=0, optimize=True, icc_profile=icc_bytes,
             exif=exif.tobytes())
+
+
+OWN_MARK = "Photographic Studio By Bill"       # written into every export (TIFF/EXIF Software, XMP CreatorTool)
+
+
+def is_own_export(path: str) -> bool:
+    """True when the file at ``path`` is one the Studio exported earlier (it carries the Studio's Software /
+    CreatorTool mark). Anything unreadable or unmarked counts as somebody else's file."""
+    low = str(path).lower()
+    try:
+        if low.endswith((".tif", ".tiff")):
+            import tifffile
+            with tifffile.TiffFile(path) as tf:
+                tag = tf.pages[0].tags.get(305)
+                return tag is not None and str(tag.value).startswith(OWN_MARK)
+        if low.endswith((".jpg", ".jpeg")):
+            from PIL import Image
+            with Image.open(path) as im:
+                return str(im.getexif().get(305) or "").startswith(OWN_MARK)
+        if low.endswith(".png"):
+            with open(path, "rb") as fh:
+                if fh.read(8) != b"\x89PNG\r\n\x1a\n":
+                    return False
+                while True:                       # our writer puts the XMP text chunk before the pixels
+                    head = fh.read(8)
+                    if len(head) < 8:
+                        return False
+                    n, tag = struct.unpack(">I", head[:4])[0], head[4:]
+                    if tag in (b"IDAT", b"IEND"):
+                        return False
+                    if tag == b"iTXt" and n < (1 << 20):
+                        return OWN_MARK.encode() in fh.read(n)
+                    fh.seek(n + 4, os.SEEK_CUR)
+    except Exception:                             # noqa: BLE001  (unreadable: not ours, so never replaced)
+        return False
+    return False
+
+
+def _same_file(a: str, b: str) -> bool:
+    try:
+        if os.path.exists(a) and os.path.exists(b):
+            return os.path.samefile(a, b)
+    except OSError:
+        pass
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+def export_name(source_path: str, spec: "ExportSpec", extra: str = "") -> str:
+    """The file name of an export: the photo's own name with ``_Studio`` added (Bill's rule, 2026-11-16: every
+    export has its own name, never the original's), then the format's extension. IMG_0001.CR2 -> IMG_0001_Studio.tif;
+    a virtual copy puts its name in between (``extra``): IMG_0001_Dark_one_Studio.tif. A file that already ends in
+    _Studio (an earlier export opened again) is not given the ending twice."""
+    stem = os.path.splitext(os.path.basename(source_path))[0]
+    if extra:
+        stem += "_" + extra
+    if spec.suffix and not stem.lower().endswith(spec.suffix.lower()):
+        stem += spec.suffix
+    return stem + EXT[spec.format]
+
+
+def free_target(path: str, source: str | None = None, taken: set | None = None) -> str:
+    """The name an export can be written under without destroying anything (rule 0.3.4: originals are never
+    changed). ``path`` itself when nothing is there, or when what is there is an earlier export by the Studio
+    (exporting again replaces it). Never replaced: the photo being exported (an earlier export opened and exported
+    again into its own folder), a file already written in this batch (``taken``: two photos with the same name),
+    and any file the Studio did not write. Those exports go beside it as NAME-2.ext, NAME-3.ext ... ``taken``
+    (a set) is updated with the name chosen. With export_name's _Studio ending this is the safety net, not the
+    usual case."""
+    def key(p):
+        return os.path.normcase(os.path.abspath(p))
+
+    def usable(p):
+        if taken is not None and key(p) in taken:
+            return False
+        if not os.path.lexists(p):
+            return True
+        if source and _same_file(p, source):
+            return False
+        return os.path.isfile(p) and is_own_export(p)
+
+    stem, ext = os.path.splitext(path)
+    out, n = path, 1
+    while not usable(out):
+        n += 1
+        out = f"{stem}-{n}{ext}"
+        if n > 9999:
+            raise OSError(f"no free file name for {path}")
+    if out != path:
+        log.info("export: %s is kept as it is (not a Studio export, or already written in this batch); writing "
+                 "%s", os.path.basename(path), os.path.basename(out))
+    if taken is not None:
+        taken.add(key(out))
+    return out
 
 
 def write(path: str, img_pp: np.ndarray, spec: ExportSpec, meta: dict | None = None) -> str:

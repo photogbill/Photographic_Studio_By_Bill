@@ -845,3 +845,137 @@ Two clicks (one Shift) took the whole suit including its folds and left the badg
 the wall and leaked into the pale left cheek and the top of the hair; one Alt-click on the cheek fixed the cheek.
 On the synthetic test (a dark-to-light ramp beside a sharp edge) the part fills the whole ramp and stops exactly at
 the edge; brightness changed by under 0.8 L* anywhere (the hint test's limit; typical 0.0001).
+
+## 2026-11-16 (session 12): Focus Stack, Super-Res Stack, Dual Pixel Lab
+
+All on the Linux test machine (2 cores). Synthetic tests have known truth; the real files are in `test_raws\`.
+
+**Alignment (`stack/align.py`).** Phase correlation alone was biased toward zero on a textured synthetic scene (the
+peak fit leans to whole pixels); high-pass + Lucas-Kanade on a cubic B-spline removed it. The first noise estimate
+(a frame median) counted texture as noise and rejected every tile on detailed frames; the quietest-tenth block
+estimate fixed that. A moving object pulled the plain least-squares fit; Cauchy-weighted IRLS ignores it. Full
+register of a 2000 px analysis copy: 11 s before, 4.4 s after making the last pass Lucas-Kanade only. A frame of a
+featureless grey card used to be moved by the strongest noise peak (32 px in the test); now it stays put.
+
+**Focus Stack.** On the synthetic stack (sharp foreground and background at different focus, breathing, a shift),
+the halo guard changes the pyramid result by 2% at most at the foreground edge and never makes it worse: this
+pyramid (noise-aware selection, coarsest level from the depth result) barely overshoots, so the guard has little to
+do. The plan expected a clear halo without it; the test now checks "never worse, small". Real hand-held fly
+(9 x R5, `test_raws\focus_fly_handheld`): global alignment left 5-12 px residuals at the edges of the stack (the
+camera tilted as well as moved); with Line up locally they fall to 1.5-2.7 px and the ghosting goes, except where
+the fly's leg and the leaf moved between frames (a subject that moves cannot be fixed by alignment). Analysis about
+12 s per 45 MP frame on 2 cores.
+
+**Super-Res Stack.** Drizzle at 2x on a hand-held synthetic burst brings back stripes that one frame cannot show
+(single frame contrast under 0.1). The plan asked for stripe contrast 0.3; that is above what the physics allows:
+the photosite averages its whole area (0.37 of the contrast at that frequency), the drop (pixfrac) 0.66, the output
+pixel 0.82, so about 0.20 before sharpening. The test asks for 0.15. The drizzle output is bit-identical whatever
+band size it is built in (global output coordinates). Moon mode: per-frame noise estimates fall as a frame blurs, so
+ranking by "sharpness over own noise" put the blurriest frame first; one shared noise yardstick fixed the order.
+
+**Dual Pixel (eagle, `test_raws\dual_pixel\3C9A8002.CR3`, R5).** Opened directly in 2.7 s; A+B over the half
+2.0077 (one stop and a fraction). Disparity map 15.6 s at full resolution; 48% of the frame confident, 26% in focus,
+the in-focus offset 0.009 px ("In focus: nothing to gain from re-aligning the halves", correct for a sharp eagle).
+Disparity of the confident pixels from -0.25 to +0.30 px (5th to 95th percentile): Dual Pixel depth is small, a
+fraction of a pixel, which is why it is a relative map. **No clipped highlights in this file, so highlight recovery
+recovers nothing on it** (the report says so); a Dual Pixel file with a blown sky or lamp is still wanted.
+`2I2A2584.CR2` (5D Mark IV) is not Dual Pixel and is reported as such.
+
+**OpenCV removed (session 12).** Five modules imported `cv2`, which the installers never install (Bill's `.venv` has
+none), so Composite, SAM click-to-select, Depth and JPEG repair failed outside the build machine: with `cv2` blocked,
+4 tests failed on the old code. `engine/imgops.py` replaces the calls: bilinear and bicubic resize match OpenCV to
+4e-7, the affine warp to 1.5e-5 (OpenCV's fixed-point interpolation table), the Gaussian blur to 2e-7. All their tests
+pass with `cv2` blocked.
+
+**Infrared raws (converted 450D), measured for `BUILD_PLAN_PANO_IR.md` 0.3:** at 850 nm the raw R/G is 0.97 and B/G
+0.99 with a chroma spread of 0.015 (log units) and channel correlation 0.999: the CFA dyes pass the same light, so the
+raw is monochrome. A visible-light 5D IV frame: R/G 0.53, B/G 0.56, spread 0.11-0.14.
+
+**The last 1.5% at 850 nm (Bill's question, session 12).** The two green photosites see identical light, so their ratio
+is the noise yardstick. The hidden dimension G / sqrt(R B), guided-filtered: 3.3-3.6x that yardstick, but it rises
+with brightness (+0.012 to +0.024 across the tones on IMG_3204), and with the brightness trend removed what is left
+(2.0-3.0x) follows edges and texture (R and B sit a pixel away from the greens). No material colour shows. So the
+850 nm raw is monochrome; the difference is a gain to remove. Developing the mosaic as monochrome (gains equalised
+locally) gave the same picture as demosaicing on the candle frames, where the lens at f/1.4-f/2 limits sharpness.
+Details and the plan: `BUILD_PLAN_PANO_IR.md` 0.3 and 1.5b.
+
+**Extreme channel mixes at 850 nm (Bill: "all fun and games until I adjust one channel down 200%").** IMG_3208, channels
+evened out, AHD demosaic, mix normalised to the same brightness: R and B move together (correlation 0.8 of their
+deviations from G), so (-1, 1, 2) changed tones by at most 0.3% (noise x1.3). Green against red + blue is the live
+direction: (-1, 3, -1) 0.9% / x1.7, (-2, 5, -2) 1.6% / x2.7, (-4, 9, -4) up to 3% darker highlights / x4.8, and the
+candle flames darken against everything else (a hot flame's near-IR slope differs from what it lights). Noise grows
+much less than sqrt(sum w^2) predicts (x18 for the last) because demosaicing correlates the channels' noise.
+
+## 2026-11-17 (session 13): Infrared tab, Panorama tab, flare ghosts, Fill
+
+All on the Linux test machine (2 cores). Synthetic tests have known truth; the real files are in `test_raws\`.
+
+**Infrared: colour meter and filter guess (`color/infrared.py`).** The meter compares the photo's hidden colour
+dimension, log G - (log R + log B) / 2, against the sensor's own G1 / G2 difference; under 3.0 means no usable colour.
+
+| Frame | Meter | Colour? | Guess (how sure) | R/G | B/G |
+|---|---|---|---|---|---|
+| infrared_850/IMG_3156 | 1.41 | no | 850 (0.77) | 0.974 | 0.987 |
+| infrared_850/IMG_3204 | 1.87 | no | 850 (0.74) | 0.967 | 0.988 |
+| panoramic raw ir/IMG_2944 | 6.42 | yes | 590 (0.26) | 1.779 | 0.652 |
+| panoramic raw ir/IMG_2994 | 3.83 | yes | 720 (0.32) | 1.593 | 0.717 |
+| panoramic raw ir/IMG_5185 | 1.46 | no | 850 (0.88) | 1.002 | 1.003 |
+
+The 850 frames need no help. The 2944 and 2994 groups are low-confidence (amber) because 590 and 665 and 720 are
+close in a converted camera's dyes; Bill knows which filter he used, and the page lets him say so. The synthetic dye
+model's blue edge had to move to 828 nm and green to 790 nm before it matched these real ratios. On the synthetic
+scene, the mono raw path (850 nm, no demosaic) beats the demosaic and leaves no grid; foliage white balance is
+neutral within 1%.
+
+**Panorama (`stack/`).** Synthetic sphere (known rotations, focal and gains): rotations within 0.05 degrees, focal
+within 0.5%, gains within 1%, the built result within 1 px of the truth, tiles bit-identical to one whole build.
+Bill's Iraq set (7 frames, Canon 6D, Samyang 135 mm, focal recorded as 0): all 7 placed, focal estimated at
+**138 mm** (2.2% from 135 mm, inside the plan's 3%), whole-set RMS 2.16 px, pairs 1.4-2.9 px; the pairs above 2 px
+are where the smoke moved between frames, and the page names them. Before the photometric step the preview showed
+colour and vignetting bands at the seams; per-channel gains plus a shared vignetting curve (Goldman and Chen) and
+blend levels set from the overlap width removed them. Half-size refinement of the focal drifted it (the smoke again),
+so refinement now moves rotations only. IR 2994-2999 (2 x 3 grid): seamless. IR 5185-5191: clean, except flare on
+the left edge that only one frame covers (nothing to choose between there).
+
+**Flare ghosts (`local/flare.py`).** Synthetic ghosts on one line through the centre: at least 3 of 4 found, axis
+within 6 degrees, error after subtraction under 35% of before, and the fine texture inside a ghost still correlates
+above 0.95 with the scene. Bill's IMG_2944: found, but subtraction is only a modest gain there and leaves faint rims;
+those ghosts are strong, so Rebuild with Fill is the better tool for them.
+
+**Fill (`local/fill.py`).** PatchMatch with voting, across a sloping horizon between two textures: mean error in
+the hole well under half that of a plain average fill (the test requires 0.45 x; an earlier hand check gave 0.031
+against 0.189), and the filled ground keeps more than half the real ground's texture. Guided by a perfect plan, the
+error drops further (stands in for LaMa). Speed on this machine at full resolution: a spot whose radius is 1% of the
+long edge 0.6 s, 3% 6.8 s, 6% 25 s (it was 60 s before the target patches were gathered once per pass, the voting was
+made a plain add, and finer scales searched near the coarser answer). Half-size previews take about a quarter of
+that.
+
+**LaMa, run for real.** The container could not reach Hugging Face, but a byte-identical mirror of Carve's
+`lama_fp32.onnx` was on GitHub (SHA-256 1faef530...68d6, the same as Carve's). Running `Convert Models` on it found
+two faults that would have hit Bill: (1) the export writes its Fourier transforms as cos / sin tables and Einsum
+products (no DFT layer at all), and the runner had no Einsum: added; (2) with 8-bit weights the folded cos / sin
+tables bent the transform enough to paint a cyan blob inside every hole, while the whole-picture check said 0.45%:
+LaMa is now kept in 16-bit weights (95 MB) and `Convert Models` judges the hole on its own (0.06% from ONNX Runtime
+inside the hole; it refuses above 2%). One LaMa run takes about 10-11 s on 2 cores. On Bill's IMG_2944 (half size):
+over a 104 px ghost among fine branches, PatchMatch alone leaves a visible disc; LaMa continues the branches and the
+hole cannot be found. A 320 px hole over the trunk was rebuilt by LaMa as a plausible trunk and crown (PatchMatch
+alone: a flat disc). Auto now uses LaMa's answer as it is when LaMa saw the hole at 75% of its size or more, and
+only for bigger holes adds PatchMatch's fine texture on top of LaMa's layout (the earlier "PatchMatch guided by
+LaMa" smeared LaMa's good answer). LaMa is given the photo with its colour cast taken out (grey world) and the cast
+is put back, so an infrared photo is not pulled toward green leaves and blue sky.
+
+**Panorama seams, checked for lines (Bill asked).** Each finished panorama was brightened about 4x and its columns
+scanned for narrow brightness changes (a seam shows as one). Iraq: none beyond the masts and towers (real objects);
+IR 2994-2999: none. IR 5185-5191 had two: (1) a **thin bright line, +24% over a few pixels**, where the seam ran along
+the very edge of one frame (the flare guard pushed it as far from the flared frame as it could go; edge pixels are
+the least trustworthy and the blend had no room on one side). Seams now keep 3.5% of a frame's size away from every
+frame edge: the line is gone. (2) **A step where a frame with a flare veil met one without**, made worse by the two
+frames' broad brightness sloping opposite ways (the stitch read 0.025 left of the seam, 0.018 right of it, and dipped
+below both frames at the seam). New **overlap levelling**: all frames solved together by least squares on a coarse
+grid so that every overlap agrees in its broad brightness and colour, with a smoothness term and a faint pull to 0;
+moved things (differences with edges) are left out. The 5185 step and the bright blob in its sky are gone; Iraq shows
+at most a 1% ripple where there was none (an earlier pairwise version made a 3.4% line there and was replaced; a
+"darker frame wins" version made a dark negative ghost in 5185 and was dropped). What is left on 5185 is the flare
+ghost itself: a large hexagon with straight sides in IMG_5186 and 5187, where no clean frame covers it (the finished
+panorama opens in Develop, where Find flare ghosts and Fill work on it). IMG_5185 does not connect to the other six
+and is left out (named on the page).

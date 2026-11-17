@@ -112,8 +112,8 @@ def subject(layer: dict, scale: float):
         a = render_mask(src, em, 0, scale)
         rgb = render(src, e, scale=scale)
         if rgb.shape[:2] != a.shape[:2]:
-            import cv2
-            a = cv2.resize(a, (rgb.shape[1], rgb.shape[0]), interpolation=cv2.INTER_LINEAR)
+            from ..imgops import resize_linear
+            a = resize_linear(a, rgb.shape[1], rgb.shape[0])
         t = np.clip((a - 0.25) / 0.5, 0.0, 1.0)            # a cut-out is solid inside: only the edge is soft
         a = (t * t * (3.0 - 2.0 * t)).astype(np.float32)
         ys, xs = np.nonzero(a > 0.02)
@@ -167,7 +167,7 @@ def noise_sigma(rgb: np.ndarray, alpha: np.ndarray | None = None) -> float:
 def apply(image, edit, out: np.ndarray, window=None) -> np.ndarray:
     """Lay the edit's subjects onto a finished picture ``out`` (display-linear ProPhoto) that shows ``window``
     (x, y, w, h in full-size output pixels; None = the whole photo)."""
-    import cv2
+    from ..imgops import gaussian_blur, warp_affine
     from .pipeline import output_size
     Ls = layers(edit)
     if not Ls:
@@ -204,15 +204,13 @@ def apply(image, edit, out: np.ndarray, window=None) -> np.ndarray:
             dy = (float(L.get("y", 0.55)) * oh - wy) * sc
             t = np.array([dx, dy]) - A @ np.array([cx, cy])
             M = np.hstack([A, t[:, None]]).astype(np.float64)
-            interp = cv2.INTER_AREA if k < 1 else cv2.INTER_LINEAR
-            sub = cv2.warpAffine(rgb, M, (ow_px, oh_px), flags=interp, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-            al = cv2.warpAffine(a, M, (ow_px, oh_px), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT,
-                                borderValue=0)
+            sub = warp_affine(rgb, M, ow_px, oh_px)
+            al = warp_affine(a, M, ow_px, oh_px)
             if not np.any(al > 1e-3):
                 continue
             fe = float(L.get("feather", 1.0)) * sc
             if fe > 0.3:
-                al = cv2.GaussianBlur(al, (0, 0), fe) * np.clip(al * 4.0, 0, 1) ** 0.5   # soften, never grow
+                al = gaussian_blur(al, fe) * np.clip(al * 4.0, 0, 1) ** 0.5   # soften, never grow
             if L.get("grain", True):
                 if dest_sigma is None:
                     dest_sigma = noise_sigma(out)

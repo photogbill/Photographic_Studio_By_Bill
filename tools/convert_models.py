@@ -7,6 +7,7 @@ and checks the result runs:
     model.onnx (Depth Anything V2 Small, onnx-community)        -> models/depth/depth_anything_v2_small.npz
     sam2.1_hiera_tiny_*.zip  (SAM 2.1 Hiera-Tiny, ONNX export)   -> models/sam/sam2.1_tiny_{encoder,decoder}.npz
     sam2.1_hiera_large_*.zip (SAM 2.1 Hiera-Large, ONNX export)  -> models/sam/sam2.1_large_{encoder,decoder}.npz
+    lama_fp32.onnx (LaMa, Carve/LaMa-ONNX, Apache-2.0)           -> models/inpaint/lama.npz (Retouch > Fill)
 Anything else is left alone. A model already converted (and newer than its download) is skipped unless --force.
 Work files go in the app's cache folder and are removed afterwards; nothing is written to C:\\ or the user profile.
 Needs onnx, plus onnxsim (or onnxslim) to fold the graphs; onnxruntime, when present, is used to check the answers.
@@ -65,8 +66,10 @@ def convert(src: str, dst: str, f16: bool) -> None:
     log.info("wrote %s: %d layers, %.1f MB", dst, len(g["nodes"]), os.path.getsize(dst) / 1e6)
 
 
-def check(npz: str, onnx_path: str, inputs: dict, outputs: list) -> str:
-    """Run the converted model; against ONNX Runtime too when it is installed. A one-line verdict."""
+def check(npz: str, onnx_path: str, inputs: dict, outputs: list, region=None, limit: float = 0.0) -> str:
+    """Run the converted model; against ONNX Runtime too when it is installed. A one-line verdict. ``region``: a
+    boolean (h, w) area judged on its own as well (for LaMa: the hole, where the model makes things up); a
+    difference there above ``limit`` (a fraction) is a failed conversion."""
     from studio.engine.local.onnxnp import Graph
     t = time.perf_counter()
     got = Graph.load(npz)(**inputs)
@@ -80,8 +83,17 @@ def check(npz: str, onnx_path: str, inputs: dict, outputs: list) -> str:
         return f"runs ({secs:.1f} s); onnxruntime not installed, so not compared"
     ref = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"]).run(outputs, inputs)
     errs = [float(np.abs(got[k] - r).mean() / (np.abs(r).mean() + 1e-12)) for k, r in zip(outputs, ref)]
-    return (f"runs ({secs:.1f} s); on a made-up test picture it differs from the original by "
-            f"{100 * max(errs):.2f}% on average")
+    txt = (f"runs ({secs:.1f} s); on a made-up test picture it differs from the original by "
+           f"{100 * max(errs):.2f}% on average")
+    if region is not None:
+        k, r = outputs[0], ref[0]
+        sel = np.broadcast_to(region, r.shape)
+        e = float(np.abs(got[k][sel] - r[sel]).mean() / (np.abs(r[sel]).mean() + 1e-12))
+        txt += f", {100 * e:.2f}% inside the hole"
+        if limit and e > limit:
+            raise RuntimeError(f"{os.path.basename(npz)}: differs from the original by {100 * e:.1f}% inside the "
+                               f"hole (limit {100 * limit:.0f}%)")
+    return txt
 
 
 def _test_image(size: int) -> np.ndarray:
@@ -147,6 +159,52 @@ def do_sam(src: str, size: str, force: bool) -> None:
         f"{os.path.getsize(dec_dst) / 1e6:.0f} MB). Choose it in Masks > Click-to-select.")
 
 
+LAMA_SHA256 = "1faef5301d78db7dda502fe59966957ec4b79dd64e16f03ed96913c7a4eb68d6"   # Carve/LaMa-ONNX lama_fp32.onnx
+LAMA_NOTICE = """LaMa inpainting model (Retouch > Fill, flare Rebuild)
+
+Model: LaMa, "Resolution-robust Large Mask Inpainting with Fourier Convolutions" (Suvorov, Logacheva, Mashikhin,
+Remizova, Ashukha, Silvestrov, Kong, Goka, Park, Lempitsky; WACV 2022), Samsung AI Center: github.com/advimman/lama,
+Apache License 2.0.
+ONNX export: Carve/LaMa-ONNX (huggingface.co/Carve/LaMa-ONNX), lama_fp32.onnx, Apache License 2.0.
+Trained on Places2 (Zhou et al.), CC BY 4.0: attribution to the Places2 authors.
+Converted by the Studio's tools/convert_models.py (Convert Models.bat) into its NumPy format (lama.npz).
+"""
+
+
+def do_lama(src: str, force: bool) -> None:
+    import hashlib
+    dst = os.path.join(MODELS, "inpaint", "lama.npz")
+    if not stale(dst, src, force):
+        say(f"LaMa: already converted ({os.path.basename(dst)}); skipped.")
+        return
+    h = hashlib.sha256()
+    with open(src, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    if h.hexdigest() != LAMA_SHA256:
+        say("LaMa: this lama .onnx is not the Carve/LaMa-ONNX lama_fp32.onnx the Studio knows (checksum differs); "
+            "converting it anyway, the check below says whether it runs.")
+    say(f"LaMa: converting {os.path.basename(src)} (inpainting, 512 x 512)...")
+    import onnx
+    m = onnx.load(src)
+    shapes = {i.name: ([1, 3, 512, 512] if k == 0 else [1, 1, 512, 512]) for k, i in enumerate(m.graph.input)}
+    folded = fold(src, os.path.join(WORK, "lama_512.onnx"), shapes)
+    # 16-bit weights, not 8-bit: folding turns this export's Fourier transforms into cos / sin tables, and 8-bit
+    # tables bend the transform enough to paint coloured blobs inside the hole (measured against ONNX Runtime)
+    convert(folded, dst, f16=True)
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    with open(os.path.join(os.path.dirname(dst), "NOTICE"), "w", encoding="utf-8") as fh:
+        fh.write(LAMA_NOTICE)
+    img = np.clip(_test_image(512) * np.array([0.229, 0.224, 0.225])[None, :, None, None] +
+                  np.array([0.485, 0.456, 0.406])[None, :, None, None], 0, 1)       # 0..1, as LaMa takes it
+    mask = np.zeros((1, 1, 512, 512), np.float32)
+    mask[..., 180:330, 200:320] = 1.0
+    names = list(shapes)
+    v = check(dst, folded, {names[0]: img.astype(np.float32), names[1]: mask}, [m.graph.output[0].name],
+              region=mask[0, 0] > 0.5, limit=0.02)
+    say(f"LaMa: done, {os.path.getsize(dst) / 1e6:.0f} MB; {v}. Retouch > Fill now uses it.")
+
+
 def find_downloads() -> list[tuple[str, str, str | None]]:
     """(kind, path, size) for every download recognised in models/ and the app folder."""
     out = []
@@ -161,6 +219,8 @@ def find_downloads() -> list[tuple[str, str, str | None]]:
             m = re.search(r"sam2(?:\.1)?_hiera_(tiny|large)", low)
             if m and low.endswith(".zip"):
                 out.append(("sam", p, m.group(1)))
+            elif low.endswith(".onnx") and "lama" in low:
+                out.append(("lama", p, None))
             elif low.endswith(".onnx") and (low == "model.onnx" or "depth" in low):
                 out.append(("depth", p, None))
     return out
@@ -173,12 +233,12 @@ def main(argv: list[str]) -> int:
     log.info("---- convert_models start: %s (python %s)", " ".join(argv) or "(no options)", sys.version.split()[0])
     found = find_downloads()
     if not found:
-        say("No model downloads found in the models folder. Put model.onnx (Depth Anything V2 Small) or the")
-        say("sam2.1_hiera_tiny / sam2.1_hiera_large zips there and run this again.")
+        say("No model downloads found in the models folder. Put model.onnx (Depth Anything V2 Small), the")
+        say("sam2.1_hiera_tiny / sam2.1_hiera_large zips or lama_fp32.onnx (LaMa) there and run this again.")
         return 1
     for kind, p, size in found:
         say(f"Found {os.path.basename(p)} ({os.path.getsize(p) / 1e6:.0f} MB): "
-            f"{'depth model' if kind == 'depth' else 'SAM 2.1 ' + size}")
+            f"{'depth model' if kind == 'depth' else ('LaMa inpainting' if kind == 'lama' else 'SAM 2.1 ' + size)}")
     if "--check-only" in argv:
         return 0
     os.makedirs(WORK, exist_ok=True)
@@ -187,12 +247,22 @@ def main(argv: list[str]) -> int:
         try:
             if kind == "depth":
                 do_depth(p, force)
+            elif kind == "lama":
+                do_lama(p, force)
             else:
                 do_sam(p, size, force)
         except Exception as e:                                       # keep going with the others
             bad += 1
             say(f"PROBLEM with {os.path.basename(p)}: {e}")
             log.error("%s", traceback.format_exc())
+            try:                                                     # rule 6: the fault reports itself
+                from studio import log as slog
+                rp = slog.save_error_report(f"Convert Models: converting {os.path.basename(p)}",
+                                            traceback.format_exc())
+                if rp:
+                    say(f"An error report was saved: {rp}. Send it to Bill.")
+            except Exception:                                        # noqa: BLE001 - the message above stands
+                pass
     shutil.rmtree(WORK, ignore_errors=True)
     log.info("---- convert_models end: %d problem(s)", bad)
     if bad:

@@ -93,7 +93,11 @@ if errorlevel 1 (
 :make
 echo.
 echo  Making update %NEWV% (was %CUR%)...
+rem  What changed (docs\NEXT_UPDATE.md, written as each part was built) is filed under
+rem  this version in CHANGELOG.md; GitHub shows those lines on the release page.
+"%PY%" "%~dp0tools\whats_new.py" --release %NEWV% >> "%LOG%" 2>&1
 git add studio/__init__.py pyproject.toml >> "%LOG%" 2>&1
+git add CHANGELOG.md docs/NEXT_UPDATE.md >> "%LOG%" 2>&1
 if defined WF_NEW git add .github/workflows/release.yml >> "%LOG%" 2>&1
 git commit -m "Release %NEWV%" >> "%LOG%" 2>&1
 if errorlevel 1 goto :git_fail

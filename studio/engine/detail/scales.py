@@ -60,7 +60,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.ndimage import gaussian_filter1d, map_coordinates, maximum_filter, uniform_filter
+from scipy.ndimage import map_coordinates, maximum_filter, uniform_filter
 
 from ... import log as slog
 from ..parallel import workers

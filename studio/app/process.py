@@ -98,6 +98,7 @@ def process_files(files: list, spec, dest: str, mode: str, cancel=None, on_step=
     """The work itself (engine calls only, so it can be tested without a window). Returns a report."""
     from .. import engine as E
     out, failed, auto = [], [], 0
+    taken: set = set()                      # two photos with the same name do not replace each other
     os.makedirs(dest, exist_ok=True)
     for i, f in enumerate(files):
         if cancel is not None and cancel.is_set():
@@ -114,13 +115,30 @@ def process_files(files: list, spec, dest: str, mode: str, cancel=None, on_step=
                     E.save_edit(f, edit)
                 except OSError as err:                 # a read-only drive: the export still gets the edit
                     log.warning("process: could not save Make it good into %s: %s", f, err)
-            out.append(E.export(img, edit, spec, out_dir=dest))
+            out.append(E.export(img, edit, spec, out_dir=dest, taken=taken))
             img.drop_cache()
         except Exception as err:                       # noqa: BLE001  (one bad photo does not stop the rest)
-            log.warning("process: %s failed: %s", f, err)
+            from .. import log as slog
+            from .common import report_problem
+            slog.log_exception(f"process: {f} failed", log)
+            report_problem(f"Process picks could not process {os.path.basename(f)}", err)
             failed.append((os.path.basename(f), str(err)))
     return {"out": out, "failed": failed, "auto": auto, "cancelled": bool(cancel is not None and cancel.is_set()),
             "dest": dest, "total": len(files)}
+
+
+def _rewire(button, fn) -> None:
+    """Make ``fn`` the button's only click action. The progress bar's buttons are used again by every run; the
+    action of the run before is taken off by name (a bare disconnect() warned on the first run, when there was
+    nothing to take off)."""
+    old = getattr(button, "_studio_click", None)
+    if old is not None:
+        try:
+            button.clicked.disconnect(old)
+        except (RuntimeError, TypeError):
+            pass
+    button._studio_click = fn
+    button.clicked.connect(fn)
 
 
 def run_process(page, files: list, spec, dest: str, mode: str) -> None:
@@ -135,11 +153,7 @@ def run_process(page, files: list, spec, dest: str, mode: str) -> None:
     page.prog_text.setStyleSheet("")
     page.prog_cancel.show()
     page.prog_open.hide()
-    try:
-        page.prog_cancel.clicked.disconnect()
-    except (RuntimeError, TypeError):
-        pass
-    page.prog_cancel.clicked.connect(lambda: (cancel.set(), page.prog_text.setText("Stopping after this photo...")))
+    _rewire(page.prog_cancel, lambda: (cancel.set(), page.prog_text.setText("Stopping after this photo...")))
     sig.step.connect(lambda i, name: (page.prog_bar.setValue(i),
                                       page.prog_text.setText(f"Processing {i + 1} of {n}: {name}")))
 
@@ -156,11 +170,7 @@ def run_process(page, files: list, spec, dest: str, mode: str) -> None:
             msg += ". Cancelled."
         page.prog_text.setText(msg + ".")
         page.prog_open.show()
-        try:
-            page.prog_open.clicked.disconnect()
-        except (RuntimeError, TypeError):
-            pass
-        page.prog_open.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(dest)))
+        _rewire(page.prog_open, lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(dest)))
         page.last_process = rep
 
     def fail(_, err):

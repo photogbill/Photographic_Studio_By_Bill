@@ -50,37 +50,7 @@ def _planes(mos, pattern):
     return out
 
 
-def _phase_shift(a, b, iters: int = 3):
-    """Sub-pixel shift (dy, dx) that maps b onto a, by phase correlation. The parabolic peak fit is biased toward
-    whole pixels, so the estimate is refined: b is moved by the current estimate (Fourier shift) and the small
-    remainder is measured again, where the bias is negligible."""
-    win = np.outer(np.hanning(a.shape[0]), np.hanning(a.shape[1]))
-    A = np.fft.fft2(a * win)
-    Bf = np.fft.fft2(b * win)
-    fy = np.fft.fftfreq(a.shape[0])[:, None]
-    fx = np.fft.fftfreq(a.shape[1])[None, :]
-    ty = tx = 0.0
-    peak = 0.0
-    h, w = a.shape
-
-    def sub(cm, c0, cp):
-        d = cm - 2 * c0 + cp
-        return 0.0 if abs(d) < 1e-12 else 0.5 * (cm - cp) / d
-    for _ in range(iters):
-        B = Bf * np.exp(-2j * np.pi * (fy * ty + fx * tx))
-        R = A * np.conj(B)
-        R /= np.abs(R) + 1e-9
-        c = np.fft.ifft2(R).real
-        iy, ix = np.unravel_index(np.argmax(c), c.shape)
-        dy = iy + sub(c[(iy - 1) % h, ix], c[iy, ix], c[(iy + 1) % h, ix])
-        dx = ix + sub(c[iy, (ix - 1) % w], c[iy, ix], c[iy, (ix + 1) % w])
-        dy = dy - h if dy > h / 2 else dy
-        dx = dx - w if dx > w / 2 else dx
-        ty, tx = ty + dy, tx + dx
-        peak = float(c.max())
-        if abs(dy) < 0.01 and abs(dx) < 0.01:
-            break
-    return ty, tx, peak
+from ..stack.align import phase_shift as _phase_shift   # noqa: E402  (one copy, in stack/align.py)
 
 
 def estimate_lateral_ca(mos: np.ndarray, pattern, grid=(9, 13), tile=64) -> LateralCA:

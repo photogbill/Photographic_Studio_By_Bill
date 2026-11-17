@@ -34,6 +34,8 @@ Build it phase by phase, in order. Do not start a phase until the one before it 
 10. **Honesty over polish.** If a technique does not beat the baseline on Bill's own files, say so and drop it. Keep a `docs/RESULTS.md` with what was tried and what the measurements were.
 11. **The look matters.** Bill's rule: the better a tool looks, the more it is used. Dark, cinematic, high-contrast UI; smooth previews; before/after wipes. Results that come from different methods are colour-coded (for example: measured from calibration = cyan, estimated from the image = amber, from the shared database = violet).
 12. **Each area gets its own sidebar section** (section 6). Nothing may look like an email inbox.
+13. **Write down what changed as you build it** (Bill, 2026-11-16). After any part is built or fixed, add one plain line for photographers to `docs/NEXT_UPDATE.md` (`- New: ...`, `- Fixed: ...`). `push.bat` sends those lines as the comment, `Release.bat` files them in `CHANGELOG.md` under the new version (`tools/whats_new.py`), and GitHub shows them on the release page that "What's new" opens. Bill does not write comments ("otherwise I won't write them"), and `push.bat` stays "just push".
+14. **Errors report themselves** (Bill, 2026-11-16). An unexpected error writes `error_reports/error_YYYY-MM-DD_HH-MM-SS.txt` beside the app by itself (`studio/log.py: save_error_report`; in the app call `common.report_problem(what, exc)` inside the `except`). Testers send the file. Problems that are not faults of the Studio (an unreadable raw, a read-only drive, no internet) are said where they happen and write no report.
 
 ### 0.4 Decisions already made by Bill (do not reopen without asking)
 | Topic | Decision |
@@ -52,6 +54,9 @@ Build it phase by phase, in order. Do not start a phase until the one before it 
 | Calibration | A wizard: printable checklist → drop files in step by step → calibration runs. ISO 100 up to max and back down (cold pass, hot pass), plus long exposures. No artificial warm-up. Separate lens wizard. |
 | Exposure latitude | Calibration also measures ETTR and ETTL behaviour per body (7.1): how much a frame can be pushed or pulled, and what shadow noise and highlight behaviour result. The wizard must be easy for non-technical users (7.2). |
 | Integrations | Send to Photoshop, Send to PhotoCraft (github.com/storytold/photocraft), a Photoshop UXP panel, and a home inside ATK's Digital Forensics Workshop. |
+| Export names | Every export is named after its photo with `_Studio` added: `IMG_0001.CR2` becomes `IMG_0001_Studio.tif` (`io/export.py: export_name`). Never the original's name; a file the Studio did not write is never replaced. (2026-11-16) |
+| Installer | The person picks where the Studio installs: the folder window opens first. (2026-11-16) |
+| Unbuilt tabs | Build them, do not label them "coming soon": `BUILD_PLAN_TABS.md` (Dual Pixel Lab, Focus Stack, Super-Res Stack). (2026-11-16) |
 | Library and card import | The Library is where the photographer decides what to process, with no need for Windows Explorer. **Import from card** copies photos from a card into the photographer's own Photos folder (they choose it: internal or external drive), always into a subfolder they can name, the shoot date by default. Raws only by default. Section 24. |
 
 ### 0.5 How to work
@@ -1079,3 +1084,101 @@ One lost shoot in a group of 150,000 is the story everyone hears. Each rule has 
 **Later:** a thumbnail picker inside the import dialog; renaming files on import; cameras over a USB cable (MTP); reading in-camera ratings into the Library (verify per brand); an Eject button; "Move rejects to a `_rejects` folder" (a move, never a delete); four-up compare.
 
 **Out of scope:** any catalogue or database that the photos depend on (section 1: no catalogue lock-in; the index and the import record can both be thrown away), tethered shooting, phone imports.
+
+## 25. Two more tabs: Panorama and Infrared / Full Spectrum (Bill's ideas, 2026-11-16)
+
+**Build from `BUILD_PLAN_PANO_IR.md`** (the detailed plan, with the facts measured on Bill's files). This section is
+the short version.
+
+Bill's words: his folders "can test panoramic stitching", and "we can even make a tab specifically for editing full
+spectrum / infrared photos. Because those can be a challenge, with the color channels and white balance, etc."
+Written down after the three stack tabs were built (`BUILD_PLAN_TABS.md`), so both can stand on `stack/align.py`,
+`stack/frames.py`, `io/intermediate.py` and `app/stackui.py`. Not started. Rules of section 0 and `BUILD_PLAN_TABS.md`
+0.1 apply (names `..._Studio.tif`, nothing written to C:\, every method says what it is best for and weak at, colour
+coding, a test on synthetic truth for each algorithm).
+
+### 25.1 Infrared / Full Spectrum tab (build this one first: Bill shoots IR, and it is mostly colour work)
+
+**Why a tab and not sliders in Develop:** an IR raw breaks the assumptions Develop makes. The camera's white balance
+range stops near 2000 K, but IR needs the red channel pulled down far further than that; the camera matrix was made
+for visible light, so it turns IR into nonsense colours; the photographer wants channel swaps that no visible-light
+editor offers; and the filter decides everything, so the tab starts by asking which filter was on.
+
+**Test files (in `test_raws\`, git-ignored):** `infrared_850` (2 frames) and `infrared_850_candlelit` (20 candlelit
+portraits), 850 nm; `ir_visible_fusion` (visible + IR experiment, 2008). All of Bill's infrared and full-spectrum work
+is on one converted **Canon EOS 450D (Rebel XSi)**, so the filter profiles can be built for that one sensor first;
+his full-spectrum folders (`20210909 full spec`, `20210911_full_spec` on the archive drive) have many more examples. Bill also shoots
+530 / 590 / 650 / 720 nm and full spectrum; ask him for one frame of each with a grey card or white wall in it.
+
+**Filter profiles** (picker at the top; each says what it gives and what it is weak at):
+| Filter | What the camera records | Default treatment |
+|---|---|---|
+| Full spectrum (no filter, or a hot-mirror off) | Visible + IR: everything pink-red | White balance on a neutral; offer "Remove IR" (subtract a scaled IR estimate) only if a matching 720+ frame exists |
+| 530 / 550 nm | Strong colour, foliage gold to orange | Channel swap red/blue, white balance on foliage |
+| 590 nm | Classic "false colour IR": gold foliage, blue sky after swap | Red/blue swap, white balance on foliage |
+| 650 / 665 nm | Less colour, cream foliage | Swap, low saturation |
+| 720 nm (Bill's very purple frames) | Faint colour, mostly luminance | Swap optional; offer B&W with the channel that has most detail |
+| 850 nm and up | Almost pure luminance, same in all channels | Black and white by default; the colour that is there is noise and filter leak |
+| Unknown | Estimate from the raw: the ratio of the channel means and how alike the channels are (850 nm makes them nearly equal) | Show the guess in amber |
+
+**Controls (in the tab, before Develop):**
+1. **White balance beyond the camera's range.** Channel multipliers in the raw space directly (not temperature/tint),
+   with a picker for "click foliage" (foliage is the IR photographer's neutral) and "click a neutral". Range
+   0.05x-20x per channel. Stored as multipliers in the sidecar so Develop shows the same thing.
+2. **Channel mixer / swap** (3 x 3 matrix in linear camera RGB, after white balance): presets *Red/blue swap*,
+   *Blue sky (590)*, *Goldie*, *Mono from the best channel*, and a full matrix in Full mode. Each row sums are shown so
+   brightness is not changed by surprise.
+3. **IR camera profile.** A replacement for the visible-light matrix: identity (no colour science pretended) or a
+   profile measured from a frame of a printed colour chart under daylight through that filter (a "calibrate this
+   filter" button, same pattern as the Cameras page). Measured = cyan, shared preset = violet, estimated = amber.
+4. **False-colour presets** for the look Bill teaches: *Classic IR (590 swap)*, *Wood effect (850 B&W, glowing
+   foliage)*, *Aerochrome-like* (IR to red, red to green, green to blue), *Candle IR* (keep the candle warm while the
+   rest is IR). Presets are ordinary settings of 1-3, so the person can still move them.
+5. **Hot-spot finder.** Many lenses show a bright centre in IR. Measure it the way lens falloff is measured
+   (`lens/`), show it, and offer a correction (off by default, like vignetting).
+6. **Fusion.** Visible + IR frames of the same scene (Bill's 2008 folder): align with `stack/align.py`, then put IR
+   luminance under visible colour, or IR into one channel. Mode picker with texts.
+
+Then **Open in Develop** with every tool; the IR settings stay in the sidecar so a second photo from the same shoot can
+take them with Paste settings.
+
+**Tests (synthetic truth):** a scene rendered through known filter curves (590, 720, 850) with known foliage and sky
+reflectances: the filter guess gets the right family; white balance on foliage brings foliage to neutral within 1%;
+the swap matrix maps the sky to blue; multipliers out to 20x do not clip in float; a hot spot added to a flat field is
+measured within 5%. Real-file checks on the 850 nm candle frames: the default is B&W, the candle flame is not tinted
+by the channel swap.
+
+### 25.2 Panorama tab
+
+**Reuses:** `stack/align.py` for the pairwise overlap (tiles, IRLS fits; homography for a rotating camera), `frames.py`
+for probing and checks, the intermediate for the result.
+
+**Pipeline:**
+1. **Order and overlap.** Frames in time order; pairwise overlap found by phase correlation of strongly downsized
+   copies at a few candidate offsets (a panorama overlaps 20-50%, outside `register`'s search range), then refined
+   with `register` (homography) on the overlap region only.
+2. **Global adjustment.** Bundle adjustment of focal length and per-frame rotation (a rotating camera: homographies
+   are rotations under one focal length), Levenberg-Marquardt, robust loss. The EXIF focal length is the start; an
+   adapted lens has none, so ask for it or estimate it (amber).
+3. **Projection** picker with texts: rectilinear (up to about 120 degrees, straight lines stay straight), cylindrical
+   (wide horizontal), spherical / equirectangular (360 x 180, for viewers), and Mercator / Panini for architecture.
+4. **Exposure matching** in linear light: one gain per frame from the overlaps (least squares), then vignetting from
+   the lens profile or measured.
+5. **Seams.** Graph-cut seam through the overlap that avoids moving things (people, water, leaves) and high-contrast
+   edges, then multi-band blending (Burt and Adelson) along it. A "ghost" view shows where frames disagree.
+6. **Crop** to the largest rectangle, or keep the irregular edge with transparent borders (TIFF alpha).
+7. **Build in bands** so a 20-frame, 45 MP panorama fits in memory (the streaming pattern of the stack tabs).
+
+**Honest limits to state on the page:** parallax (handheld near subjects) leaves seams that no blend fixes; moving
+water and people get cut, not merged; a lens with no focal length in EXIF needs it typed or estimated.
+
+**Tests (synthetic truth):** a large known scene cut into overlapping views by known rotations and focal length:
+recovered rotations within 0.05 degrees and focal length within 0.5%; a moving object in one overlap is avoided by the
+seam; frames with different gains match within 1%; the result in rectilinear projection keeps a known straight line
+straight within 1 px. Real files: Bill's folders with overlapping frames (ask him which shoots were panoramas).
+
+### 25.3 Order
+
+Infrared first (a smaller job, mostly colour, and Bill shoots it now); Panorama second (bundle adjustment and seams
+are new code). Each tab: engine and tests, then the page on `stackui.py`, then a Help card, a README row and a line in
+`docs/NEXT_UPDATE.md`.

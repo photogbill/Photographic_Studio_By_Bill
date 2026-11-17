@@ -45,7 +45,7 @@ class TiffReader:
         else:
             raise ValueError("not a TIFF stream")
         magic = struct.unpack_from(self.e + "H", buf, base + 2)[0]
-        if magic not in (42, 0x4F52, 0x5352):   # 42 = TIFF; ORF variants tolerated
+        if magic not in (42, 0x4F52, 0x5352, 0x55):   # 42 = TIFF; Olympus ORF variants; 0x55 = Panasonic RW2
             raise ValueError("bad TIFF magic %r" % magic)
         self.ifd0_offset = struct.unpack_from(self.e + "I", buf, base + 4)[0]
 

@@ -70,14 +70,18 @@ def test_grain_is_matched_and_colours_follow_the_scene(photos):
     im = engine.open(dst)
     rng = np.random.default_rng(0)
     plain = engine.render(im, engine.Edit())
-    noisy = (plain * np.exp(rng.standard_normal(plain.shape[:2]) * 0.05)[..., None]).astype(np.float32)
+    # Grain clearly above the subject's own: the astronaut photo measures about 0.046 by itself (its JPEG
+    # texture), so a 5% grain left almost nothing to add and the old 1.5x check could not pass.
+    noisy = (plain * np.exp(rng.standard_normal(plain.shape[:2]) * 0.10)[..., None]).astype(np.float32)
     eg, en = engine.Edit(), engine.Edit()
     eg.composite, en.composite = [dict(L, grain=True)], [dict(L, grain=False)]
     out, out0 = cp.apply(im, eg, noisy), cp.apply(im, en, noisy)
     al = np.abs(out0 - noisy).max(axis=2) > 0.02
     from scipy.ndimage import binary_erosion
     inside = binary_erosion(al, iterations=4)
-    assert cp.noise_sigma(out, inside.astype(np.float32)) > 1.5 * cp.noise_sigma(out0, inside.astype(np.float32))
+    g, n0 = cp.noise_sigma(out, inside.astype(np.float32)), cp.noise_sigma(out0, inside.astype(np.float32))
+    assert abs(g - cp.noise_sigma(noisy)) < 0.15 * cp.noise_sigma(noisy)     # the subject's grain matches the scene
+    assert g > 1.5 * n0
     p, mult, rep = engine.colour_match_solve(cp._source(src), engine.Edit(), im, engine.Edit())
     Lm = dict(L, match={"p": list(map(float, p)), "mult": list(map(float, mult)), "amount": 1.0})
     e0, e1 = engine.Edit(), engine.Edit()

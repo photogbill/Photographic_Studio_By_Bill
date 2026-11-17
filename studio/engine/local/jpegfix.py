@@ -117,8 +117,9 @@ def consistent(p: np.ndarray, q: np.ndarray, ref: np.ndarray) -> float:
 def repair_file(path: str, iterations: int = ITERATIONS) -> tuple[np.ndarray, dict]:
     """The JPEG at ``path`` decoded and repaired, as stored (not yet turned upright): uint16 (h, w) or (h, w, 3),
     and a report."""
-    import cv2
     from PIL import Image as PI
+
+    from ..imgops import resize_linear
     t = time.perf_counter()
     inf = info(path)
     if inf is None:
@@ -144,8 +145,7 @@ def repair_file(path: str, iterations: int = ITERATIONS) -> tuple[np.ndarray, di
                     pp = np.pad(pl, ((0, sh * fy - h), (0, sw * fx - w)), mode="edge")
                     small = pp.reshape(sh, fy, sw, fx).mean(axis=(1, 3))
                     fixed = repair_plane(small, q[L[3]], iterations)
-                    pl = cv2.resize(fixed.astype(np.float32), (sw * fx, sh * fy),
-                                    interpolation=cv2.INTER_LINEAR)[:h, :w].astype(np.float64)
+                    pl = resize_linear(fixed, sw * fx, sh * fy)[:h, :w].astype(np.float64)
                 else:
                     pl = repair_plane(pl, q[L[3]], iterations)
                 planes.append(pl)

@@ -18,6 +18,9 @@ Shape types:
   object      w, h, data (zlib + base64 bitmap of the S frame at w x h), fg / bg seed points: "click an object",
               GrabCut-style colour models on a small render, refined with a guided filter
   skin        skin tones (OKLCh hue, colourfulness and lightness band around typical skin), refined to edges
+  channel     w, h, data (one raw channel, or a difference or ratio of two, as a bitmap of the S frame, 0..1 over
+              its range), source, lo, hi, soft: select where a channel says "foliage" or "sky" (Infrared, plan
+              1.5c); the channels are the white-balanced camera channels, before any mix
   person      w, h, data (person probability, as for object), people (33 body points each, S fractions + how
               visible), faces (face outlines from Find faces), part: person | background | skin | face | hair |
               clothes | arms | legs | torso (local/people.py), refined to edges
@@ -171,6 +174,15 @@ def shape_alpha(sh: dict, c: Ctx) -> np.ndarray:
         fx = c.xs / c.sw * bm.shape[1] - 0.5
         a = map_coordinates(bm, [fy, fx], order=1, mode="nearest").astype(np.float32)
         return refine(a, c)
+    if t == "channel":                       # select by a raw channel, difference or ratio (Infrared 1.5c)
+        bm = decode_bitmap(sh["data"], int(sh["w"]), int(sh["h"])).astype(np.float32) / 255.0
+        fy = c.ys / c.sh * bm.shape[0] - 0.5
+        fx = c.xs / c.sw * bm.shape[1] - 0.5
+        V = map_coordinates(bm, [fy, fx], order=1, mode="nearest").astype(np.float32)
+        if sh.get("raw"):
+            return V
+        lo, hi, s = float(sh.get("lo", 0.5)), float(sh.get("hi", 1.0)), max(float(sh.get("soft", 0.1)), 1e-3)
+        return refine((_smooth((V - (lo - s)) / s) * (1.0 - _smooth((V - hi) / s))).astype(np.float32), c)
     if t == "depth":                         # select by distance (local/depth.py): near = 1, far = 0
         bm = decode_bitmap(sh["data"], int(sh["w"]), int(sh["h"])).astype(np.float32) / 255.0
         fy = c.ys / c.sh * bm.shape[0] - 0.5

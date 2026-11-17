@@ -7,6 +7,7 @@ rem  on this PC. Put the downloads in the models folder first:
 rem    model.onnx                    Depth Anything V2 Small (depth, Masks > Depth)
 rem    sam2.1_hiera_tiny_*.zip       SAM 2.1 Tiny  (click-to-select, fast)
 rem    sam2.1_hiera_large_*.zip      SAM 2.1 Large (click-to-select, finest edges)
+rem    lama_fp32.onnx                LaMa (Retouch > Fill; huggingface.co/Carve/LaMa-ONNX)
 rem  Each is converted once (Large takes several minutes) and checked. Run it
 rem  again after adding another download; finished ones are skipped.
 rem  Add  --force  to convert everything again.

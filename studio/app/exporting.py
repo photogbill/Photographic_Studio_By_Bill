@@ -56,7 +56,9 @@ class ExportDialog(QDialog):
         grid.addWidget(self.dest, 4, 1)
         grid.addWidget(browse, 4, 2)
         v.addLayout(grid)
-        v.addWidget(label("Edits come from each photo's sidecar. Serial numbers and GPS are never written.", "dim",
+        v.addWidget(label("Each file is named after its photo with _Studio added (IMG_0001_Studio.tif), so it never "
+                          "has your original's name. Exporting again replaces the Studio's own earlier export. Edits "
+                          "come from each photo's sidecar. Serial numbers and GPS are never written.", "dim",
                           wrap=True))
         self._fill_presets(settings.get("export_preset", ""))
         self._preset_picked(self.preset.currentIndex())
@@ -137,10 +139,10 @@ def QLineEdit_(text):
 
 
 def version_export_path(raw_path: str, version: int, spec, dest: str) -> str:
-    """File name for exporting a virtual copy: IMG_0001_Dark_one.tif beside IMG_0001.tif (the master)."""
+    """File name for exporting a virtual copy: IMG_0001_Dark_one_Studio.tif beside IMG_0001_Studio.tif (the
+    master)."""
     import re
     from .. import engine as E
-    from ..engine.io.export import EXT
+    from ..engine.io.export import export_name
     tag = re.sub(r"[^\w\-]+", "_", E.list_versions(raw_path)[version]).strip("_") or f"copy{version}"
-    return os.path.join(dest, os.path.splitext(os.path.basename(raw_path))[0] + "_" + tag + spec.suffix +
-                        EXT[spec.format])
+    return os.path.join(dest, export_name(raw_path, spec, extra=tag))

@@ -127,8 +127,8 @@ class SubjectPicker(QDialog):
         def done(_, res):
             self.shape, a = res
             if a.shape[:2] != self.base.shape[:2]:
-                import cv2
-                a = cv2.resize(a, (self.base.shape[1], self.base.shape[0]))
+                from ..engine.imgops import resize_linear
+                a = resize_linear(a, self.base.shape[1], self.base.shape[0])
             self._alpha = a
             self._show(a)
             self.ok_b.setEnabled(True)

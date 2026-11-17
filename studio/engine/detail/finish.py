@@ -17,7 +17,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
-from scipy.ndimage import gaussian_filter, minimum_filter, uniform_filter
+from scipy.ndimage import minimum_filter, uniform_filter
 
 from ... import log as slog
 

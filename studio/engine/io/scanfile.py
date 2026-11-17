@@ -248,6 +248,7 @@ class ScanImage:
     wb_daylight: np.ndarray = field(default_factory=lambda: np.ones(3))
     cam_xyz: np.ndarray = field(default_factory=lambda: np.linalg.inv(sp.PROPHOTO.to_xyz_d50))
     notes: list = field(default_factory=list)
+    scene_linear: bool = False          # a stacking tool's result (io/intermediate.py): already scene light
     _luts: list | None = None
 
     # The "camera" of a scan is linear ProPhoto (D50): the file's white is (1, 1, 1), so the as-shot balance is
@@ -304,11 +305,26 @@ class ScanImage:
         from PIL import Image as PI
         k = max(1, int(np.ceil(max(self.width, self.height) / THUMB_LONG)))
         lin = self.display_linear()[::k, ::k] if k > 1 else self.display_linear()
+        if self.scene_linear:                       # scene light: put the default look on, as Develop shows it
+            lin = scene_to_display(np.ascontiguousarray(lin))
         M = sp.conversion_matrix(sp.PROPHOTO, sp.SRGB)
         s = sp.srgb_encode(np.clip(sp.apply_matrix(np.ascontiguousarray(lin), M), 0.0, 1.0))
         buf = io.BytesIO()
         PI.fromarray((s * 255.0 + 0.5).astype(np.uint8)).save(buf, "JPEG", quality=88)
         return buf.getvalue()
+
+
+def scene_to_display(rgb_pp: np.ndarray) -> np.ndarray:
+    """Scene-linear ProPhoto -> display-linear ProPhoto through the default Studio Standard curve (per channel in
+    the render space, as Develop applies it): the inverse of pipeline.scan_to_scene. For thumbnails of the
+    stacking tools' results, which would look flat and dark shown as they are stored."""
+    from ..color import tone as T
+    from ..pipeline.edit import Tone
+    t = Tone()
+    r = sp.apply_matrix(np.ascontiguousarray(rgb_pp, np.float32), T.PP_TO_RENDER)
+    r = np.asarray(T.standard_curve(np.maximum(r, 0.0), mid_in=t.mid_grey, contrast=t.contrast,
+                                    shoulder=t.shoulder, white=t.white, toe=t.toe), np.float32)
+    return sp.apply_matrix(np.clip(r, 0.0, 1.0), T.RENDER_TO_PP)
 
 
 def _half(a: np.ndarray) -> np.ndarray:
@@ -349,6 +365,15 @@ def open_scan(path: str) -> ScanImage:
     bits = 32 if a.dtype.kind == "f" else (16 if a.dtype == np.uint16 else 8)
     img = ScanImage(path=path, meta=meta, data=a, profile=prof, height=h, width=w, crop=(0, 0, w, h), bits=bits,
                     grey=grey)
+    if a.dtype.kind == "f" and low.endswith((".tif", ".tiff")):
+        from .intermediate import read_info
+        info = read_info(path)
+        if info is not None:
+            img.scene_linear = True                 # pipeline._scan_linear keeps the light as it is
+            # exactly linear ProPhoto (the embedded profile says so, rounded to 1/65536 per primary)
+            img.profile = Profile("ProPhoto RGB (linear)", [lambda v: v] * (1 if grey else 3), sp.PROPHOTO.to_xyz_d50,
+                                  "icc")
+            img.notes.append(f"Result of the Studio's {info.get('kind', 'stacking')} tool: scene-linear light.")
     log.info("scan %s: %dx%d, %d-bit %s, profile %s (%s)", os.path.basename(path), w, h, bits,
              "grey" if grey else "RGB", prof.name, prof.source)
     return img
@@ -359,6 +384,16 @@ def scan_preview(path: str, max_side: int | None = None) -> np.ndarray:
     managed with the file's profile: the Library thumbnail and the Review view's "file preview"."""
     from PIL import Image as PI
     low = path.lower()
+    if low.endswith((".tif", ".tiff")):
+        from .intermediate import read_info, read_preview
+        if read_info(path) is not None:             # a stack result: it carries its own small preview
+            pv = read_preview(path)
+            if pv is not None:
+                if max_side and max(pv.shape[:2]) > max_side:
+                    im = PI.fromarray(pv)
+                    im.thumbnail((max_side, max_side), PI.Resampling.BILINEAR)
+                    pv = np.asarray(im)
+                return np.ascontiguousarray(pv)
     if low.endswith((".jpg", ".jpeg")) and max_side:
         with PI.open(path) as im:
             icc = im.info.get("icc_profile")
@@ -376,9 +411,17 @@ def scan_preview(path: str, max_side: int | None = None) -> np.ndarray:
     a = _upright(a, orient)
     grey = a.ndim == 2
     prof = profile_for(icc, grey)
+    scene = False
     if a.dtype.kind == "f":
-        v = np.clip(a.astype(np.float32), 0.0, 1.0)
+        v = np.maximum(a.astype(np.float32), 0.0)
         lin = v if grey else v
+        from .intermediate import read_info
+        scene = (not grey) and read_info(path) is not None
+        if scene:                                  # a stack result: show it with the default look, as Develop does
+            lin = scene_to_display(np.ascontiguousarray(lin))   # (lin is ProPhoto: its profile is linear ProPhoto)
+            prof = Profile("ProPhoto RGB", [lambda x: x] * 3, sp.PROPHOTO.to_xyz_d50, "icc")
+        else:
+            lin = np.clip(lin, 0.0, 1.0)
     else:
         v = a.astype(np.float32) / float(np.iinfo(a.dtype).max)
         lin = np.asarray(prof.curves[0](v), np.float32) if grey else \

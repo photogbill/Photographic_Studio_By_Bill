@@ -1,7 +1,7 @@
 """Photographic Studio By Bill - the desktop app (Phase 4 shell, Phase 5 lens and shape, Phase 6 develop panels).
 
 One window, a sidebar of workspaces (section 1, rule 0.3.12): Library, Develop, Dual Pixel Lab, Focus Stack,
-Super-Res Stack, Lenses, Cameras, Export, Help. The interface talks to the engine only through its API
+Super-Res Stack, Infrared, Panorama, Lenses, Cameras, Export, Help. The interface talks to the engine only through its API
 (studio.engine) and never blocks: every render, thumbnail and export runs in the background.
 """
 from __future__ import annotations
@@ -22,7 +22,7 @@ from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QImage, QKe
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
                                QFileDialog, QFrame, QInputDialog,
                                QGridLayout, QHBoxLayout, QLabel, QListView, QListWidget, QListWidgetItem, QMainWindow,
-                               QMenu, QMessageBox, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox,
+                               QMenu, QMessageBox, QPushButton, QScrollArea, QSizePolicy, QSlider,
                                QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
 from .. import __version__, log as slog, paths
@@ -33,9 +33,14 @@ from .widgets import (CurveEditor, DetailMeter, FilmicPlot, GradeWheel, GroupDia
 
 from .common import (GLOW_HOWTO, POOL, STARS, _LIVE, Job, LensDialog, Settings, _Sig, card, chip,  # noqa: F401
                      dot_icon, hbox, label, load_thumb, qalpha, run_bg, tag_lens, to_qimage)
-from .common import display8  # noqa: F401
+from .common import BUS, display8, report_problem  # noqa: F401
 from .exporting import ExportDialog, QLineEdit_, version_export_path  # noqa: F401
 from .library import LibraryPage  # noqa: F401  (section 24: the Library lives in its own file)
+from .dualpixel import DualPixelPage  # noqa: E402  (the three stacking tabs: BUILD_PLAN_TABS)
+from .focusstack import FocusStackPage  # noqa: E402
+from .superres import SuperResPage  # noqa: E402
+from .infrared import InfraredPage  # noqa: E402  (BUILD_PLAN_PANO_IR: the Infrared tab)
+from .panorama import PanoramaPage  # noqa: E402  (BUILD_PLAN_PANO_IR: the Panorama tab)
 
 log = slog.get("app")
 
@@ -371,6 +376,8 @@ class Viewer(QWidget):
         self._hint_timer = QTimer(self, singleShot=True, interval=3200, timeout=self.update)   # hides the hint
         self.spots = []                            # retouch spots to draw: {"pts", "src", "r", "kind", "sel", "auto"}
         self.show_spots = False
+        self.ghosts = []                           # flare ghosts to draw: {"uv", "r", "on", "sel", "n"}
+        self.show_ghosts = False
         self._sdrag = None                         # (index, "dst" | "src", start uv)
         self._pan = None                           # (start position, start centre) while the photo is dragged
         self.faces = []                            # portrait: [{"lines": [[(u, v), ...], ...], "how"}]
@@ -588,7 +595,8 @@ class Viewer(QWidget):
         if self.after is None:
             p.setPen(QColor(T.DIM))
             p.setFont(QFont("Segoe UI", 12))
-            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.message)
+            p.drawText(self.rect().adjusted(40, 20, -40, -20),
+                       int(Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap), self.message)
             if self.busy:                                    # opening a photo: the slowest render of all
                 self._paint_busy(p, self._fit(None))
             return
@@ -622,6 +630,8 @@ class Viewer(QWidget):
             self._draw_part(p, r, self.overlay)
         if self.spots and (self.tool == "spot" or self.show_spots):
             self._paint_spots(p, r)
+        if self.ghosts and self.show_ghosts:
+            self._paint_ghosts(p, r)
         if self.faces and (self.show_faces or self.tool == "eyes"):
             self._paint_faces(p, r)
         if self.shapes and (self.show_shapes or self.tool in ("shape", "sculpt")):
@@ -689,6 +699,18 @@ class Viewer(QWidget):
             if src and (sp.get("sel") or self.tool == "spot"):
                 p.setPen(QPen(col, 1, Qt.PenStyle.DotLine))
                 p.drawLine(dst[0], src[0])
+
+    def _paint_ghosts(self, p, r):
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        L = self._long_px(r)
+        for g in self.ghosts:
+            c = self._px(g["uv"], r)
+            rad = max(4.0, g["r"] * L)
+            col = QColor(T.AMBER) if g.get("on", True) else QColor(T.DIM)
+            p.setPen(QPen(col, 2.2 if g.get("sel") else 1.4, Qt.PenStyle.DashLine))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(c, rad, rad)
+            self._tag(p, QPointF(c.x() + rad * 0.72, c.y() - rad * 0.72), str(g["n"]), colour=col.name())
 
     def _spot_at(self, uv):
         """(index, "dst" | "src") of the spot under a photo position, or None. Sources are checked first only
@@ -1272,6 +1294,7 @@ class DevelopPage(QWidget):
         self._dirty_base = False               # the whole-photo preview needs rendering for the current settings
         self._dirty_tile = False               # the zoomed view's sharp tile does
         self.before_img = None
+        self._saved_state = None               # what the sidecar holds (see save_sidecar): None = not known
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -1622,8 +1645,9 @@ class DevelopPage(QWidget):
         self.cp_grain.setToolTip("Adds this photo's measured noise to the subject when it is cleaner, so it does "
                                  "not look pasted on.")
         self.cp_row = g.add(hbox(self.cp_flip, self.cp_grain))
-        self.cp_match_b = QPushButton("Match its colours to this photo")
-        self.cp_match_b.setToolTip("Works out exposure, contrast, white balance, saturation and colour wheels that "
+        self.cp_match_b = QPushButton("Match its colours")      # (a longer name made the panel wider than its space)
+        self.cp_match_b.setToolTip("Match the subject's colours to this photo. "
+                                   "Works out exposure, contrast, white balance, saturation and colour wheels that "
                                    "give the subject's photo this photo's colour mood, and develops the subject "
                                    "with them.")
         self.cp_match_b.clicked.connect(self._composite_match)
@@ -1723,6 +1747,48 @@ class DevelopPage(QWidget):
                                        "How much of the measured corner darkening to remove."))
         self.ca.setToolTip("Lateral chromatic aberration, measured from this photo: no lens profile needed.")
         self.ca_chip = g.add(chip("Lateral CA: -"))
+        # flare ghosts (local/flare.py): the round reflections a bright light leaves, worst in infrared
+        g.add(label("Flare ghosts", "dim"))
+        self.fl_find = QPushButton("Find flare ghosts")
+        self.fl_find.setToolTip("Look for the round ghost reflections a bright light (the sun, a lamp) leaves "
+                                "along a line through the centre of the photo. Infrared shows them most: lens "
+                                "coatings are made for visible light.")
+        self.fl_find.clicked.connect(self.find_flare)
+        self.fl_show = QPushButton("Show")
+        self.fl_show.setCheckable(True)
+        self.fl_show.setToolTip("Draw the ghosts on the photo (amber: found by estimate)")
+        self.fl_show.toggled.connect(self._show_ghosts)
+        for b in (self.fl_find, self.fl_show):
+            b.setStyleSheet("padding: 5px 8px;")
+        g.add(hbox(self.fl_find, self.fl_show))
+        self.fl_list = QListWidget()
+        self.fl_list.setMaximumHeight(92)
+        self.fl_list.setToolTip("Untick a ghost to leave it alone (a real round thing, not a reflection)")
+        self.fl_list.itemChanged.connect(self._ghost_ticked)
+        self.fl_list.currentRowChanged.connect(lambda *_: self._refresh_ghost_view())
+        self.fl_list.hide()
+        g.add(self.fl_list)
+        self.fl_on = g.add(QCheckBox("Subtract the glow"))
+        self.fl_on.setToolTip("Best for: faint ghosts over detail you want to keep (leaves, rock, water): the "
+                              "added light is measured and taken away, the detail under it stays.\nWeak at: "
+                              "strong or blown-out ghosts: a faint rim can stay, and nothing is left to recover "
+                              "where the ghost clipped.")
+        self.fl_on.toggled.connect(self.controls_changed)
+        self.fl_amt = g.add(ValueSlider("Glow removed", 0.0, 1.5, 1.0, 0.05, "{:.0%}",
+                                        "How much of the measured ghost light to take away."))
+        self.fl_amt.changed.connect(self.controls_changed)
+        self.fl_rebuild = QPushButton("Rebuild ghosts with Fill")
+        self.fl_rebuild.setToolTip("Best for: strong or blown-out ghosts over sky, water, grass or foliage: each "
+                                   "ticked ghost becomes a Fill spot in Retouch, rebuilt from what is around it "
+                                   "(LaMa when installed).\nWeak at: a ghost over something only it covers (a "
+                                   "face, a sign): what is made there is a plausible guess, not what was there.")
+        self.fl_rebuild.setStyleSheet("padding: 5px 8px;")
+        self.fl_rebuild.clicked.connect(self.rebuild_ghosts)
+        g.add(hbox(self.fl_rebuild))
+        self.fl_chip = g.add(chip("Flare: not looked for yet", T.DIM))
+        self.fl_chip.setWordWrap(True)
+        self._flare = None
+        self._flare_controls()
         bl.addWidget(g)
         # Shape
         g = Group("Shape", "Straighten, perspective and crop. One resample, no quality loss beyond it.")
@@ -2153,7 +2219,10 @@ class DevelopPage(QWidget):
                                 ("person", "Person", "Select the person (found on this PC), then pick a part: skin, "
                                                      "face, hair, clothes, arms, legs, torso or the background"),
                                 ("depth", "Depth", "Select by distance: near things, far things or a band between "
-                                                   "(the depth is worked out from the photo on this PC)")):
+                                                   "(the depth is worked out from the photo on this PC)"),
+                                ("channel", "Channel", "Select by one raw channel, or the difference or ratio of two "
+                                                       "(red / blue separates infrared-bright foliage from sky and "
+                                                       "skin in a 590-720 nm infrared photo)")):
             b = QPushButton(text)
             b.setToolTip(tip)
             b.setStyleSheet("padding: 5px 6px;")
@@ -2203,7 +2272,8 @@ class DevelopPage(QWidget):
                                 "- Radial (subtract)", "- Object (subtract)", "x Brightness (only where)",
                                 "x Colour (only where)", "x Brush (only where)", "x Skin (only where)",
                                 "+ Skin", "+ Person", "- Person (subtract)", "x Person (only where)", "+ Depth",
-                                "- Depth (subtract)", "x Depth (only where)"])
+                                "- Depth (subtract)", "x Depth (only where)", "+ Channel", "- Channel (subtract)",
+                                "x Channel (only where)"])
         self.mask_add.setToolTip("Add another shape to the selected mask: + adds, - takes away, x keeps only "
                                  "where both are")
         self.mask_add.activated.connect(self._mask_add_picked)
@@ -2239,8 +2309,23 @@ class DevelopPage(QWidget):
                                 "the nearest")
         self.d_hi = ValueSlider("To (0 far, 100 near)", 0, 100, 100, 1, "{:.0f}")
         self.d_soft = ValueSlider("Depth softness", 1, 50, 10, 1, "{:.0f}")
+        self.ch_src = QComboBox()
+        from ..engine.pipeline.pipeline import CHANNEL_SOURCES
+        for k, n in CHANNEL_SOURCES.items():
+            self.ch_src.addItem(n, k)
+        self.ch_src.setToolTip("What the mask reads: one white-balanced raw channel, or the difference or ratio of "
+                               "two (before any infrared channel mix). Red / blue separates infrared-bright foliage "
+                               "from sky and skin in 590-720 nm infrared photos. Measured from the raw.")
+        self.ch_src.activated.connect(self._channel_source_picked)
+        self.ch_row = hbox(label("Reads"), self.ch_src)
+        rbl.addWidget(self.ch_row)
+        self.ch_row.setVisible(False)
+        self.ch_lo = ValueSlider("From (0 low, 100 high)", 0, 100, 50, 1, "{:.0f}",
+                                 "Where the selection starts along the channel's range in this photo")
+        self.ch_hi = ValueSlider("To (0 low, 100 high)", 0, 100, 100, 1, "{:.0f}")
+        self.ch_soft = ValueSlider("Channel softness", 1, 50, 10, 1, "{:.0f}")
         self._range_ws = (self.r_lo, self.r_hi, self.r_soft, self.c_width, self.c_soft, self.c_chroma, self.r_feather,
-                          self.d_lo, self.d_hi, self.d_soft)
+                          self.d_lo, self.d_hi, self.d_soft, self.ch_lo, self.ch_hi, self.ch_soft)
         for w in self._range_ws:
             rbl.addWidget(w)
             w.changed.connect(self._shape_params_changed)
@@ -2276,7 +2361,10 @@ class DevelopPage(QWidget):
                                 ("redeye", "Red eye", "Click a red pupil"),
                                 ("pupil", "Pupil", "Click a pupil the flash blew out (white or golden), or an "
                                  "animal's glowing eye (green, yellow, white): it becomes a dark pupil and keeps "
-                                 "its catchlight")):
+                                 "its catchlight"),
+                                ("fill", "Fill", "Rebuild an area from what is around it: click or brush over a "
+                                 "flare, a sign, a wire or a person. LaMa (generative) plans it when installed, "
+                                 "PatchMatch brings in real texture from your photo")):
             b = QPushButton(text)
             b.setCheckable(True)
             b.setToolTip(tip)
@@ -2285,6 +2373,25 @@ class DevelopPage(QWidget):
             grp.addButton(b)
             self.rt_btn[kind] = b
         g.add(hbox(*self.rt_btn.values()))
+        from ..engine.local import fill as _fl
+        self.rt_fill_method = QComboBox()
+        self.rt_fill_method.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        for key, m in _fl.METHODS.items():
+            self.rt_fill_method.addItem(m["name"], key)
+            self.rt_fill_method.setItemData(self.rt_fill_method.count() - 1,
+                                            f"Best for: {m['best']}\nWeak at: {m['weak']}",
+                                            Qt.ItemDataRole.ToolTipRole)
+        self.rt_fill_method.currentIndexChanged.connect(self._fill_method_changed)
+        self.rt_fill_info = chip("", T.DIM)
+        self.rt_fill_row = QWidget()
+        fr = QVBoxLayout(self.rt_fill_row)
+        fr.setContentsMargins(0, 0, 0, 0)
+        fr.setSpacing(2)
+        fr.addWidget(hbox(label("Fill with"), (self.rt_fill_method, 1), stretch=False))
+        fr.addWidget(self.rt_fill_info)
+        g.add(self.rt_fill_row)
+        self.rt_fill_row.setVisible(False)
+        self._fill_method_changed()
         self.rt_size = g.add(ValueSlider("Spot size", 0.05, 8, 0.35, 0.05, "{:.2f}%",
                                          "Radius as a share of the photo's long edge (the selected spot, or new ones)"))
         self.rt_feather = g.add(ValueSlider("Feather", 0, 100, 25, 1, "{:.0f}"))
@@ -2392,6 +2499,9 @@ class DevelopPage(QWidget):
         self._refresh_range_ui()
         self._refresh_hsl_ui()
         self.apply_level()
+        self._old_photo_visibility()        # before a photo is open too: sliders of tools that are off stay hidden
+        self._glow_visibility()
+        self._composite_controls()
         return panel
 
     FOLDED = ("Tone curve", "Colour wheel", "HSL", "Colour grading")      # folded until you open them
@@ -2555,6 +2665,7 @@ class DevelopPage(QWidget):
         import copy as _copy
         e.masks = _copy.deepcopy(self._masks) or None
         e.retouch = _copy.deepcopy(self._spots) or None
+        e.flare = self._flare_value()
         e.portrait = self._portrait_value()
         self.temp.setEnabled(self.wb.currentIndex() in (2, 3))
         self.tint.setEnabled(self.wb.currentIndex() in (2, 3))
@@ -2730,6 +2841,8 @@ class DevelopPage(QWidget):
         self._msel = min(max(self._msel, 0), len(self._masks) - 1) if self._masks else -1
         self._spots = _copy.deepcopy(e.retouch or [])
         self._ssel = self._ssel if 0 <= self._ssel < len(self._spots) else -1
+        self._flare = _copy.deepcopy(e.flare) if e.flare else None
+        self._flare_controls()
         self._portrait_from_edit(e)
         for w in ws:
             w.blockSignals(False)
@@ -3038,6 +3151,20 @@ class DevelopPage(QWidget):
 
     def _wb_chip(self, e):
         wb = e.white_balance
+        ir = e.infrared or {}
+        if ir.get("on"):
+            m = wb.multipliers if (wb.mode == "multipliers" and wb.multipliers) else None
+            nums = f" (R {m[0]:.2f} · G {m[1]:.2f} · B {m[2]:.2f})" if m else ""
+            col = T.CYAN if str(ir.get("wb_source", "")).startswith("measured") else T.AMBER
+            self.wb_chip.setText(f"IR white balance: set in Infrared{nums}")
+            self.wb_chip.setToolTip("This photo is edited as an infrared / full-spectrum raw: its white balance and "
+                                    "channel mix are set in the Infrared tab. Temperature and Tint mean nothing so "
+                                    "far from daylight, so they are not used.")
+            self.wb_chip.setStyleSheet(f"color:{col}; border-color:{T.alpha(col, 0.4)};")
+            for w in (self.temp, self.tint):
+                w.setEnabled(False)
+            return
+        self.wb_chip.setToolTip("")
         if wb.mode == "multipliers" and wb.multipliers:
             txt, col = f"White balance: picked / auto, about {wb.temperature:.0f} K, tint {wb.tint:+.0f}", T.AMBER
         elif wb.mode == "temp_tint":
@@ -3139,7 +3266,6 @@ class DevelopPage(QWidget):
         return [round(c.redF(), 4), round(c.greenF(), 4), round(c.blueF(), 4)]
 
     def _hint_click(self, u, v, alt, shift):
-        from .. import engine as E
         if self.image is None:
             return
         pt = self._s_points([(u, v)])[0]
@@ -3517,7 +3643,7 @@ class DevelopPage(QWidget):
         from ..engine.local import colourize as cz
         nh = len(cz.hints_of(e.colourize))
         if (e.colourize or {}).get("on") or nh:
-            if cz.available():
+            if cz.available() or not (e.colourize or {}).get("on"):     # your own colours need no model
                 rep = getattr(self.image, "colour_report", None) or {}
                 txt = ("Colourize: DDColor" + (f", {rep['ms']:.0f} ms" if rep.get("ms") else "")) \
                     if (e.colourize or {}).get("on") else "Colourize: your colours only"
@@ -3525,7 +3651,8 @@ class DevelopPage(QWidget):
                     txt += f"; {nh} part{'s' if nh != 1 else ''} coloured by you"
                 col = T.VIOLET
             else:
-                txt = "Colourize: the colour model is missing (models/colour/ddcolor.npz); reinstall or update."
+                txt = "Colourize: the colour model is missing (models/colour/ddcolor.npz); reinstall or update." + \
+                    (f" Your {nh} coloured part{'s' if nh != 1 else ''} still show." if nh else "")
                 col = T.AMBER
             self.col_chip.setText(txt)
             self.col_chip.setStyleSheet(f"color:{col}; border-color:{T.alpha(col, 0.4)};")
@@ -3838,7 +3965,12 @@ class DevelopPage(QWidget):
         self.save_sidecar()
         if data == "new":
             name = E.list_versions(self.path)[self.version]
-            i = E.add_version(self.path, self.edit)
+            try:
+                i = E.add_version(self.path, self.edit)
+            except OSError as err:
+                self._sidecar_problem("The virtual copy could not be made", err)
+                self._fill_versions()
+                return
             self._switch_version(i, f"Virtual copy made from {name}. Edit it freely: {name} is untouched.")
         elif data == "del":
             name = E.list_versions(self.path)[self.version]
@@ -3846,7 +3978,12 @@ class DevelopPage(QWidget):
                     != QMessageBox.StandardButton.Yes:
                 self._fill_versions()
                 return
-            E.delete_version(self.path, self.version)
+            try:
+                E.delete_version(self.path, self.version)
+            except (OSError, IndexError) as err:
+                self._sidecar_problem("The copy could not be deleted", err)
+                self._fill_versions()
+                return
             self._switch_version(0, f"'{name}' deleted.")
         elif data is not None and int(data) != self.version:
             self._switch_version(int(data))
@@ -3857,6 +3994,7 @@ class DevelopPage(QWidget):
         self._reset_history(E.load_version(self.path, i), E.load_history(self.path, i))
         self.controls_from_edit(self.edit)
         self._canonical()
+        self._mark_saved()
         self._fill_versions()
         self.render_now()
         self.status.emit(msg or f"Showing {E.list_versions(self.path)[i]}.")
@@ -3878,7 +4016,11 @@ class DevelopPage(QWidget):
         if not ok:
             return
         self.save_sidecar()
-        E.add_snapshot(self.path, name.strip() or f"Snapshot {n + 1}", self.edit)
+        try:
+            E.add_snapshot(self.path, name.strip() or f"Snapshot {n + 1}", self.edit)
+        except OSError as err:
+            self._sidecar_problem("The snapshot could not be kept", err)
+            return
         self._fill_snapshots()
         self.status.emit("Snapshot kept in the sidecar.")
 
@@ -3898,8 +4040,17 @@ class DevelopPage(QWidget):
         i = self.snap_list.currentRow()
         if self.image is None or i < 0:
             return
-        E.delete_snapshot(self.path, i)
+        try:
+            E.delete_snapshot(self.path, i)
+        except (OSError, IndexError) as err:
+            self._sidecar_problem("The snapshot could not be deleted", err)
         self._fill_snapshots()
+
+    def _sidecar_problem(self, what: str, err) -> None:
+        """A sidecar could not be written (photos on a read-only card or drive): said plainly, with the way out."""
+        log.warning("%s: %s", what, err)
+        self.status.emit(f"{what}: the photo's folder cannot be written to ({err}). In the Library, Tools > Keep "
+                         f"this folder's ratings and edits on this PC stores them here instead.")
 
     # ------------------------------------------------------------------------------------ Phase 6 extras
     def _update_filmic(self):
@@ -3991,7 +4142,7 @@ class DevelopPage(QWidget):
 
     # ------------------------------------------------------------------------------------ masks
     KIND_NAMES = {"brush": "Brush", "linear": "Gradient", "radial": "Radial", "object": "Object", "colour": "Colour",
-                  "skin": "Skin", "person": "Person", "depth": "Depth",
+                  "skin": "Skin", "person": "Person", "depth": "Depth", "channel": "Channel",
                   "luminance": "Brightness"}
 
     def _cur_mask(self):
@@ -4028,10 +4179,14 @@ class DevelopPage(QWidget):
         shapes = (m or {}).get("shapes", [])
         t = shapes[-1]["type"] if shapes else None
         groups = {"luminance": (self.r_lo, self.r_hi, self.r_soft), "colour": (self.c_width, self.c_soft, self.c_chroma),
-                  "radial": (self.r_feather,), "depth": (self.d_lo, self.d_hi, self.d_soft)}
+                  "radial": (self.r_feather,), "depth": (self.d_lo, self.d_hi, self.d_soft),
+                  "channel": (self.ch_lo, self.ch_hi, self.ch_soft)}
         shown = groups.get(t, ())
         for w in self._range_ws:
             w.setVisible(w in shown)
+        self.ch_row.setVisible(t == "channel")
+        if t == "channel":
+            self.ch_src.setCurrentIndex(max(0, self.ch_src.findData(shapes[-1].get("source", "r/b"))))
         self.range_box.setVisible(bool(shown))
         persons = [x for x in shapes if x.get("type") == "person"]
         self.person_part_row.setVisible(bool(persons))
@@ -4046,7 +4201,9 @@ class DevelopPage(QWidget):
                     self.r_soft: 100 * sh.get("soft", 0.1), self.c_width: sh.get("width", 30),
                     self.c_soft: sh.get("soft", 20) if t == "colour" else 20, self.c_chroma: 100 * sh.get("chroma", 0.03),
                     self.r_feather: 100 * sh.get("feather", 0.5), self.d_lo: 100 * sh.get("lo", 0.6),
-                    self.d_hi: 100 * sh.get("hi", 1.0), self.d_soft: 100 * sh.get("soft", 0.1)}
+                    self.d_hi: 100 * sh.get("hi", 1.0), self.d_soft: 100 * sh.get("soft", 0.1),
+                    self.ch_lo: 100 * sh.get("lo", 0.5), self.ch_hi: 100 * sh.get("hi", 1.0),
+                    self.ch_soft: 100 * sh.get("soft", 0.1)}
             for w, v in vals.items():
                 w.set_value(float(v), emit=False)
 
@@ -4075,6 +4232,9 @@ class DevelopPage(QWidget):
             return
         if kind == "depth":
             self._depth_mask(op)
+            return
+        if kind == "channel":
+            self._channel_mask(op)
             return
         if kind == "luminance":
             self._add_shape({"type": "luminance", "op": op, "lo": 0.6, "hi": 1.0, "soft": 0.1})
@@ -4346,6 +4506,53 @@ class DevelopPage(QWidget):
         run_bg(lambda: E.depth_shape(img, e), path, done,
                lambda _, err: (setattr(self.viewer, "busy", False), self.status.emit(f"Depth mask: {err}")))
 
+    def _channel_mask(self, op, source: str | None = None, replace: bool = False):
+        """A Channel mask (Infrared 1.5c): one raw channel, or a difference or ratio of two, measured from the raw;
+        From and To choose the range. ``replace``: a new source for the selected mask's channel shape."""
+        from .. import engine as E
+        if self.image is None:
+            return
+        if getattr(self.image.raw, "is_scan", False):
+            self.status.emit("Channel masks read the raw camera channels: this photo is not a raw.")
+            return
+        src = source or self.ch_src.currentData() or "r/b"
+        img, e, path, idx = self.image, self.edit_from_controls(), self.path, self._msel
+        self.viewer.busy = True
+        self.viewer.update()
+
+        def done(p, shape):
+            self.viewer.busy = False
+            self.viewer.update()
+            if p != self.path or not (0 <= idx < len(self._masks)):
+                return
+            self._msel = idx
+            m = self._masks[idx]
+            if replace and m["shapes"] and m["shapes"][-1].get("type") == "channel":
+                old = m["shapes"][-1]
+                for k in ("op", "lo", "hi", "soft"):
+                    shape[k] = old.get(k, shape[k])
+                m["shapes"][-1] = shape
+                self.controls_changed()
+                self._refresh_mask_controls()
+                self._update_overlay()
+                return
+            shape["op"] = op
+            self._add_shape(shape)
+            self.mask_show.setChecked(True)
+            self.status.emit(f"Channel ({E.CHANNEL_SOURCES.get(src, src)}): the upper half of its range is selected "
+                             "(red). Move From and To to choose; measured from the raw.")
+
+        def fail(_, err):
+            self.viewer.busy = False
+            self.viewer.update()
+            self.status.emit(f"Channel mask: {err}")           # (the background job already wrote any report)
+        run_bg(lambda: E.channel_shape(img, e, src), path, done, fail)
+
+    def _channel_source_picked(self, *_):
+        m = self._cur_mask()
+        if m is not None and m["shapes"] and m["shapes"][-1].get("type") == "channel":
+            self._channel_mask(m["shapes"][-1].get("op", "add"), self.ch_src.currentData(), replace=True)
+
     def _find_person(self, op):
         from .. import engine as E
         from ..engine.local import people as pp
@@ -4608,7 +4815,8 @@ class DevelopPage(QWidget):
         if idx <= 0:
             return
         kinds = {"Brush": "brush", "Gradient": "linear", "Radial": "radial", "Object": "object", "Colour": "colour",
-                 "Brightness": "luminance", "Skin": "skin", "Person": "person", "Depth": "depth"}
+                 "Brightness": "luminance", "Skin": "skin", "Person": "person", "Depth": "depth",
+                 "Channel": "channel"}
         op = {"+": "add", "-": "subtract", "x": "intersect"}[text[0]]
         kind = next(v for k, v in kinds.items() if k in text)
         self._start_shape(kind, op)
@@ -4629,6 +4837,9 @@ class DevelopPage(QWidget):
         elif sh["type"] == "depth":
             sh["lo"], sh["hi"] = round(self.d_lo.value() / 100.0, 3), round(self.d_hi.value() / 100.0, 3)
             sh["soft"] = round(self.d_soft.value() / 100.0, 3)
+        elif sh["type"] == "channel":
+            sh["lo"], sh["hi"] = round(self.ch_lo.value() / 100.0, 3), round(self.ch_hi.value() / 100.0, 3)
+            sh["soft"] = round(self.ch_soft.value() / 100.0, 3)
         else:
             return
         self.controls_changed()
@@ -4983,7 +5194,24 @@ class DevelopPage(QWidget):
         def work():
             img = E.open(path)
             return img, E.load_edit(path), E.load_history(path, 0)
-        run_bg(work, path, self._opened, lambda _, err: self.status.emit(f"Could not open the file: {err}"))
+        run_bg(work, path, self._opened, self._open_failed)
+
+    def _open_failed(self, path, err):
+        """The photo could not be opened: say so where the photo would be (not only in the status bar, which
+        left 'Opening ...' on screen for good), and let the same photo be tried again."""
+        if path != self.path:
+            return
+        name = os.path.basename(path)
+        why = str(err)
+        if why.startswith(name + ": "):                     # the engine names the file too: once is enough
+            why = why[len(name) + 2:]
+        why = why[:1].upper() + why[1:]
+        self.path = None
+        self.viewer.busy = False
+        self.viewer.message = (f"{name} could not be opened.\n\n{why}\n\nThe file itself is untouched. Details are "
+                               f"in logs/studio.log (Help > Copy diagnostic report).")
+        self.viewer.update()
+        self.status.emit(f"Could not open {name}: {why}")
 
     def _opened(self, path, res):
         if path != self.path:
@@ -4997,6 +5225,7 @@ class DevelopPage(QWidget):
         self._reset_history(edit, steps)
         self.controls_from_edit(self.edit)
         self._canonical()
+        self._mark_saved()                                  # nothing to write until something changes
         self._fill_versions()
         self._fill_snapshots()
         m = self.image.meta
@@ -5969,12 +6198,13 @@ class DevelopPage(QWidget):
             self.viewer.brush_frac = self.rt_size.value() / 100.0
             self.viewer.setCursor(Qt.CursorShape.BlankCursor)
             if self._ssel < 0:
-                self.rt_feather.set_value({"heal": 25, "clone": 50, "pupil": 25}.get(kind, 30), emit=False)
+                self.rt_feather.set_value({"heal": 25, "clone": 50, "pupil": 25, "fill": 15}.get(kind, 30), emit=False)
             if not self.viewer.zoomed:
                 self.status.emit("Retouch: zoom to 100% (Z or the mouse wheel) to see small dust spots.")
         elif self.viewer.tool == "spot":
             self.viewer.tool = None
             self.viewer.setCursor(Qt.CursorShape.ArrowCursor)
+        self._show_fill_row()
         self._refresh_spot_view()
 
     def _show_spots(self, on):
@@ -6025,7 +6255,7 @@ class DevelopPage(QWidget):
             u, v = E.s_to_view(self.image, e, pts[:, 0], pts[:, 1])
             d = {"pts": list(zip(np.atleast_1d(u), np.atleast_1d(v))), "r": float(sp.get("size", 0.008)) / bs,
                  "kind": sp.get("kind"), "sel": k == self._ssel, "auto": sp.get("auto")}
-            if sp.get("kind") not in ("redeye", "pupil"):
+            if sp.get("kind") not in ("redeye", "pupil", "fill"):
                 su, sv = E.s_to_view(self.image, e, pts[:, 0] + dx, pts[:, 1] + dy)
                 d["src"] = list(zip(np.atleast_1d(su), np.atleast_1d(sv)))
             out.append(d)
@@ -6055,6 +6285,8 @@ class DevelopPage(QWidget):
             keep.append(pts[-1])
         spot = {"kind": self.rt_kind, "pts": keep, "size": size, "feather": round(self.rt_feather.value() / 100.0, 3),
                 "opacity": round(self.rt_opacity.value(), 1), "src": [0.0, 0.0], "enabled": True, "auto": "", "v": 2}
+        if self.rt_kind == "fill":
+            spot["method"] = self.rt_fill_method.currentData() or "auto"
 
         path = self.path
 
@@ -6066,8 +6298,8 @@ class DevelopPage(QWidget):
             self._ssel = len(self._spots) - 1
             self.viewer.busy = False
             self._spots_changed({"heal": "Heal spot", "clone": "Clone spot", "redeye": "Red eye",
-                                 "pupil": "Pupil"}[spot["kind"]])
-        if spot["kind"] in ("redeye", "pupil"):
+                                 "pupil": "Pupil", "fill": "Fill"}[spot["kind"]])
+        if spot["kind"] in ("redeye", "pupil", "fill"):
             add(None, [0.0, 0.0])
             return
         img, e, others = self.image, self.edit_from_controls(), [dict(x) for x in self._spots]
@@ -6078,7 +6310,37 @@ class DevelopPage(QWidget):
 
     def _spot_picked(self, k):
         self._ssel = k
+        if 0 <= k < len(self._spots) and self._spots[k].get("kind") == "fill":
+            i = self.rt_fill_method.findData(self._spots[k].get("method", "auto"))
+            self.rt_fill_method.blockSignals(True)
+            self.rt_fill_method.setCurrentIndex(max(0, i))
+            self.rt_fill_method.blockSignals(False)
+            self._fill_method_changed(apply=False)
+        self._show_fill_row()
         self._refresh_spots()
+
+    def _show_fill_row(self):
+        sel = self._spots[self._ssel] if 0 <= self._ssel < len(self._spots) else None
+        self.rt_fill_row.setVisible(self.rt_kind == "fill" and self.viewer.tool == "spot"
+                                    or bool(sel and sel.get("kind") == "fill"))
+
+    def _fill_method_changed(self, *_, apply=True):
+        from ..engine.local import fill as fl
+        key = self.rt_fill_method.currentData() or "auto"
+        m = fl.METHODS.get(key, fl.METHODS["auto"])
+        have = fl.lama_available()
+        txt = f"Best for: {m['best']}"
+        if key in ("auto", "lama") and not have:
+            txt += " LaMa is not installed yet: PatchMatch is used. Convert Models.bat adds LaMa."
+        self.rt_fill_info.setText(txt)
+        self.rt_fill_info.setToolTip(f"Best for: {m['best']}\nWeak at: {m['weak']}")
+        self.rt_fill_info.setWordWrap(True)
+        if not apply or not (0 <= self._ssel < len(self._spots)):
+            return
+        sp = self._spots[self._ssel]
+        if sp.get("kind") == "fill" and sp.get("method", "auto") != key:
+            sp["method"] = key
+            self._spots_changed("Fill method")
 
     def _spot_moved(self, k, which, du, dv):
         from .. import engine as E
@@ -6099,7 +6361,7 @@ class DevelopPage(QWidget):
             sp["src"] = [dx - mx, dy - my]
         else:
             sp["src"] = [dx + mx, dy + my]
-        if sp.get("kind") not in ("redeye", "pupil"):
+        if sp.get("kind") not in ("redeye", "pupil", "fill"):
             sp["src"] = rt.clamp_source(sp, sw, sh)
         sp["auto"] = sp.get("auto", "")
         self._ssel = k
@@ -6147,6 +6409,128 @@ class DevelopPage(QWidget):
         self._spots_changed(f"Retouch: {len(spots)} dust spots")
         self.status.emit(f"{what}: {len(spots)} spot{'s' if len(spots) != 1 else ''} healed (amber circles). Check "
                          f"them at 100%: Alt-click removes a wrong one.")
+
+    # ------------------------------------------------------------------ flare ghosts (local/flare.py)
+    def _flare_value(self):
+        fl = self._flare
+        if not fl or not fl.get("ghosts"):
+            return None
+        out = dict(fl)
+        out["on"] = self.fl_on.isChecked()
+        out["amount"] = round(self.fl_amt.value(), 3)
+        out["ghosts"] = [dict(g) for g in fl["ghosts"]]
+        return out
+
+    def _flare_controls(self):
+        """Show self._flare in the Lens group's flare controls (no signals)."""
+        fl = self._flare or {}
+        ghosts = fl.get("ghosts") or []
+        for w in (self.fl_on, self.fl_amt, self.fl_list):
+            w.blockSignals(True)
+        self.fl_on.setChecked(bool(fl.get("on")) and bool(ghosts))
+        self.fl_amt.set_value(float(fl.get("amount", 1.0)), emit=False)
+        self.fl_list.clear()
+        for n, g in enumerate(ghosts, 1):
+            it = QListWidgetItem(f"Ghost {n}  ·  {100 * g.get('r', 0):.1f}% wide  ·  "
+                                 f"strength {g.get('strength', 0):.2f}")
+            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            it.setCheckState(Qt.CheckState.Checked if g.get("on", True) else Qt.CheckState.Unchecked)
+            self.fl_list.addItem(it)
+        for w in (self.fl_on, self.fl_amt, self.fl_list):
+            w.blockSignals(False)
+        self.fl_list.setVisible(bool(ghosts))
+        for w in (self.fl_on, self.fl_amt, self.fl_rebuild, self.fl_show):
+            w.setEnabled(bool(ghosts))
+        if not fl:
+            self.fl_chip.setText("Flare: not looked for yet")
+            self.fl_chip.setStyleSheet(f"color:{T.DIM};")
+        else:
+            txt = fl.get("text") or (f"{len(ghosts)} flare ghost{'s' if len(ghosts) != 1 else ''} found"
+                                     if ghosts else "No flare ghosts found.")
+            rep_ = getattr(self.image, "flare_report", "") if self.image is not None else ""
+            self.fl_chip.setText(txt + (f" {rep_}" if rep_ else ""))
+            col = T.AMBER if ghosts else T.DIM
+            self.fl_chip.setStyleSheet(f"color:{col}; border-color:{T.alpha(col, 0.4)};")
+        self._refresh_ghost_view()
+
+    def _refresh_ghost_view(self):
+        from .. import engine as E
+        fl = self._flare or {}
+        ghosts = fl.get("ghosts") or []
+        if self.image is None or not ghosts:
+            self.viewer.ghosts = []
+            self.viewer.update()
+            return
+        e = self.shown_edit()
+        bs = self._brush_scale()
+        sel = self.fl_list.currentRow()
+        xs = np.array([g["x"] for g in ghosts], float)
+        ys = np.array([g["y"] for g in ghosts], float)
+        u, v = E.s_to_view(self.image, e, xs, ys)
+        self.viewer.ghosts = [{"uv": (float(a), float(b)), "r": float(g.get("r", 0.01)) / bs,
+                               "on": g.get("on", True), "sel": k == sel, "n": k + 1}
+                              for k, (g, a, b) in enumerate(zip(ghosts, np.atleast_1d(u), np.atleast_1d(v)))]
+        self.viewer.update()
+
+    def _show_ghosts(self, on):
+        self.viewer.show_ghosts = bool(on)
+        self._refresh_ghost_view()
+
+    def _ghost_ticked(self, item):
+        if not self._flare or not self._flare.get("ghosts"):
+            return
+        k = self.fl_list.row(item)
+        if 0 <= k < len(self._flare["ghosts"]):
+            self._flare["ghosts"][k]["on"] = item.checkState() == Qt.CheckState.Checked
+            self._refresh_ghost_view()
+            self.controls_changed()
+
+    def find_flare(self):
+        from .. import engine as E
+        if self.image is None:
+            return
+        img, e, path = self.image, self.edit_from_controls(), self.path
+        self.viewer.busy = True
+        self.viewer.update()
+        self.status.emit("Looking for flare ghosts...")
+        run_bg(lambda: E.find_flare(img, e), path,
+               lambda p, res: self._flare_found(res) if p == self.path else None,
+               lambda _, err: (setattr(self.viewer, "busy", False),
+                               self.status.emit(f"Find flare ghosts problem: {err}")))
+
+    def _flare_found(self, res):
+        self.viewer.busy = False
+        ghosts = list(res.get("ghosts") or [])
+        self._flare = {"on": bool(ghosts), "amount": 1.0, "ghosts": ghosts, "axis": res.get("axis"),
+                       "source": res.get("source"), "text": res.get("text", "")}
+        self._flare_controls()
+        if ghosts:
+            self.fl_show.setChecked(True)
+            self.commit(self.edit_from_controls(), label=f"Flare: {len(ghosts)} ghosts")
+            self.status.emit(f"{len(ghosts)} flare ghost{'s' if len(ghosts) != 1 else ''} found (amber circles) "
+                             f"and their glow subtracted. Strong or blown-out ones: press Rebuild ghosts with Fill.")
+        else:
+            self.status.emit(res.get("text") or "No flare ghosts found.")
+
+    def rebuild_ghosts(self):
+        """Each ticked ghost becomes a Retouch Fill spot; its glow is no longer subtracted (the fill replaces it)."""
+        fl = self._flare or {}
+        todo = [g for g in fl.get("ghosts") or [] if g.get("on", True)]
+        if self.image is None or not todo:
+            self.status.emit("Tick the ghosts to rebuild first.")
+            return
+        method = self.rt_fill_method.currentData() or "auto"
+        for g in todo:
+            self._spots.append({"kind": "fill", "pts": [[float(g["x"]), float(g["y"])]],
+                                "size": round(1.3 * float(g.get("r", 0.01)), 5), "feather": 0.15, "opacity": 100.0,
+                                "src": [0.0, 0.0], "enabled": True, "auto": "flare", "v": 2, "method": method})
+            g["on"] = False
+        self._ssel = -1
+        self._flare_controls()
+        self.rt_show.setChecked(True)
+        self._spots_changed(f"Flare: {len(todo)} ghosts rebuilt")
+        self.status.emit(f"{len(todo)} ghost{'s are' if len(todo) != 1 else ' is'} now Fill spots in Retouch (each "
+                         f"takes a few seconds to build). Alt-click one there to undo it.")
 
     def find_dust(self):
         from .. import engine as E
@@ -6262,14 +6646,31 @@ class DevelopPage(QWidget):
     def do_redo(self):
         self.jump_history(self.hpos + 1)
 
+    def _save_state(self) -> str:
+        """What save_sidecar would write, as one value to compare: the photo, the version, its edit and the history
+        labels up to here."""
+        return json.dumps([self.path, self.version, self.edit.to_dict(),
+                           [lb for lb, _ in self.steps[:self.hpos + 1]]], sort_keys=True, default=str)
+
+    def _mark_saved(self):
+        """The edit in hand is what the sidecar holds (just loaded, or just written)."""
+        self._saved_state = self._save_state()
+
     def save_sidecar(self):
+        """Write the edit and its history to the photo's sidecar, if anything changed since it was loaded or last
+        saved. A photo that was only looked at gets no sidecar (and no 'could not save' on a read-only card)."""
         if self.image is None or self.path is None:
             return
         from .. import engine as E
+        state = self._save_state()
+        if state == self._saved_state:
+            return
         try:
             E.save_version(self.path, self.version, self.edit)
             E.save_history(self.path, self.version, self.steps[:self.hpos + 1])
+            self._saved_state = state
         except (OSError, IndexError, KeyError) as err:
+            log.warning("sidecar for %s not saved: %s", self.path, err)
             self.status.emit(f"Could not save the sidecar (read-only drive?): {err}")
 
     def resizeEvent(self, e):
@@ -6338,8 +6739,8 @@ class CamerasPage(InfoPage):
                                        "minutes. Gives read noise, banding and hot pixels."),
                              ("Full", "Adds pairs of evenly lit flats at each ISO: measures gain, so the denoiser "
                                       "knows the noise exactly (cyan)."),
-                             ("Complete", "Adds the exposure-latitude series (ETTR / ETTL). Coming with the "
-                                          "wizard in Phase 7.")])
+                             ("Complete", "Adds the exposure-latitude series (ETTR / ETTL). Planned: a step-by-"
+                                          "step wizard that tells you what to shoot.")])
         row = QHBoxLayout()
         b = QPushButton("Calibrate a camera from a folder of frames...")
         b.setObjectName("primary")
@@ -6399,8 +6800,8 @@ class LensesPage(InfoPage):
     """Lens tools: what Fix lens does, the lensfun status, and the lens list for tagging contactless glass."""
 
     def __init__(self, settings):
-        super().__init__("Lenses", "Automatic fixes that work even on contactless vintage glass, the lenses you "
-                         "tag photos with, and (Phase 12) lens rendering signatures.", "Phase 5", [
+        super().__init__("Lenses", "Automatic fixes that work even on contactless vintage glass, and the lenses you "
+                         "tag photos with. Lens rendering signatures are planned.", "Lens fixes ready", [
                              ("Fix lens", "One button in Develop: lateral colour measured from the photo, purple "
                                           "fringes, distortion from a lens profile or from straight lines (never "
                                           "guessed on organic subjects), vignetting measured."),
@@ -6412,8 +6813,8 @@ class LensesPage(InfoPage):
                                        "resample for all of them."),
                              ("Recover lens sharpness", "Capture sharpening by deconvolution, off for lenses you "
                                                         "mark as character lenses."),
-                             ("Render like my lens", "Laack, Heliar, Apo-Lanthar, Otus... an open signature "
-                                                     "library (Phase 12).")], T.VIOLET)
+                             ("Render like my lens", "Planned: Laack, Heliar, Apo-Lanthar, Otus... an open "
+                                                     "signature library. Not built yet.")], T.VIOLET)
         self.settings = settings
         from ..engine.lens import lensfun_bridge
         ok = lensfun_bridge.available()
@@ -6475,6 +6876,33 @@ class HelpPage(InfoPage):
                                         "From the raw (true noise and detail)."),
                              ("Process picks", "Exports your picks (or the selected photos) in the background, each "
                                                "with its own edit, or Make it good on photos not edited yet."),
+                             ("Focus Stack", "Merges photos focused at different distances into one sharp photo "
+                                             "(right-click photos in the Library: Send to Focus Stack). Shoot "
+                                             "manual exposure, overlap the focus steps, and keep the subject still; "
+                                             "hand-held works with Line up locally on."),
+                             ("Super-Res Stack", "Merges a burst into one cleaner photo, or a larger one (1.5x, 2x) "
+                                                 "when the frames are shifted a little between shots. Hand-held "
+                                                 "bursts, the moon and night sky each have their own mode; the "
+                                                 "coverage chart says whether more resolution was really there."),
+                             ("Dual Pixel Lab", "Opens Canon Dual Pixel RAW files (Dual Pixel RAW on in the camera; "
+                                                "checked on the R5, the 5D Mark IV not yet): the two half-views, a depth map, 3D "
+                                                "(wigglegram, anaglyph, side by side) and up to a stop of "
+                                                "highlights the main image clipped. A normal raw says so."),
+                             ("Infrared", "For infrared and full-spectrum raws (Library: right-click, Edit in "
+                                          "Infrared tab). It guesses the filter, sets white balance far past the "
+                                          "camera's range, and offers looks and black and white from the channels; "
+                                          "Open in Develop carries on with every tool."),
+                             ("Panorama", "Give it overlapping frames (Library: right-click, Send to Panorama): it "
+                                          "finds where each one points, evens out exposure and vignetting, keeps "
+                                          "the frame without flare where two overlap, and blends the seams. Turn "
+                                          "the camera about the lens, not your body, and overlap by a third."),
+                             ("Flare and Fill", "Develop > Lens > Find flare ghosts takes away the round "
+                                                "reflections a bright light leaves; Retouch > Fill rebuilds "
+                                                "anything you brush over from what is around it (LaMa when "
+                                                "Convert Models.bat has added it)."),
+                             ("Results go back to Develop", "Every stack is written beside its photos as "
+                                                            "FIRST_to_LAST_..._Studio.tif, a linear file that opens "
+                                                            "in Develop with every tool working, like a raw."),
                              ("Develop", "B before/after, Ctrl+Z / Ctrl+Y undo and redo, double-click a slider "
                                          "to reset it, Esc puts a tool down, F11 full screen. On a narrow window "
                                          "Copy, Paste, Before / After and the virtual copies are under the ⋯ "
@@ -6561,15 +6989,25 @@ class HelpPage(InfoPage):
                              ("Working...", "While the photo is being worked on, a bar moves along its top edge and "
                                             "the chip beside Controls turns amber; big raws on slower PCs can take a "
                                             "few seconds per change."),
-                             ("Problems?", "Copy the diagnostic report below and attach it. It holds no photos, "
+                             ("Problems?", "When something goes wrong the Studio saves an error report by "
+                                           "itself, one dated file per problem, in the error_reports folder: "
+                                           "send Bill the newest file with a line about what you were doing. For "
+                                           "anything else, copy the diagnostic report below. Neither holds photos, "
                                            "serial numbers or locations.")])
         b = QPushButton("Copy diagnostic report")
         b.clicked.connect(self.copy_diag)
+        ob = QPushButton("Open error reports folder")
+        ob.setToolTip("Where the Studio saves a dated report file by itself whenever something goes wrong")
+        ob.clicked.connect(self.open_reports)
         row = QHBoxLayout()
         row.addWidget(b)
+        row.addWidget(ob)
         row.addStretch(1)
         self.body.addSpacing(10)
         self.body.addLayout(row)
+        self.report_lbl = label("", "dim", wrap=True)
+        self.body.addWidget(self.report_lbl)
+        self.set_last_report(None)
         # Updates (off until turned on: the only thing it sends is a question to GitHub for the newest version)
         self.body.addSpacing(16)
         self.body.addWidget(label("Check for updates", "h2"))
@@ -6608,10 +7046,21 @@ class HelpPage(InfoPage):
         QApplication.clipboard().setText(slog.diagnostic_report())
         QMessageBox.information(self, "Diagnostic report", "Copied to the clipboard.")
 
+    def open_reports(self):
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(slog.error_reports_dir())))
+
+    def set_last_report(self, path=None):
+        """The newest error report: the one just written, else the newest already in the folder."""
+        path = path or slog.latest_error_report()
+        self.report_lbl.setText(f"Newest error report: {path}" if path else
+                                "Error reports: none so far. They are saved in the error_reports folder beside "
+                                "the Studio.")
+
 
 # ============================================================================================ main window
 NAV = [("▦", "Library"), ("◐", "Develop"), ("◫", "Dual Pixel Lab"), ("≋", "Focus Stack"), ("✦", "Super-Res Stack"),
-       ("◎", "Lenses"), ("▣", "Cameras"), ("⇪", "Export"), ("?", "Help")]
+       ("◑", "Infrared"), ("⌒", "Panorama"), ("◎", "Lenses"), ("▣", "Cameras"), ("⇪", "Export"), ("?", "Help")]
+ROW = {name: i for i, (_, name) in enumerate(NAV)}
 
 
 class MainWindow(QMainWindow):
@@ -6666,35 +7115,33 @@ class MainWindow(QMainWindow):
         self.cameras = CamerasPage()
         self.lenses = LensesPage(self.settings)
         self.help = HelpPage()
+        self.dualpixel = DualPixelPage(self.settings)
+        self.focus = FocusStackPage(self.settings)
+        self.superres = SuperResPage(self.settings)
+        self.infrared = InfraredPage(self.settings)
+        self.infrared.sidecar_written.connect(self._ir_sidecar)
+        self.panorama = PanoramaPage(self.settings)
+        for pg in (self.dualpixel, self.focus, self.superres, self.infrared, self.panorama):
+            pg.open_result.connect(self.open_result)
+            pg.result_written.connect(self._stack_written)
+            pg.status.connect(lambda t: self.statusBar().showMessage(t, 6000))
         self.help.update_mode.connect(self._set_update_mode)
         self.help.update_check.connect(lambda: self.check_updates(manual=True))
+        BUS.report_saved.connect(self._report_saved)
         pages = [
             self.library, self.develop,
-            InfoPage("Dual Pixel Lab", "Everything Canon Dual Pixel RAW can do: split A/B, +1 stop highlight "
-                     "recovery, depth maps, focus check, micro-refocus, 3D output.", "Phase 8", [
-                         ("Split and view", "A, B, A+B and the difference, built in (what DPRSplit does)."),
-                         ("Highlight recovery", "About one extra stop in candle flames: A clips later."),
-                         ("Noise vs detail map", "Halves agree on detail, disagree on noise (0.96 vs 0.02 "
-                                                 "measured on your eagle file)."),
-                         ("Depth masks", "Subject / background masks from the A-B offset."),
-                         ("Air steadiness", "Lab: turbulence read-out at extreme range (your observation)."),
-                         ("3D output", "Wigglegram, anaglyph, depth map export.")], T.VIOLET),
-            InfoPage("Focus Stack", "Merge a focus bracket into one sharp image, straight from the raws.", "Phase 10",
-                     [("Align", "Scale + shift + rotation for focus breathing, sub-pixel."),
-                      ("Merge", "Depth-map, pyramid, or auto; noise-aware weights."),
-                      ("Fix-ups", "Halo suppression, retouch from any frame, gap detection.")], T.VIOLET),
-            InfoPage("Super-Res Stack", "Handheld bursts to higher resolution and lower noise. Moon and night sky "
-                     "modes.", "Phase 11", [
-                         ("Drizzle", "Hubble's method for undersampled, dithered frames."),
-                         ("Lucky imaging", "Moon: keep the sharpest regions of hundreds of frames."),
-                         ("Reach", "Burst + 2x merge + diffraction recovery: a longer lens for static "
-                                   "subjects.")], T.VIOLET),
+            self.dualpixel, self.focus, self.superres, self.infrared, self.panorama,
             self.lenses,
             self.cameras,
             InfoPage("Export", "Select photos in the Library and press Export, or use Export in Develop. 16-bit "
                      "TIFF in Adobe RGB by default; PNG and JPEG too.", None, [
-                         ("Send to Photoshop", "Phase 13: TIFF hand-off and a Photoshop panel."),
-                         ("Send to PhotoCraft", "Phase 13."),
+                         ("Every export has its own name", "The photo's name with _Studio added: IMG_0001.CR2 "
+                          "becomes IMG_0001_Studio.tif, so an export never has the name of your original or of "
+                          "the camera's JPEG. Exporting again replaces the Studio's own earlier export; a file "
+                          "the Studio did not write is never replaced."),
+                         ("Send to Photoshop", "Planned: a TIFF hand-off and a Photoshop panel. Not built yet; "
+                          "for now export a TIFF and open it in Photoshop."),
+                         ("Send to PhotoCraft", "Planned. Not built yet."),
                          ("Privacy", "Serial numbers and GPS are never written.")]),
             self.help,
         ]
@@ -6707,6 +7154,7 @@ class MainWindow(QMainWindow):
         self.nav.currentRowChanged.connect(self._nav_changed)
         self.nav.setCurrentRow(0)
         self.library.open_photo.connect(self.open_in_develop)
+        self.library.send_to.connect(self.send_to_tab)
         self.library.lens_tagged.connect(self._lens_tagged)
         self.library.paste_requested.connect(self.paste_to_files)
         self.library.export_requested.connect(self.export)
@@ -6848,6 +7296,12 @@ class MainWindow(QMainWindow):
             self.upd_msi = None
             self.close()
 
+    def _report_saved(self, path: str, lead: str = "Something went wrong. "):
+        """An error report file was written (from any thread): say where it is; Help shows it too."""
+        self.statusBar().showMessage(f"{lead}An error report was saved: {path}  (Help > Open error reports folder)",
+                                     30000)
+        self.help.set_last_report(path)
+
     def _jobs(self):
         n = POOL.activeThreadCount()
         self.jobs.setText(f"● working ({n})" if n else "")
@@ -6891,9 +7345,53 @@ class MainWindow(QMainWindow):
 
     def _nav_changed(self, row):
         """Back in the Library: the photo just edited shows its new badges (edited, lens tag)."""
+        if row == ROW["Infrared"] and getattr(self, "develop", None) is not None and self.develop.path:
+            self.develop.save_sidecar()               # the Infrared tab reads the photo's edit from its sidecar
         if row == 0 and getattr(self, "develop", None) is not None and self.develop.path:
             self.develop.save_sidecar()
             self.library.refresh_paths([self.develop.path])
+
+    def send_to_tab(self, where: str, files: list):
+        """From the Library: Send to Focus Stack / Super-Res Stack, Open in Dual Pixel Lab, Edit in Infrared tab."""
+        page, row = {"focus": (self.focus, ROW["Focus Stack"]), "superres": (self.superres, ROW["Super-Res Stack"]),
+                     "dualpixel": (self.dualpixel, ROW["Dual Pixel Lab"]),
+                     "infrared": (self.infrared, ROW["Infrared"]),
+                     "panorama": (self.panorama, ROW["Panorama"])}[where]
+        if self.develop.path and self.develop.path in files:
+            self.develop.save_sidecar()
+        self.nav.setCurrentRow(row)
+        page.set_frames(files)
+
+    def _ir_sidecar(self, path: str):
+        """The Infrared tab wrote a photo's edit: Develop (if it has that photo open) and the Library catch up."""
+        from .. import engine as E
+        if self.develop.path and os.path.normcase(self.develop.path) == os.path.normcase(path):
+            try:
+                self.develop.commit(E.load_edit(path), label="Infrared tab")
+            except (OSError, ValueError):
+                slog.log_exception("reloading the edit the Infrared tab wrote", log)
+        try:
+            self.library.refresh_paths([path])
+        except RuntimeError:
+            pass
+
+    def open_result(self, path: str):
+        """A stacking tool's result: show it in the Library (its folder) and open it in Develop."""
+        folder = os.path.dirname(path)
+        if os.path.normcase(os.path.abspath(folder)) == os.path.normcase(os.path.abspath(self.library.folder or "")):
+            self.library.reload(select=path)
+        else:
+            self.library.load_folder(folder, select=path)
+        self.develop.set_strip(self.library.files, self.library.icons())
+        self.nav.setCurrentRow(1)
+        self.develop.open(path)
+
+    def _stack_written(self, path: str):
+        folder = os.path.dirname(path)
+        if self.library.folder and os.path.normcase(os.path.abspath(folder)) == \
+                os.path.normcase(os.path.abspath(self.library.folder)):
+            self.library.reload(select=path)
+        self.statusBar().showMessage(f"Saved {os.path.basename(path)}", 6000)
 
     def open_in_develop(self, path):
         self.develop.set_strip(self.library.files, self.library.icons())
@@ -6911,27 +7409,54 @@ class MainWindow(QMainWindow):
         dlg = ExportDialog([f for f, _ in items], self.settings, self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        spec, dest = dlg.spec(), dlg.dest.text()
-        os.makedirs(dest, exist_ok=True)
+        spec, dest = dlg.spec(), dlg.dest.text().strip()
+        try:
+            if not dest:
+                raise OSError("no folder was chosen")
+            os.makedirs(dest, exist_ok=True)
+        except OSError as err:
+            log.warning("export: folder %r unusable: %s", dest, err)
+            QMessageBox.warning(self, "Export", f"The export folder cannot be used:\n{dest or '(empty)'}\n\n{err}\n\n"
+                                "Pick another folder and export again.")
+            return
 
         def work():
             from .. import engine as E
-            out = []
+            out, failed, taken = [], [], set()
             for f, v in items:
-                img = E.open(f)
-                if v:
-                    out.append(E.export(img, E.load_version(f, v), spec, out_path=version_export_path(f, v, spec, dest)))
-                else:
-                    out.append(E.export(img, E.load_edit(f), spec, out_dir=dest))
-                img.drop_cache()
-            return out
+                img = None
+                try:                                    # one bad photo does not stop the rest
+                    img = E.open(f)
+                    if v:
+                        out.append(E.export(img, E.load_version(f, v), spec,
+                                            out_path=version_export_path(f, v, spec, dest), taken=taken))
+                    else:
+                        out.append(E.export(img, E.load_edit(f), spec, out_dir=dest, taken=taken))
+                except Exception as err:               # noqa: BLE001
+                    slog.log_exception(f"export failed: {f}", log)
+                    report_problem(f"Export could not export {os.path.basename(f)}", err)
+                    failed.append((os.path.basename(f), str(err)))
+                finally:
+                    if img is not None:                 # one photo in memory at a time
+                        img.drop_cache()
+                    img = None
+            return out, failed
         self.statusBar().showMessage(f"Exporting {len(items)} photo(s) in the background...")
         run_bg(work, dest, self._exported, lambda _, e: self.statusBar().showMessage(f"Export problem: {e}"),
                keep=True)
 
-    def _exported(self, dest, out):
-        self.statusBar().showMessage(f"Exported {len(out)} file(s) to {dest}", 10000)
-        QDesktopServices.openUrl(QUrl.fromLocalFile(dest))
+    def _exported(self, dest, res):
+        out, failed = res
+        msg = f"Exported {len(out)} file(s) to {dest}"
+        if failed:
+            msg += (f". {len(failed)} could not be exported: " + ", ".join(n for n, _ in failed[:4]) +
+                    ("..." if len(failed) > 4 else "") + " (details in logs/studio.log)")
+        self.statusBar().showMessage(msg, 15000 if failed else 10000)
+        if out:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(dest))
+        elif failed:
+            QMessageBox.warning(self, "Export", f"Nothing could be exported.\n\n{failed[0][0]}: {failed[0][1]}\n\n"
+                                "Details are in logs/studio.log (Help > Copy diagnostic report).")
 
     def toggle_full_screen(self):
         """F11: full screen and back (to maximized if it was)."""
@@ -6999,20 +7524,38 @@ def _excepthook(t, v, tb):
     if C._SHUTTING_DOWN:
         log.debug("exception while closing (ignored): %s", v)
         return
-    log.error("unhandled exception in the app\n%s", "".join(traceback.format_exception(t, v, tb)))
+    trace = "".join(traceback.format_exception(t, v, tb))
+    log.error("unhandled exception in the app\n%s", trace)
+    report = slog.save_error_report("Something went wrong in the Studio's window.", trace)
     import threading
     if QApplication.instance() is None or threading.current_thread() is not threading.main_thread():
         return                                     # a message box only from the window's own thread
     try:
-        QMessageBox.critical(None, "Photographic Studio", f"Something went wrong: {v}\n\nDetails are in "
-                             f"{os.path.join('logs', 'studio.log')} (Help > Copy diagnostic report).")
+        show_error_box(f"Something went wrong: {v}", report)
     except Exception:
         pass
+
+
+def show_error_box(text: str, report=None, parent=None) -> None:
+    """The box for a fault in the Studio: what happened, and where the error report was saved by itself (with a
+    button that opens its folder), so a tester only has to send the file."""
+    if report:
+        text += (f"\n\nAn error report was saved:\n{report}\n\nPlease send that file to Bill with a line about what "
+                 f"you were doing. It holds no photos, serial numbers or locations.")
+    else:
+        text += f"\n\nDetails are in {os.path.join('logs', 'studio.log')} (Help > Copy diagnostic report)."
+    box = QMessageBox(QMessageBox.Icon.Critical, "Photographic Studio", text, parent=parent)
+    open_b = box.addButton("Open the folder", QMessageBox.ButtonRole.ActionRole) if report else None
+    box.addButton("OK", QMessageBox.ButtonRole.AcceptRole)
+    box.exec()
+    if open_b is not None and box.clickedButton() is open_b:
+        QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(str(report))))
 
 
 def run(argv=None) -> int:
     slog.setup(console_level=None)
     sys.excepthook = _excepthook
+    crashed = slog.watch_for_crashes()             # a hard crash last time becomes an error report now
     app = QApplication.instance() or QApplication(argv or sys.argv)
     app.setApplicationName("Photographic Studio By Bill")
     app.setStyleSheet(T.QSS)
@@ -7022,6 +7565,8 @@ def run(argv=None) -> int:
     w = MainWindow()
     w.show_as_last_time()
     log.info("app started")
+    if crashed:
+        QTimer.singleShot(1200, lambda: w._report_saved(str(crashed), "The Studio stopped unexpectedly last time. "))
     code = app.exec()
     clean = finish_jobs()
     log.info("app closed (exit %s%s)", code, "" if clean else "; previews still rendering were dropped")

@@ -12,7 +12,6 @@ The raw file is never modified (rule 0.3.4).
 """
 from __future__ import annotations
 
-import io
 import os
 from dataclasses import dataclass, field
 
@@ -93,13 +92,97 @@ def _cfa_from_colors(colors: np.ndarray, desc: str) -> tuple[np.ndarray, np.ndar
 
 
 def open_raw(path: str) -> RawImage:
-    """Decode a raw file. Raises FileNotFoundError, UnsupportedRaw, or rawpy errors for corrupt files."""
+    """Decode a raw file. Raises FileNotFoundError, or UnsupportedRaw with a plain-language reason (a layout the
+    engine does not develop yet, a format the decoder lacks, a damaged file)."""
     import rawpy
     if not os.path.isfile(path):
         raise FileNotFoundError(path)
+    name = os.path.basename(path)
+    try:
+        return _open_raw(path)
+    except UnsupportedRaw:
+        raise
+    except rawpy.LibRawFileUnsupportedError as e:
+        raise UnsupportedRaw(f"{name}: the raw decoder (LibRaw {_libraw_version()}) does not read this file. It "
+                             f"may be from a camera newer than the decoder, in a compressed format it lacks (some "
+                             f"Nikon High Efficiency raws), cut short when it was copied, or not a raw file at "
+                             f"all.") from e
+    except (rawpy.LibRawIOError, rawpy.LibRawDataError) as e:
+        raise UnsupportedRaw(f"{name}: the file is damaged or incomplete (the raw decoder stopped: "
+                             f"{_libraw_text(e)}). Copy it from the card again if you still have it.") from e
+    except rawpy.LibRawError as e:
+        raise UnsupportedRaw(f"{name}: the raw decoder could not read it ({_libraw_text(e)}).") from e
+    except getattr(rawpy, "NotSupportedError", ()) as e:      # not one flat mosaic: sRAW / mRAW, Foveon, linear DNG
+        raise UnsupportedRaw(f"{name}: not a Bayer mosaic ({_libraw_text(e)}). The Studio develops Bayer sensors "
+                             f"so far; sRAW / mRAW, Foveon and already-developed DNGs are planned.") from e
+
+
+def _libraw_version() -> str:
+    import rawpy
+    return ".".join(str(v) for v in getattr(rawpy, "libraw_version", ()) or ()) or "?"
+
+
+def _libraw_text(e: Exception) -> str:
+    """LibRaw's message as text (rawpy hands it over as bytes: "b'Input/output error'")."""
+    a = e.args[0] if e.args else e
+    if isinstance(a, bytes):
+        return a.decode("utf-8", "replace")
+    return str(a)
+
+
+def _other(r) -> dict:
+    """What LibRaw itself read about the shot (used only where our own metadata reader found nothing: raw
+    containers it does not parse, such as Fujifilm RAF). Field names changed between rawpy versions."""
+    o = getattr(r, "other", None)
+    if o is None:
+        return {}
+
+    def first(*names):
+        for n in names:
+            v = getattr(o, n, None)
+            if v:
+                return v
+        return None
+    lens = getattr(r, "lens", None)
+    return {"iso": first("iso_speed"), "shutter": first("shutter_speed", "shutter"), "aperture": first("aperture"),
+            "focal": first("focal_length", "focal_len"), "timestamp": first("timestamp"),
+            "lens": str(getattr(lens, "model", "") or "").strip() if lens is not None else ""}
+
+
+def _fill_from_libraw(meta: Metadata, other: dict) -> None:
+    """Fill what our reader left empty from LibRaw's reading; never replaces a value our reader found."""
+    try:
+        if not meta.exposure_s and other.get("shutter") and float(other["shutter"]) > 0:
+            meta.exposure_s = float(other["shutter"])
+        if not meta.fnumber and other.get("aperture") and float(other["aperture"]) > 0:
+            meta.fnumber = float(other["aperture"])
+        if not meta.focal_mm and other.get("focal") and float(other["focal"]) > 0:
+            meta.focal_mm = float(other["focal"])
+        if not meta.lens and other.get("lens"):
+            meta.lens = other["lens"]
+        ts = other.get("timestamp")
+        if not meta.datetime and ts:
+            import datetime as _dt
+            if not isinstance(ts, _dt.datetime):
+                ts = _dt.datetime.fromtimestamp(float(ts))
+            if 1990 <= ts.year <= 2100:
+                meta.datetime = ts.strftime("%Y:%m:%d %H:%M:%S")
+    except (TypeError, ValueError, OverflowError, OSError):
+        pass
+
+
+def _open_raw(path: str) -> RawImage:
+    import rawpy
     with slog.stage("decode", log, file=os.path.basename(path)):
         with rawpy.imread(path) as r:
             s = r.sizes
+            flat = getattr(getattr(rawpy, "RawType", None), "Flat", None)
+            if flat is not None and getattr(r, "raw_type", flat) != flat:
+                # not one mosaic but full colour at every pixel: Canon sRAW / mRAW, Sigma Foveon, linear DNGs
+                raise UnsupportedRaw(f"{os.path.basename(path)}: this file holds full colour at every pixel (Canon "
+                                     f"sRAW / mRAW, Sigma Foveon, or a DNG another program already developed), "
+                                     f"not a sensor mosaic. The Studio develops Bayer mosaics so far; these are "
+                                     f"planned.")
             mosaic = np.array(r.raw_image, dtype=np.uint16, copy=True)
             colors_vis = np.array(r.raw_colors_visible[:4, :4])
             desc = r.color_desc.decode("ascii", "replace") if isinstance(r.color_desc, bytes) else str(r.color_desc)
@@ -115,19 +198,26 @@ def open_raw(path: str) -> RawImage:
             day = list(r.daylight_whitebalance)
             cam_xyz = np.array(r.rgb_xyz_matrix, dtype=np.float64)[:3, :3]
             pattern = np.array(r.raw_pattern)
-            libraw_iso = float(r.other.iso_speed) if getattr(r, "other", None) else None
+            other = _other(r)
+            libraw_iso = float(other["iso"]) if other.get("iso") else None
             flip = int(s.flip)
             crop = (int(s.crop_left_margin) - int(s.left_margin), int(s.crop_top_margin) - int(s.top_margin),
                     int(s.crop_width), int(s.crop_height))
             top, left, h, w = int(s.top_margin), int(s.left_margin), int(s.height), int(s.width)
     meta = read_metadata(path, libraw_iso)
+    _fill_from_libraw(meta, other)
 
     notes = []
     is_bayer = pattern.shape == (2, 2) and len(desc) >= 3 and sorted(desc[:3]) == ["B", "G", "R"]
     cfa_idx, cfa_rgb = _cfa_from_colors(colors_vis, desc)
     if not is_bayer or sorted(cfa_rgb.ravel().tolist()) != [0, 1, 1, 2]:
-        raise UnsupportedRaw(f"{os.path.basename(path)}: not a 2x2 Bayer sensor (pattern {pattern.tolist()}, "
-                             f"colours {desc!r}). X-Trans and other layouts come in Phase 14.")
+        xtrans = pattern.shape == (6, 6)
+        raise UnsupportedRaw(f"{os.path.basename(path)}: " +
+                             ("a Fujifilm X-Trans sensor. The Studio develops Bayer sensors so far; X-Trans is "
+                              "planned." if xtrans else
+                              f"not a Bayer sensor (pattern {pattern.tolist()}, colours {desc!r}). The Studio "
+                              f"develops Bayer sensors so far; other layouts (Foveon, sRAW / mRAW, already-"
+                              f"developed DNGs) are planned."))
     if mosaic.shape[0] < top + h or mosaic.shape[1] < left + w:
         raise UnsupportedRaw("visible area lies outside the raw buffer")
 

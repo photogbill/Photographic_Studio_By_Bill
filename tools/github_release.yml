@@ -72,9 +72,17 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
+          # What changed in this version: the lines Release.bat filed in CHANGELOG.md (tools/whats_new.py). They become
+          # the text of the release page, which "What's new" in the Studio opens. No lines: GitHub's own notes.
+          $ver = $tag.TrimStart('v')
+          $notes = Join-Path $env:RUNNER_TEMP "whats_new.md"
+          python tools/whats_new.py --notes $ver --out $notes
+          $hasNotes = (Test-Path $notes) -and ((Get-Item $notes).Length -gt 5)
           gh release view $tag 2>$null
           if ($LASTEXITCODE -eq 0) {
             gh release upload $tag release/Photographic-Studio.msi release/Install-Photographic-Studio.bat release/install-linux.sh --clobber
+          } elseif ($hasNotes) {
+            gh release create $tag release/Photographic-Studio.msi release/Install-Photographic-Studio.bat release/install-linux.sh --title "Photographic Studio $($tag.TrimStart('v'))" --notes-file $notes
           } else {
             gh release create $tag release/Photographic-Studio.msi release/Install-Photographic-Studio.bat release/install-linux.sh --title "Photographic Studio $($tag.TrimStart('v'))" --generate-notes
           }

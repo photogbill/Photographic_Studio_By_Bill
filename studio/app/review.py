@@ -55,6 +55,7 @@ class PhotoView(QWidget):
         self.busy = False
         self._press = None
         self._moved = False
+        self.click_zooms = True                        # a click toggles 100% (off where a click picks a place)
 
     def set_image(self, img: QImage | None, full_w: int = 0, full_h: int = 0) -> None:
         self.img = img
@@ -177,7 +178,7 @@ class PhotoView(QWidget):
             self.zoom_changed.emit(True, self.cu, self.cv)
 
     def mouseReleaseEvent(self, e):
-        if self._press is not None and not self._moved:
+        if self._press is not None and not self._moved and self.click_zooms:
             u, v = self.uv_at(e.position())
             self.set_zoom(not self.zoom, u, v)
         self._press = None

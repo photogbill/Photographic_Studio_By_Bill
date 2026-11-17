@@ -59,7 +59,6 @@ def build_dxo_test(folder: str, out_dir: str, max_pairs: int = 10, crop=(800, 56
                    seed: int | None = None) -> str:
     from PIL import Image as PI
     from . import engine as E
-    from .engine.pipeline.pipeline import resize
     edit = edit or Edit()
     if not edit.denoise.enabled:
         edit.denoise.enabled = True

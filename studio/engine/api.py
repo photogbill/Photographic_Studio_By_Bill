@@ -16,7 +16,7 @@ import os
 import threading
 
 from .. import __version__, log as slog
-from .io.export import EXT, ExportSpec, write
+from .io.export import EXT, ExportSpec, write  # noqa: F401 (EXT: API)
 from .pipeline.edit import Edit
 from .pipeline.pipeline import Image, open_image, output_size, render, render_view, resize  # noqa: F401 (API)
 
@@ -289,12 +289,18 @@ def open_text(path, mode="r"):
 
 
 def export(image: Image, edit: Edit | None, spec: ExportSpec, out_path: str | None = None,
-           out_dir: str | None = None) -> str:
+           out_dir: str | None = None, taken: set | None = None) -> str:
+    """Render and write one photo; returns the path written. The file is named after the photo with _Studio added
+    (io/export.export_name: IMG_0001.CR2 -> IMG_0001_Studio.tif), so it never has the original's name. As a safety
+    net it also never replaces the photo itself or a file the Studio did not write (io/export.free_target: written
+    as NAME-2.ext instead). Pass the same ``taken`` set for every photo of a batch, so two photos with the same
+    name do not replace each other."""
+    from .io.export import export_name, free_target
     edit = edit or Edit()
     spec.validate()
     if out_path is None:
-        base = os.path.splitext(os.path.basename(image.path))[0] + spec.suffix + EXT[spec.format]
-        out_path = os.path.join(out_dir or os.path.dirname(image.path), base)
+        out_path = os.path.join(out_dir or os.path.dirname(image.path), export_name(image.path, spec))
+    out_path = free_target(out_path, image.path, taken)
     arr = render(image, edit)
     if spec.long_edge:
         h, w = arr.shape[:2]

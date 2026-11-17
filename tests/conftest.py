@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT))
 os.environ.setdefault("STUDIO_LOG_DIR", str(ROOT / "outputs" / "pytest_logs"))
 os.environ.setdefault("STUDIO_CALIB_DIR", str(ROOT / "outputs" / "pytest_calibration"))   # never the real one
 os.environ.setdefault("STUDIO_SETTINGS_DIR", str(ROOT / "outputs" / "pytest_settings"))    # never the real one
+os.environ.setdefault("STUDIO_ERROR_DIR", str(ROOT / "outputs" / "pytest_error_reports"))   # never the real one
 
 from studio import log as slog  # noqa: E402
 

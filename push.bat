@@ -5,6 +5,7 @@ rem ==========================================================================
 rem  push.bat - sends the software and shared profiles to GitHub, and then makes
 rem  it an update everyone gets (Release.bat /auto; N within 10 s skips that).
 rem  Double-click it. It shows every file before anything is sent, and asks.
+rem  The comment about what changed is filled in by itself (docs\NEXT_UPDATE.md).
 rem  Photos, raws, calibration data, logs and reports are never sent:
 rem  .gitignore keeps them out, and this script checks again.
 rem  Every run is logged in logs\ beside this file (never on C:).
@@ -121,10 +122,29 @@ echo.
 for /f "usebackq delims=" %%L in ("%LIST%") do echo     %%L
 type "%LIST%" >> "%LOG%"
 echo.
+rem  The comment writes itself: every part that is built adds a plain line to
+rem  docs\NEXT_UPDATE.md (tools\whats_new.py), and those lines are the comment.
+rem  Release.bat then files them in CHANGELOG.md under the new version number.
+set "NOTEPY="
+if exist "%~dp0.venv\Scripts\python.exe" set "NOTEPY=%~dp0.venv\Scripts\python.exe"
+if exist "%~dp0python\python.exe" set "NOTEPY=%~dp0python\python.exe"
+if not defined NOTEPY goto :ask_msg
+"%NOTEPY%" "%~dp0tools\whats_new.py" --message "%MSGFILE%" >>"%LOG%" 2>&1
+if errorlevel 1 goto :ask_msg
+echo  What changed, written down as each part was built:
+echo.
+type "%MSGFILE%"
+echo.
+set "MSG="
+set /p "MSG=  Press Enter to send this as the comment, or type your own few words instead: "
+if defined MSG (echo(!MSG!)> "%MSGFILE%"
+goto :msg_done
+:ask_msg
 set "MSG="
 set /p "MSG=  Describe this change in a few words, or just press Enter: "
 if not defined MSG set "MSG=Update from push.bat"
 (echo(!MSG!)> "%MSGFILE%"
+:msg_done
 >>"%LOG%" echo Commit message:
 type "%MSGFILE%" >> "%LOG%"
 echo.

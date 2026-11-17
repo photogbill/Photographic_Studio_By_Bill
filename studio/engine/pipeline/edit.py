@@ -51,6 +51,8 @@ STAGE_VERSIONS = {
     "relight": 1,                    # the light moved, from the depth map's surfaces (local/relight.py)
     "composite": 1,                  # subjects from other photos laid on the finished picture (composite.py)                       # JPEG repair inside the file's quantisation intervals (local/jpegfix.py)
     "colourize": 2,                  # black and white -> colour (local/colourize.py); 2: faded tones evened first
+    "infrared": 1,                   # infrared / full spectrum: IR matrix step, mono raw, palettes (color/infrared.py)
+    "flare": 1,                      # lens-flare ghosts subtracted (local/flare.py)
 }
 
 
@@ -225,6 +227,9 @@ class Edit:
     jpeg: dict | None = None         # JPEG repair (local/jpegfix.py): {"on"}
     relight: dict | None = None      # move the light (local/relight.py): {"amount", "azimuth", "elevation", "soft"}
     composite: list | None = None    # subjects from other photos (pipeline/composite.py): [{"src", "mask", "x", ...}]
+    flare: dict | None = None        # lens-flare ghosts (local/flare.py): {"on", "amount", "ghosts": [...], "text"}
+    infrared: dict | None = None     # infrared / full spectrum (color/infrared.py): filter, IR matrix step, B&W from
+                                     # the channels, mono raw, palette, hot spot; set in the Infrared tab
     use_optical_black: bool = True
     banding: bool = True             # row banding from the masked border, Wiener-gated (never adds bands)
     gamut_compress: bool = True      # smooth gamut compression before the tone curve (gamut.py)
@@ -298,6 +303,14 @@ class Edit:
         if d.get("depth") and abs(float((d.get("depth") or {}).get("haze", 0))) > 1e-6:    # haze by distance
             keep["depth"] = d["depth"]
             keep["depth_v"] = d["stage_versions"].get("depth", 1)
+        fl = d.get("flare") or {}
+        if fl.get("on") and fl.get("ghosts") and float(fl.get("amount", 0)) > 0:     # flare ghosts subtracted
+            keep["flare"] = {"amount": fl.get("amount"), "ghosts": fl.get("ghosts")}
+            keep["flare_v"] = d["stage_versions"].get("flare", 1)
+        ir = d.get("infrared") or {}
+        if ir.get("on"):                                   # the infrared matrix step, mono raw and hot spot
+            keep["infrared"] = {k: v for k, v in ir.items() if k not in ("guess", "palette", "wb_source")}
+            keep["infrared_v"] = d["stage_versions"].get("infrared", 1)
         if d.get("highlight_mode") == "glow":
             keep["glow_profile"] = d.get("glow_profile", "")
             keep["glow_v"] = d["stage_versions"].get("glow", 1)

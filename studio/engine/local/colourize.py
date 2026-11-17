@@ -50,7 +50,8 @@ def hints_of(d: dict | None) -> list:
 
 
 def active(d: dict | None) -> bool:
-    return bool(d) and (bool(d.get("on")) or bool(hints_of(d))) and available()
+    """Anything to do: the automatic colour (needs the DDColor model) or a hint (needs nothing but the click)."""
+    return bool(d) and ((bool(d.get("on")) and available()) or bool(hints_of(d)))
 
 
 def model_dir() -> str:

@@ -19,7 +19,7 @@ def test_app_starts_with_all_workspaces(tmp_path, monkeypatch):
     app = QApplication.instance() or QApplication([])
     app.setStyleSheet(T.QSS)
     w = M.MainWindow()
-    assert w.stack.count() == len(M.NAV) == 9
+    assert w.stack.count() == len(M.NAV) == 11
     for i in range(w.stack.count()):
         w.nav.setCurrentRow(i)
         app.processEvents()
@@ -272,7 +272,7 @@ def test_library_paste_and_version_export_names(tmp_path):
     assert E.load_edit(raws[1]).exposure_ev == 0.3 and E.load_library_meta(raws[1])["rating"] == 5
     E.add_version(raws[0], E.Edit(), "Dark / moody")
     p = M.version_export_path(raws[0], 1, E.ExportSpec(format="tiff"), str(tmp_path))
-    assert os.path.basename(p) == "A_Dark_moody.tif"
+    assert os.path.basename(p) == "A_Dark_moody_Studio.tif"       # the copy's name, then _Studio (2026-11-16)
     w.close()
     app.processEvents()
 
@@ -425,6 +425,78 @@ def test_retouch_and_skin_from_the_panel():
     assert page.edit_from_controls().to_dict() == page.edit.to_dict()
     page.clear_spots()
     assert page.edit.retouch is None
+    app.processEvents()
+
+
+def test_fill_spot_from_the_panel():
+    from conftest import scene, synthetic_raw
+    from studio import engine as E
+    from studio.engine.pipeline.pipeline import Image
+    app, M, page = _page()
+    page.image = Image(synthetic_raw(scene(120, 180)))
+    page.path = "synthetic.cr2"
+    assert not page.rt_fill_row.isVisibleTo(page)
+    page.rt_btn["fill"].setChecked(True)
+    assert page.viewer.tool == "spot" and page.rt_kind == "fill"
+    assert page.rt_fill_row.isVisibleTo(page) and page.rt_feather.value() == 15
+    page.rt_fill_method.setCurrentIndex(page.rt_fill_method.findData("patchmatch"))
+    assert "Best for" in page.rt_fill_info.text()
+    page.rt_size.set_value(6.0)
+    page._spot_new([(0.5, 0.5)])
+    assert _wait(app, lambda: page.edit.retouch and len(page.edit.retouch) == 1)
+    sp = page.edit.retouch[0]
+    assert sp["kind"] == "fill" and sp["method"] == "patchmatch" and sp["src"] == [0.0, 0.0]
+    assert page.steps[-1][0] == "Fill"
+    page._set_spot_tool(None)
+    page._spot_picked(0)
+    assert page.rt_fill_row.isVisibleTo(page)
+    page.rt_fill_method.setCurrentIndex(page.rt_fill_method.findData("auto"))
+    assert page.edit.retouch[0]["method"] == "auto"
+    page._refresh_spot_view()
+    assert "src" not in page.viewer.spots[0]                            # a fill spot has no source circle
+    out = E.render(page.image, page.edit)
+    assert np.isfinite(out).all()
+    page.clear_spots()
+    app.processEvents()
+
+
+def test_flare_ghosts_from_the_lens_group():
+    import math
+    import sys
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
+    from conftest import synthetic_raw
+    from test_flare import _ghosts, _scene
+    from studio import engine as E
+    from studio.engine.pipeline.pipeline import Image
+    app, M, page = _page()
+    S = _scene(400, 600) * 0.8
+    h, w = S.shape[:2]
+    cx, cy = (w - 1) / 2, (h - 1) / 2
+    ang = math.radians(30)
+    pts = [(cx + t * math.cos(ang), cy + t * math.sin(ang)) for t in (-180, -80, 70, 160)]
+    I = S + _ghosts(S.shape, (cx, cy), pts, [30, 16, 22, 40], [0.12, 0.2, 0.14, 0.1])
+    page.image = Image(synthetic_raw(np.clip(I, 0, 0.95).astype(np.float32)))
+    page.path = "synthetic.cr2"
+    page.controls_from_edit(page.edit)
+    assert not page.fl_on.isEnabled() and "not looked" in page.fl_chip.text()
+    page.find_flare()
+    assert _wait(app, lambda: page._flare is not None, 60)
+    n = len(page._flare["ghosts"])
+    assert n >= 3 and page.fl_on.isChecked() and page.fl_list.count() == n
+    assert page.edit.flare and page.edit.flare["on"] and page.steps[-1][0].startswith("Flare")
+    page._refresh_ghost_view()
+    assert len(page.viewer.ghosts) == n and page.viewer.show_ghosts
+    page.fl_list.item(0).setCheckState(M.Qt.CheckState.Unchecked)      # leave one alone
+    assert page.edit.flare["ghosts"][0]["on"] is False
+    out = E.render(page.image, page.edit)
+    assert np.isfinite(out).all()
+    page.rebuild_ghosts()                                                # the rest become Fill spots
+    fills = [sp for sp in page.edit.retouch or [] if sp["kind"] == "fill"]
+    assert len(fills) == n - 1 and all(sp["auto"] == "flare" for sp in fills)
+    assert not any(g["on"] for g in page.edit.flare["ghosts"])
+    page.controls_from_edit(page.edit)                                   # survives a round trip
+    assert page.edit_from_controls().to_dict() == page.edit.to_dict()
+    page.clear_spots()
     app.processEvents()
 
 
