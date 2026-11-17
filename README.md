@@ -79,13 +79,54 @@ Windows may show a blue **"Windows protected your PC"** box for either file. Tha
 - **Start Studio.bat** (or the desktop shortcut) opens the Studio; on Linux, `start-studio.sh` or the menu entry.
 - Drag **CR2** or **CR3** files, or a whole folder, onto **Analyze Raws.bat** for a report on your camera's files.
 - Drag raw files onto **Develop Raws.bat** to develop them. Your TIFFs and the comparison page land in the `outputs` folder.
+- **studio-cli.bat** is for other programs, not for double-clicking: it runs every editing tool from the command line and answers in JSON (see `docs/CLI.md`).
 - **Convert Models.bat** turns model downloads in the `models` folder into the Studio's format on your PC (SAM 2.1 Large for click-to-select, which is too big to ship; or a newer depth model). It checks each one runs and logs to `logs\convert_models.log`.
 
 **Developers:** clone the repository with git and double-click **Install.bat** (on Linux: `bash install-linux.sh` inside the clone). It uses your own Python (3.10 or newer) in a private environment inside the folder, or downloads a private copy of Python if your PC has none. Installers never overwrite a git copy.
 
+## Connect an AI model (MCP)
+
+The Studio can be used by an AI model as well as by you. It speaks the [Model Context Protocol](https://modelcontextprotocol.io) (MCP), the open standard AI apps use to reach tools, so a model can develop, clean, colour match, cut out, make depth maps and stack your pictures when you ask it to. This is optional and off until you set it up.
+
+**Claude desktop app (Windows):**
+
+1. Double-click **Connect Studio to Claude.bat** and press **C**. It adds one entry to Claude's own settings file and keeps a copy of the file as it was.
+2. Quit Claude completely (also from the tray, near the clock) and start it again.
+3. Ask Claude to do something with a picture, giving it the file's path: *"Clean D:\Photos\IMG_0001.CR3 and show me a preview."*
+
+To undo it, run the same file and press **D**.
+
+**Any other MCP client** (or setting Claude up by hand): add a local (stdio) server that starts the Studio's own Python with `-m studio.mcp_server`. This prints the exact entry for your copy:
+
+```
+"python\python.exe" tools\connect_claude.py --print
+```
+
+(a git copy uses `.venv\Scripts\python.exe`; on Linux, `.venv/bin/python tools/connect_claude.py --print`). It looks like this:
+
+```json
+{
+  "mcpServers": {
+    "photographic-studio": {
+      "command": "D:\\Photographic Studio\\python\\python.exe",
+      "args": ["-m", "studio.mcp_server"],
+      "env": { "PYTHONPATH": "D:\\Photographic Studio", "PYTHONUTF8": "1" }
+    }
+  }
+}
+```
+
+In the Claude desktop app that file is opened with Settings > Developer > Edit Config. `studio-mcp.bat` starts the same server, for clients that want one command with no arguments. A copy installed with the MSI installer cannot be connected yet; use the one made by **Install Photographic Studio.bat**.
+
+**What the model gets:** one tool per Studio command (`studio_edit`, `studio_clean`, `studio_match`, `studio_depth`, `studio_cutout`, `studio_find`, `studio_stack` ...), `studio_schema` (every setting and what it does) and `studio_view` (look at a picture). The full list and the rules are in `docs/CLI.md`.
+
+**What it can and cannot do:** it can read the pictures you point it to and write new files, always under a new name ending in `_Studio`. It cannot replace, move or delete a photo, and it never overwrites a file the Studio did not write.
+
+**Your privacy, plainly:** the editing happens on your PC. But when a model *looks* at a picture (a preview, or `studio_view`), that small picture is sent to the company that runs the model, exactly as if you had attached it to a chat. If a photo must not leave your PC, do not ask a model to look at it.
+
 ## Your photos stay yours
 
-- Your photos are **never** uploaded.
+- Your photos are **never** uploaded by the Studio. (If you connect an AI model, the pictures you ask it to look at go to that model: see above.)
 - Later, you'll be able to share your camera's or lens's **profile** so others benefit. A profile is numbers, never pictures. Sharing is **off** until you turn it on, and you read the exact file before it goes.
 - Never shared: photos, camera and lens serial numbers, your sensor's fingerprint, hot-pixel and dust maps, or your location.
 

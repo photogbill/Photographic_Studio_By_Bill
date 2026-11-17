@@ -9,6 +9,9 @@ Read these before changing anything in this folder:
 - `BUILD_PLAN_PLATE_GLOW_BURST_MACRO.md`: the next build (Bill, 2026-11-17): variable IR filter, then **card to
   finished stacks** (find, cull, stack a whole card), Best of burst, Macro planner, Plate Reader, Glow guard.
 - `docs/PROGRESS.md`: where things stand. Keep it current.
+- `docs/CLI.md`: the Studio from the command line for other programs (the RPG Forge, Claude): `studio/cli_tools.py`,
+  `studio-cli.bat`. A new tool gets its command there, with a test in `tests/test_cli_tools.py`. The MCP server
+  (`studio/mcp_server.py`) builds its tools from those commands by itself: do not add tools there by hand.
 
 Standing rules that are easy to forget:
 

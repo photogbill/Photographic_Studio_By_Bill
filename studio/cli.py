@@ -4,6 +4,9 @@
     python -m studio.cli info FILE                               metadata, true ISO, black/white levels
     python -m studio.cli import SOURCE [--to DIR] [--name TEXT]   copy photos from a card into the Photos folder
     python -m studio.cli diag                                    diagnostic report (for bug reports)
+    python -m studio.cli edit | match | depth | cutout | find | stack | schema | batch ...
+                                                                 the tool commands, for programs (cli_tools.py,
+                                                                 docs/CLI.md): every editing tool, JSON results
     python -m studio.cli version
 
 Outputs go to the app's outputs\\develop folder unless --out is given. Nothing is written to C:.
@@ -491,6 +494,8 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--dry-run", action="store_true", help="show what would happen; copy nothing")
     sub.add_parser("diag", help="write the diagnostic report")
     sub.add_parser("version")
+    from . import cli_tools                 # the tool commands: edit, match, depth, cutout, stack ... (docs/CLI.md)
+    cli_tools.add_parsers(sub)
     return ap
 
 
@@ -519,6 +524,9 @@ def main(argv=None) -> int:
         if a.cmd == "version":
             print(f"Photographic Studio By Bill {__version__}")
             return 0
+        from . import cli_tools
+        if a.cmd in cli_tools.COMMANDS:
+            return cli_tools.dispatch(a)
         ap.print_help()
         return 2
     except KeyboardInterrupt:

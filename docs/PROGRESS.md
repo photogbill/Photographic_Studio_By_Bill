@@ -852,3 +852,32 @@ push scripts could not be run at all there: Bill runs them once before pushing.*
     work on raw files, why, and "For the cleanest results, shoot raw"; the group's subtitle says the raw data is
     the best place to remove noise and to shoot raw; the noise chip shows the level measured in the picture; the
     old "Clean works on raws only" help line is gone; README updated the same way.
+99. **The Studio from the command line, for programs (Bill, 2026-11-17: "Make a comprehensive command line
+    interface so that forge and you can utilize it").** studio/cli_tools.py, added to the same `python -m studio`
+    runner; `studio-cli.bat` for Windows callers; docs/CLI.md is the reference. Decision behind it: the Studio's
+    technology is shared with the RPG Forge, but image generation stays in the Forge and the Studio stays a
+    photographer's tool. The Forge is MIT and the Studio GPL-3.0, so the Forge runs the Studio as a separate
+    program and never imports it. Commands: edit (any picture, any settings: the recipe is the Edit as JSON,
+    only what differs from the defaults; --set, --recipe, --save-recipe), clean, relight, colourize, restore,
+    jpeg-repair, descreen, negative, infrared, match and look-profile (colour match to a picture or to saved
+    statistics), depth (map, view, normals, RGBA layers that stack back into the picture, optional filled
+    background plate), cutout (RGBA or mask from person / click / depth / luminance / colour / skin / any shape),
+    find (data), stack focus | superres | pano, dualpixel, schema (built from the code), looks, batch. Contract:
+    --json prints one JSON object, exit codes 0 / 1 / 2, mistyped settings are errors with the nearest names,
+    results follow the _Studio naming and never-overwrite rules (an RGBA PNG writer carries the Studio's mark),
+    same picture and recipe give the same pixels. tests/test_cli_tools.py (12 tests). What was and was not run
+    is listed at the end of docs/CLI.md. Asked for by the Forge side and not built (they need engine work):
+    flatten light, make tileable, day to night.
+100. **The Studio as an MCP server (Bill, 2026-11-17: "if an MCP server helps you and is easier for you, lets go
+    ahead and add it ... Add details into the readme on how to enable an ai model to connect via mcp, so others
+    can use it").** studio/mcp_server.py: stdio, no extra package. Tools are generated from the command line's
+    own argparse parsers (one `studio_<command>` per command of decision 99, typed properties, `settings` as an
+    object), so the two cannot drift; `studio_view` returns a picture to the model and a call with `preview`
+    returns its preview. Dual-era: specification 2026-07-28 (stateless, `_meta` per request, `server/discover`,
+    `resultType`) and the `initialize` handshake of 2025-11-25 and earlier. Progress lines go out as
+    notifications. `Connect Studio to Claude.bat` (tools/connect_claude.py) adds the entry to Claude's
+    claude_desktop_config.json, keeping everything else and a copy of the file as it was: the one write outside
+    the Studio's folder, made only when the person runs it. `studio-mcp.bat` for other clients. README: how to
+    connect, what a model can and cannot do, and that a picture a model looks at is sent to that model (the
+    "never uploaded" line now says so). tests/test_mcp_server.py (8 tests). Not run yet: the Claude desktop app
+    against it on Windows; the MSI copy cannot be connected (no separate Python).
