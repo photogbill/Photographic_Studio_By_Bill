@@ -2,6 +2,11 @@
 
 Newest first. Written by tools/whats_new.py from docs/NEXT_UPDATE.md each time Release.bat makes an update.
 
+## 0.1.7 (2026-11-17)
+
+- New: the Studio can be driven by other programs (studio-cli.bat): every editing tool, colour match to a look, depth maps and layers, cut-outs and stacks, with results as data. Nothing changes in the Studio itself. See docs/CLI.md.
+- New: an AI model can use the Studio directly (MCP). Double-click "Connect Studio to Claude.bat" to let the Claude desktop app develop, clean, match and cut out the pictures you point it to; the README says how to connect any other AI app, and what does and does not leave your PC.
+
 ## 0.1.6 (2026-11-17)
 
 - Fixed: the Studio no longer keeps every photo you opened in memory. It used to grow by a few hundred MB per photo until it slowed down or stopped.
