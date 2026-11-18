@@ -322,6 +322,19 @@ its frames as `FIRST_to_LAST_Stack_Studio.tif` (opens in Develop like every stac
 stacks found in 312 photos; 147 frames used, 23 left out (9 added nothing, 6 subject moved, 5 shaken, 3 camera moved
 too far); 2 runs were bursts, not stacks (sent to Best of burst)". Settings: gap seconds, strictness, motion-safe.
 
+F.8 **Status (session 13, 2026-11-17, on Bill's card).** Built: `stack/sorter.py` (find, group, judge with
+reasons, strictness, the subject-moved check after lining up, `stack_group`), the **Card to Stacks** page (its own
+sidebar entry, Bill's rule that each function gets its own area, instead of a mode inside Focus Stack), the Library
+right-click "Find focus stacks" and the import summary's button. Results are named `FIRST_to_LAST_Focus_Studio.tif`,
+the same as the Focus Stack page, not `_Stack_`, so one kind of result has one name. Changes from F.2 found on the
+real card: frames are lined up (phase correlation, chained neighbour to neighbour) before their sharpness blocks
+are compared, because hand-held drift reached 15% of the frame; a run shot entirely in **AI Servo AF** (Canon
+CameraSettings FocusMode, read from the raw) is a burst, because the sharp area moved with the subject (Bill's dog
+at 400 mm came out as nine "stacks" before this); the engine's own moved share is not used to leave frames out,
+because it is measured before local alignment and counts parallax (it flagged 9 of 20 good frames). **Not built
+yet:** the motion-safe merge, the gap report, Canon's focus-bracketing flag, "keep a moved frame only where it is
+safe", and handing bursts to Best of burst (block C).
+
 F.7 **Real tests and honest limits:** `test_raws\focus_fly_handheld` (9 x R5, hand-held) culled and stacked; Bill's
 own card next. On the page: a stack with focus gaps keeps its gaps (named, not invented); a subject that moved in
 every frame can be made ghost-free, not sharp everywhere; a hand-held sweep also shifts the viewpoint, so near depth

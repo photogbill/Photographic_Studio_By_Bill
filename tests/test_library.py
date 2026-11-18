@@ -327,6 +327,14 @@ def test_review_rates_moves_zooms_and_compares(app, tmp_path):
     assert rv.view_b.zoom and abs(rv.view_b.cu - 0.7) < 1e-6 and abs(rv.view_b.cv - 0.2) < 1e-6
     key(Qt.Key.Key_C, "c")
     assert not rv.view_b.isVisible()
+    # F: show what's in focus (cyan over the sharpest detail), drawn over the photo, kept per image
+    key(Qt.Key.Key_F, "f")
+    assert rv.peak_b.isChecked() and rv.view_a.peak
+    rv.view_a.repaint()
+    ov = rv.view_a.peak_overlay()
+    assert ov is not None and ov.size() == rv.view_a.img.size() and rv.view_a.peak_overlay() is ov
+    key(Qt.Key.Key_F, "f")
+    assert not rv.view_a.peak
     key(Qt.Key.Key_Escape)
     assert page.body.currentIndex() == 0 and page.current_path() == rv.path
     page.close()
@@ -446,6 +454,52 @@ def test_import_dialog_end_to_end(app, tmp_path, monkeypatch):
     app.processEvents()
     assert not dlg2.go.isEnabled() and dlg2.reason.text() == "Nothing new to import."
     dlg2.close()
+    page.close()
+
+
+def test_import_dialog_sort_focus_stacks_puts_left_out_frames_in_their_folder(app, tmp_path, monkeypatch):
+    """Sort focus stacks in the import dialog: the card is sorted in the background (the sorter is stubbed here:
+    tests/test_sorter.py tests it), Import waits for it, the left-out frame goes into the day's Left out folder, and
+    Find focus stacks hands the day folder to Card to Stacks."""
+    import datetime as dt
+    from studio.app import importer as IM
+    from studio.engine.io import ingest as I
+    from studio.engine.stack import sorter as SO
+    card = tmp_path / "EOS_DIGITAL"
+    d = card / "DCIM" / "100CANON"
+    d.mkdir(parents=True)
+    when = dt.datetime(2026, 11, 17, 17, 48).timestamp()
+    for i in range(1, 5):
+        (d / f"IMG_{i:04d}.CR3").write_bytes(os.urandom(4000 + i))
+        os.utime(d / f"IMG_{i:04d}.CR3", (when, when))
+    monkeypatch.setenv("STUDIO_CARD_ROOTS", str(card))
+    monkeypatch.setenv("STUDIO_PHOTOS_DIR", str(tmp_path / "Photos"))
+    calls = []
+
+    def fake(paths, *a, **k):
+        calls.append(len(paths))
+        return {p: "soft everywhere" for p in paths if p.endswith("IMG_0003.CR3")}
+    monkeypatch.setattr(SO, "left_out_map", fake)
+    page = library(app)
+    page.settings.d["photos_dir"] = str(tmp_path / "Photos")
+    page.settings.d["import_sort_stacks"] = True
+    sent = []
+    page.send_to.connect(lambda where, items: sent.append((where, items)))
+    dlg = IM.open_import(page)
+    assert dlg.sort_c.isChecked()
+    assert pump(app, lambda: dlg.scan is not None and dlg.scan.confirmed and not dlg.sorting and dlg.left_out, 10)
+    app.processEvents()
+    assert calls == [4] and "1 frame left out" in dlg.sort_lbl.text()
+    assert dlg.go.isEnabled() and dlg.go.text() == "Import 4 photos"
+    dlg.start()
+    assert pump(app, lambda: not dlg.running, 20)
+    day = tmp_path / "Photos" / "2026" / "2026-11-17"
+    assert os.listdir(day / I.LEFT_OUT_DIR) == ["IMG_0003.CR3"]
+    assert sorted(n for n in os.listdir(day) if n.endswith(".CR3")) == ["IMG_0001.CR3", "IMG_0002.CR3",
+                                                                        "IMG_0004.CR3"]
+    assert dlg.s_stacks.isEnabled()
+    dlg._find_stacks()
+    assert sent and sent[-1] == ("cardstacks", [str(day)])
     page.close()
 
 

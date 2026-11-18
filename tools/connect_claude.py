@@ -28,10 +28,28 @@ def entry(python: str | None = None) -> dict:
             "env": {"PYTHONPATH": str(APP_ROOT), "PYTHONUTF8": "1"}}
 
 
+def windows_candidates(local: str | None = None, roaming: str | None = None) -> list:
+    """Where Claude's settings folder can be on Windows, the one the app really reads first. Claude is installed
+    as a Windows package (MSIX), and Windows keeps a package's "AppData\\Roaming" files in a private place:
+    AppData\\Local\\Packages\\Claude_<id>\\LocalCache\\Roaming\\Claude. The plain AppData\\Roaming\\Claude is
+    only used by older, non-package installs (and may not exist at all)."""
+    local = Path(local or os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+    roaming = Path(roaming or os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+    out = []
+    try:
+        for pkg in sorted((local / "Packages").glob("Claude_*")):
+            out.append(pkg / "LocalCache" / "Roaming" / "Claude")
+    except OSError:
+        pass
+    out.append(roaming / "Claude")
+    return out
+
+
 def config_path() -> Path:
+    """Claude's settings file: in the first settings folder that exists (else where it would be made)."""
     if sys.platform == "win32":
-        return Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "Claude" / \
-            "claude_desktop_config.json"
+        dirs = windows_candidates()
+        return next((d for d in dirs if d.is_dir()), dirs[-1]) / "claude_desktop_config.json"
     if sys.platform == "darwin":
         return Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
     return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "Claude" / "claude_desktop_config.json"
@@ -91,8 +109,9 @@ def main(argv=None) -> int:
         return 1
     path = Path(a.config) if a.config else config_path()
     if not a.config and not path.parent.is_dir():
-        print("  The Claude desktop app's settings folder was not found:")
-        print(f"    {path.parent}")
+        print("  The Claude desktop app's settings folder was not found. Looked in:")
+        for d in (windows_candidates() if sys.platform == "win32" else [path.parent]):
+            print(f"    {d}")
         print("  Install and start the Claude desktop app once, then run this again. For any other MCP client,")
         print("  give it this entry:")
         print(snippet)

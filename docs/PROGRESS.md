@@ -1,6 +1,40 @@
 # Build progress
 
-Updated 2026-11-17 (session 13: Infrared and Panorama tabs, `BUILD_PLAN_PANO_IR.md`, plus flare ghosts and Fill). Plan: BUILD_PLAN.md v2.0.
+Updated 2026-11-17 (session 13: Infrared and Panorama tabs, `BUILD_PLAN_PANO_IR.md`, flare ghosts and Fill; then Card to Stacks on Bill's card). Plan: BUILD_PLAN.md v2.0.
+
+## Session 13b: Card to Stacks on Bill's own card (2026-11-17 evening, chat session with Bill)
+
+Block F of `BUILD_PLAN_PLATE_GLOW_BURST_MACRO.md` (F.8 has the status), tested on Bill's real card copied to
+`test_raws\DCIM\100CANON` (965 files: 511 CR3 from three days and 454 camera JPEGs beside their raws).
+
+* **Card to Stacks** (`stack/sorter.py`, `app/cardstacks.py`): its own sidebar entry under Focus Stack. Point it at
+  a card or folder (or Library right-click: Find focus stacks, or the import summary's button). It reads each raw's
+  embedded preview, lines neighbours up, splits runs by pauses, lens and scene, tells focus stacks from bursts, and
+  judges every frame of a stack: soft everywhere, adds nothing (naming the sharper frame at that depth), shaken,
+  camera moved too far, exposure jump; after the engine lines a stack up, **subject moved** (the frame's own sharp
+  part disagrees with its depth neighbours on both sides). Strictness gentle / normal / strict with best-for and
+  weak-at text. Stack all runs one stack after another in the background; results are
+  `FIRST_to_LAST_Focus_Studio.tif` beside the frames. Tick a frame to put it back. Nothing is deleted.
+* **AI Servo bursts:** a run shot entirely in AI Servo AF is a burst (Canon CameraSettings FocusMode, now in
+  `Metadata.focus_mode` and `FrameInfo.focus_mode`). Bill's dog at 400 mm (left on the card on purpose as a test)
+  came out as nine "focus stacks" before this.
+* **Show what's in focus** (Bill's request): in Card to Stacks, a stack shows cyan where some frame got it sharp
+  and amber where there is detail but no frame got it sharp; a frame shows its own in-focus band. In Review, **F**
+  lays cyan focus peaking over the photo (single photos, judged against the photo itself).
+* **Import: Sort focus stacks** (Bill chose: copy everything, left-out frames into a separate folder): the frames a
+  stack would leave out are copied and checked like the rest into `<day>\Left out` (second copy too); Open in
+  Library opens the day itself.
+* **Real card (heads and previews pulled on Bill's PC, sorted here):** 511 raws in about 2 minutes on the 2-core
+  build machine: 11 focus stacks (144 frames used, 64 left out: 54 soft everywhere, 10 adds nothing), 16 bursts
+  (all AI Servo), 2 single shots; every camera JPEG skipped because its raw is beside it. The raspberry stack
+  (2459-2481) checked by eye: every red frame is past the berry or a softer repeat. Full-size stacks: see
+  `docs/RESULTS.md`.
+* **Not built yet:** the motion-safe merge, the gap report inside the result, Canon's focus-bracketing flag,
+  handing bursts to Best of burst (block C), focus peaking in Develop.
+* **Bill's question (R5 heat):** the R5 writes its temperature into every raw (28 to 36 °C in today's stacks).
+  8K video is a good heater, not a calibration source (different readout and compression). The calibration
+  builder already records dark current against shutter speed and temperature; using it in the denoiser (hot-pixel
+  map and noise by camera temperature) is not built. Bill may shoot cold and hot dark frames for it.
 
 ## Session 13: Infrared tab, Panorama tab, flare ghosts, Fill (2026-11-17, chat session with Bill)
 
@@ -442,6 +476,13 @@ push scripts could not be run at all there: Bill runs them once before pushing.*
    when you tick it.)
 
 ## Open items for the next session
+
+* **Card to Stacks leftovers** (block F, F.8): motion-safe merge, gap report in the result, Canon focus-bracketing
+  flag, bursts to Best of burst, focus peaking in Develop; an image-only test for action bursts from cameras that
+  do not record the focus mode.
+* **Hot sensor:** use the dark-current-by-temperature table in the denoiser once Bill has shot cold and hot dark
+  frames (the R5 records its temperature in every raw).
+
 
 * **Section 23, still to build** (in the plan's order): the demosaic picker (RCD, LMMSE, dual) and PDAF line filter
   (23.8: the Sony tester needs the PDAF filter); highlight recovery by area, detail transfer and grain match with a

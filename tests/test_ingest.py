@@ -474,3 +474,29 @@ if sys.platform == "win32":
         p.write_bytes(data)
         assert I._hash_uncached(str(p)) == I._hash_cached(str(p))
         assert I._choose_check(str(tmp_path / "_studio")) == I.CHECK_UNCACHED
+
+
+def test_frames_left_out_of_a_stack_go_into_the_days_left_out_folder(tmp_path):
+    """Sort focus stacks at import (Bill 2026-11-17: copy everything, the left-out frames in a separate folder):
+    they are copied and checked like the rest, into <day>/Left out, on the second copy too; Open in Library shows
+    the day itself; a second import copies nothing; the card is never written to."""
+    src = card(tmp_path, {f"100CANON/IMG_{i:04d}.CR3": (None, T1) for i in range(1, 6)})
+    before = tree_state(src)
+    out = {"dcim/100canon/img_0002.cr3": "soft everywhere", "dcim/100canon/img_0004.cr3": "adds nothing"}
+    scan = I.scan_source(src)
+    I.confirm_capture_times(scan)
+    rels = {f.rel.lower() for f in scan.files}
+    out = {k: v for k, v in out.items() if k in rels} or {f.rel.lower(): "soft everywhere" for f in scan.files[1:4:2]}
+    plan, rep = do_import(src, tmp_path / "Photos", left_out=out, second=str(tmp_path / "Backup"))
+    assert rep.all_checked and len(rep.copied) == 5 and rep.left_out == 2
+    day = os.path.join(tmp_path, "Photos", "2026", "2026-11-14")
+    assert sorted(os.listdir(os.path.join(day, I.LEFT_OUT_DIR))) == sorted(os.path.basename(k).upper()
+                                                                          for k in out)
+    assert len([n for n in os.listdir(day) if n.endswith(".CR3")]) == 3
+    assert os.path.isdir(os.path.join(tmp_path, "Backup", "2026", "2026-11-14", I.LEFT_OUT_DIR))
+    assert rep.folders == [day]
+    assert any("Left out of focus stacks" in ln for ln in rep.summary_lines())
+    assert all("left out of a stack" in it.note for it in plan.items if os.path.basename(it.folder) == I.LEFT_OUT_DIR)
+    plan2, rep2 = do_import(src, tmp_path / "Photos", left_out=out)
+    assert plan2.to_copy == [] and rep2.copied == []
+    assert tree_state(src) == before

@@ -46,6 +46,7 @@ class FrameInfo:
     ok: bool = True
     problem: str = ""
     is_raw: bool = True
+    focus_mode: str = ""        # what the camera says: one-shot | servo | ai-focus | manual | "" (not recorded)
 
     def to_dict(self) -> dict:
         return {k: getattr(self, k) for k in self.__dataclass_fields__}
@@ -81,6 +82,7 @@ def probe(paths) -> list[FrameInfo]:
                 fi.camera = " ".join(x for x in (md.make, md.model) if x).strip()
                 fi.iso, fi.exposure_s, fi.fnumber, fi.focal_mm = md.iso, md.exposure_s, md.fnumber, md.focal_mm
                 fi.taken = (md.datetime or "").strip("\x00 ")
+                fi.focus_mode = md.focus_mode
                 si = md.sensor_info or {}
                 if si.get("right") and si.get("bottom"):
                     fi.width = int(si["right"]) - int(si.get("left", 0)) + 1

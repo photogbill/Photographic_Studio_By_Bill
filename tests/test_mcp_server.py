@@ -159,3 +159,9 @@ def test_connecting_to_claude_keeps_everything_else(tmp_path):
         C.update(cfg, python="py.exe")
     assert cfg.read_text(encoding="utf-8") == "{ not json"          # a file it cannot read is never touched
     assert C.main(["--print"]) == 0
+    # Windows: the packaged app's own folder comes before the plain AppData\\Roaming one
+    local, roaming = tmp_path / "Local", tmp_path / "Roaming"
+    pkg = local / "Packages" / "Claude_pzs8sxrjxfjjc" / "LocalCache" / "Roaming" / "Claude"
+    pkg.mkdir(parents=True)
+    assert C.windows_candidates(str(local), str(roaming)) == [pkg, roaming / "Claude"]
+    assert C.windows_candidates(str(tmp_path / "none"), str(roaming)) == [roaming / "Claude"]

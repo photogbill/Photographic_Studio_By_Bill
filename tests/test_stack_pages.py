@@ -206,8 +206,11 @@ def test_library_sends_to_the_tabs(monkeypatch):
     assert w.nav.currentRow() == M.ROW["Panorama"] and got[-1] == ("pano", ["d.cr2", "e.cr2"])
     w.library.send_to.emit("infrared", ["f.cr2", "g.cr2"])
     assert w.nav.currentRow() == M.ROW["Infrared"] and got[-1] == ("ir", ["f.cr2", "g.cr2"])
-    assert [n for _, n in M.NAV][:7] == ["Library", "Develop", "Dual Pixel Lab", "Focus Stack", "Super-Res Stack",
-                                         "Infrared", "Panorama"]
+    monkeypatch.setattr(w.cardstacks, "set_sources", lambda items: got.append(("card", items)))
+    w.library.send_to.emit("cardstacks", ["h.cr3", "i.cr3", "j.cr3"])
+    assert w.nav.currentRow() == M.ROW["Card to Stacks"] and got[-1] == ("card", ["h.cr3", "i.cr3", "j.cr3"])
+    assert [n for _, n in M.NAV][:8] == ["Library", "Develop", "Dual Pixel Lab", "Focus Stack", "Card to Stacks",
+                                         "Super-Res Stack", "Infrared", "Panorama"]
     w.close()
 
 
@@ -242,4 +245,62 @@ def test_panorama_page_finds_layout_previews_and_builds():
     assert page.last_result.endswith("_Pano_Studio.tif") and os.path.exists(page.last_result)
     page.open_b.click()
     assert opened == [page.last_result]
+    page.close()
+
+
+def test_card_to_stacks_page_lists_puts_back_and_rejudges():
+    """The Card to Stacks queue on the synthetic card of tests/test_sorter.py: one row per stack, burst and single
+    shot; the planted bad frames unticked with their reasons in red; ticking one puts it back (amber, "put back by
+    you"); a stricter setting judges again; Stack all is ready for both stacks."""
+    import test_sorter as TS
+    from PySide6.QtCore import Qt
+    from studio.app import theme as T
+    app, M = _app()
+    page = M.CardStacksPage(M.Settings())
+    page.resize(1100, 700)
+    page.show()
+    app.processEvents()
+    assert page.centre.currentIndex() == 0                  # empty state first
+    card, bad = TS.make_card()
+    page.sources = ["(synthetic card)"]
+    page.groups = TS.group(card)
+    page._fill()
+    page._say_report()
+    assert page.tree.topLevelItemCount() == 4 and page.centre.currentIndex() == 1
+    top = page.tree.topLevelItem(0)
+    assert top.childCount() == 13 and "Focus stack" in top.text(0)
+    soft = [top.child(i) for i in range(top.childCount()) if bad.get(top.child(i).text(0)) == "soft"][0]
+    assert soft.checkState(0) == Qt.CheckState.Unchecked and "soft everywhere" in soft.text(1)
+    assert soft.foreground(1).color().name().lower() == T.RED.lower()
+    assert page.all_b.isEnabled()
+    n_out = len(page.groups[0].left_out)
+    soft.setCheckState(0, Qt.CheckState.Checked)            # one click puts it back
+    app.processEvents()
+    f = page.groups[0].frames[top.indexOfChild(soft)]
+    assert f.status == "warn" and f.reason.startswith("put back by you")
+    assert len(page.groups[0].left_out) == n_out - 1
+    assert page.peak.isChecked()                            # Show what's in focus (Bill 2026-11-17)
+    page.tree.setCurrentItem(soft)                          # the frame, cyan where it is in focus
+    t0 = time.time()
+    while "in focus in" not in page.view_note.text() and time.time() - t0 < 60:
+        app.processEvents()
+        time.sleep(0.02)
+    assert "in focus in" in page.view_note.text()
+    assert page.view.pixmap() is not None and not page.view.pixmap().isNull()
+    page.tree.setCurrentItem(top)                           # the stack: cyan in focus, amber missed
+    t0 = time.time()
+    while "no frame got sharp" not in page.view_note.text() and time.time() - t0 < 60:
+        app.processEvents()
+        time.sleep(0.02)
+    assert "no frame got sharp" in page.view_note.text()
+    page.peak.setChecked(False)                             # off: the plain preview
+    page.tree.setCurrentItem(soft)
+    app.processEvents()
+    assert "sharpest in" in page.view_note.text()
+    page.strict.set_key("strict")
+    page._rejudge()
+    assert len(page.groups[0].left_out) >= n_out            # judged again from what was read
+    assert "2 focus stacks" in page.report.text()
+    page.clear()
+    assert page.tree.topLevelItemCount() == 0 and page.centre.currentIndex() == 0
     page.close()

@@ -367,6 +367,7 @@ class LibraryPage(QWidget):
     process_requested = Signal(list)
     folder_loaded = Signal(str)
     send_to = Signal(str, list)                      # "focus" | "superres" | "dualpixel" | "infrared" | "panorama"
+                                                     # | "cardstacks" (files or folders)
 
     def __init__(self, settings: Settings):
         super().__init__()
@@ -1195,6 +1196,8 @@ class LibraryPage(QWidget):
                     lambda: self.send_to.emit("infrared", files))
         a = m.addAction(f"Send {len(files)} to Panorama", lambda: self.send_to.emit("panorama", files))
         a.setEnabled(len(files) >= 2)
+        a = m.addAction(f"Find focus stacks in these {len(files)}", lambda: self.send_to.emit("cardstacks", files))
+        a.setEnabled(len(files) >= 3)
         m.addSeparator()
         m.addAction(f"Process {len(files)} selected...", lambda: self.process_picks("selected"))
         m.addAction("Export...", lambda: self.export_requested.emit(files))

@@ -38,6 +38,7 @@ from .exporting import ExportDialog, QLineEdit_, version_export_path  # noqa: F4
 from .library import LibraryPage  # noqa: F401  (section 24: the Library lives in its own file)
 from .dualpixel import DualPixelPage  # noqa: E402  (the three stacking tabs: BUILD_PLAN_TABS)
 from .focusstack import FocusStackPage  # noqa: E402
+from .cardstacks import CardStacksPage  # noqa: E402
 from .superres import SuperResPage  # noqa: E402
 from .infrared import InfraredPage  # noqa: E402  (BUILD_PLAN_PANO_IR: the Infrared tab)
 from .panorama import PanoramaPage  # noqa: E402  (BUILD_PLAN_PANO_IR: the Panorama tab)
@@ -6880,6 +6881,13 @@ class HelpPage(InfoPage):
                                              "(right-click photos in the Library: Send to Focus Stack). Shoot "
                                              "manual exposure, overlap the focus steps, and keep the subject still; "
                                              "hand-held works with Line up locally on."),
+                             ("Card to Stacks", "Point it at a card or a folder (or right-click photos in the "
+                                                "Library: Find focus stacks; the import summary offers it too). It "
+                                                "finds every focus stack, leaves out the frames that would hurt "
+                                                "each one with the reason (soft everywhere, adds nothing, shaken, "
+                                                "subject moved), and stacks them all. Bursts, including AI Servo "
+                                                "action, are listed and left alone. Nothing is deleted; tick a "
+                                                "frame to put it back."),
                              ("Super-Res Stack", "Merges a burst into one cleaner photo, or a larger one (1.5x, 2x) "
                                                  "when the frames are shifted a little between shots. Hand-held "
                                                  "bursts, the moon and night sky each have their own mode; the "
@@ -7058,7 +7066,8 @@ class HelpPage(InfoPage):
 
 
 # ============================================================================================ main window
-NAV = [("▦", "Library"), ("◐", "Develop"), ("◫", "Dual Pixel Lab"), ("≋", "Focus Stack"), ("✦", "Super-Res Stack"),
+NAV = [("▦", "Library"), ("◐", "Develop"), ("◫", "Dual Pixel Lab"), ("≋", "Focus Stack"), ("☷", "Card to Stacks"),
+       ("✦", "Super-Res Stack"),
        ("◑", "Infrared"), ("⌒", "Panorama"), ("◎", "Lenses"), ("▣", "Cameras"), ("⇪", "Export"), ("?", "Help")]
 ROW = {name: i for i, (_, name) in enumerate(NAV)}
 
@@ -7117,11 +7126,12 @@ class MainWindow(QMainWindow):
         self.help = HelpPage()
         self.dualpixel = DualPixelPage(self.settings)
         self.focus = FocusStackPage(self.settings)
+        self.cardstacks = CardStacksPage(self.settings)
         self.superres = SuperResPage(self.settings)
         self.infrared = InfraredPage(self.settings)
         self.infrared.sidecar_written.connect(self._ir_sidecar)
         self.panorama = PanoramaPage(self.settings)
-        for pg in (self.dualpixel, self.focus, self.superres, self.infrared, self.panorama):
+        for pg in (self.dualpixel, self.focus, self.cardstacks, self.superres, self.infrared, self.panorama):
             pg.open_result.connect(self.open_result)
             pg.result_written.connect(self._stack_written)
             pg.status.connect(lambda t: self.statusBar().showMessage(t, 6000))
@@ -7130,7 +7140,7 @@ class MainWindow(QMainWindow):
         BUS.report_saved.connect(self._report_saved)
         pages = [
             self.library, self.develop,
-            self.dualpixel, self.focus, self.superres, self.infrared, self.panorama,
+            self.dualpixel, self.focus, self.cardstacks, self.superres, self.infrared, self.panorama,
             self.lenses,
             self.cameras,
             InfoPage("Export", "Select photos in the Library and press Export, or use Export in Develop. 16-bit "
@@ -7354,13 +7364,17 @@ class MainWindow(QMainWindow):
     def send_to_tab(self, where: str, files: list):
         """From the Library: Send to Focus Stack / Super-Res Stack, Open in Dual Pixel Lab, Edit in Infrared tab."""
         page, row = {"focus": (self.focus, ROW["Focus Stack"]), "superres": (self.superres, ROW["Super-Res Stack"]),
+                     "cardstacks": (self.cardstacks, ROW["Card to Stacks"]),
                      "dualpixel": (self.dualpixel, ROW["Dual Pixel Lab"]),
                      "infrared": (self.infrared, ROW["Infrared"]),
                      "panorama": (self.panorama, ROW["Panorama"])}[where]
         if self.develop.path and self.develop.path in files:
             self.develop.save_sidecar()
         self.nav.setCurrentRow(row)
-        page.set_frames(files)
+        if where == "cardstacks":
+            page.set_sources(files)
+        else:
+            page.set_frames(files)
 
     def _ir_sidecar(self, path: str):
         """The Infrared tab wrote a photo's edit: Develop (if it has that photo open) and the Library catch up."""

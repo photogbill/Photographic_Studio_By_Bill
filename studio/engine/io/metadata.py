@@ -54,6 +54,7 @@ class Metadata:
     camera_temperature_c: float | None = None
     sensor_info: dict = field(default_factory=dict)    # Canon SensorInfo borders (geometry, not identity)
     manual_lens: bool = False
+    focus_mode: str = ""                  # Canon CameraSettings FocusMode: one-shot | servo | ai-focus | manual | ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -106,6 +107,17 @@ def canon_shotinfo_iso(shotinfo) -> float | None:
     if not (10 <= iso <= 10_000_000):
         return None
     return snap_iso(iso)
+
+
+CANON_FOCUS_MODE = {0: "one-shot", 1: "servo", 2: "ai-focus", 3: "manual", 4: "one-shot", 5: "servo", 6: "manual",
+                    256: "one-shot", 257: "servo", 258: "ai-focus", 519: "servo"}
+
+
+def canon_focus_mode(camset) -> str:
+    """Canon CameraSettings index 7 is FocusMode (ExifTool's numbering: entry 0 is the record's length)."""
+    if isinstance(camset, tuple) and len(camset) > 7 and isinstance(camset[7], int):
+        return CANON_FOCUS_MODE.get(camset[7] & 0xFFFF, "")
+    return ""
 
 
 def canon_temperature(shotinfo) -> float | None:
@@ -168,6 +180,7 @@ def read_metadata(path: str, libraw_iso: float | None = None, head_bytes: int = 
         si = mn.get(C_SHOTINFO)
         cands["canon_shotinfo"] = canon_shotinfo_iso(si)
         md.camera_temperature_c = canon_temperature(si)
+        md.focus_mode = canon_focus_mode(mn.get(C_CAMSET))
         sens = mn.get(C_SENSORINFO)
         if isinstance(sens, tuple) and len(sens) >= 13:
             md.sensor_info = dict(width=sens[1], height=sens[2], left=sens[5], top=sens[6], right=sens[7],

@@ -979,3 +979,39 @@ at most a 1% ripple where there was none (an earlier pairwise version made a 3.4
 ghost itself: a large hexagon with straight sides in IMG_5186 and 5187, where no clean frame covers it (the finished
 panorama opens in Develop, where Find flare ghosts and Fill work on it). IMG_5185 does not connect to the other six
 and is left out (named on the page).
+
+## 2026-11-17 (session 13b): Card to Stacks on Bill's card
+
+**The card.** `test_raws\DCIM\100CANON`: 965 files, 511 CR3 from three days (8 Aug 2025: night bursts at 400 mm
+and ISO 12800; 8 Mar 2026: Bill's Shiba running with a ball at 400 mm, AI Servo; 17 Nov 2026: hand-held manual-focus
+stacks on the Voigtländer 90 mm, ISO 400 to 12800, the last 57 in Dual Pixel RAW), and 454 camera JPEGs, each beside
+its raw. Sorted here from each raw's 512 KB header and its 1620 px preview (pulled on Bill's PC): about 2.5 minutes
+for 511 raws on the 2-core build machine.
+
+**Grouping.** 16 bursts (every run shot in AI Servo; before the focus-mode check the dog came out as nine "focus
+stacks", because the sharp area moved with the dog), 11 focus stacks (every manual-focus run of the day), 2 single
+shots. Every camera JPEG skipped. Before lining frames up, hand-held drift (up to 15% of the frame within a stack)
+made the block comparison judge different parts of the plant against each other.
+
+**Culling** (final rules): 130 frames used, 78 left out (65 soft everywhere, 13 adds nothing, each naming the
+sharper frame at that depth). Checked by eye: the raspberry in Bill's palm (2459-2481): every frame left out is
+past the berry or a softer repeat. The bramble leaves over grass (2514-2523): the first rule ("soft everywhere" =
+its sharpest detail far below the stack's best) left out 2517, the frame sharpest on the leaves, because smooth
+leaves have less fine detail than grass; judged block by block against the best frame there, 2517-2519 are kept.
+
+**Full-size stacks** (R5, 45 MP, 2-core build machine):
+
+| Stack | Frames used | Left out after lining up | Time | Peak memory | Notes |
+|---|---|---|---|---|---|
+| 2347-2369, ISO 12800, dried stem in wind | 17 of 23 | 2367 "subject moved (49%)"; 2347, 2352, 2366 amber | 18.6 min | 4.8 GB | 20.5% cropped (hand-held drift); the stem tip that swayed between Bill's two sweeps is soft, with a faint ghost |
+| 2518-2523, Dual Pixel RAW, bramble over grass | 3 (only 5 staged, judged among themselves) | none | 4.1 min | 4.0 GB | the leaf frames had been left out by the first rule: the leaves are soft in this result (the case that changed the rule) |
+| 2517-2523, Dual Pixel RAW, the same with the fixed rule | 6 of 7 | none; 2523 amber (18%) | 6.6 min | 4.9 GB | leaves and ground sharp front to back; 6.1% cropped |
+
+**Subject moved.** The engine's own moved share (measured before local alignment) flagged 9 of 20 good frames of
+the stem stack (parallax counts as movement), so it is not used. The new check compares a frame with its depth
+neighbours where it is the sharpest frame, after local alignment: on the stem stack it found the frame whose stem tip
+had moved (checked by eye). With only three frames far apart in depth it warned on all three (the focus step looked
+like movement): a suspect is now compared again after blurring it to match each neighbour.
+
+**Show what's in focus.** 5 s per stack on 2 cores (the raspberry: 25% of the frame in focus somewhere, 0.5% detail
+no frame got sharp).

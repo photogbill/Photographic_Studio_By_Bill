@@ -19,7 +19,7 @@ def test_app_starts_with_all_workspaces(tmp_path, monkeypatch):
     app = QApplication.instance() or QApplication([])
     app.setStyleSheet(T.QSS)
     w = M.MainWindow()
-    assert w.stack.count() == len(M.NAV) == 11
+    assert w.stack.count() == len(M.NAV) == 12
     for i in range(w.stack.count()):
         w.nav.setCurrentRow(i)
         app.processEvents()

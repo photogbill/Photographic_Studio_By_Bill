@@ -58,6 +58,7 @@ RESERVE_FRACTION = 0.05
 LONG_PATH = 240
 MAX_NAME = 80
 UNDATED = "Undated"
+LEFT_OUT_DIR = "Left out"                     # Card to Stacks at import: frames that would hurt a focus stack
 _RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
 
 
@@ -564,6 +565,9 @@ class ImportOptions:
     second: str = ""                             # "Also copy to a second drive" root ('' = off)
     show_imported_before: bool = False           # override rule 5
     record: str = ""                             # default <dest>/_studio/imports.jsonl
+    left_out: dict = field(default_factory=dict)  # source rel (lower case) -> reason: copied into the day's
+                                                  # "Left out" folder (frames that would hurt a focus stack;
+                                                  # Bill 2026-11-17: still copied, only out of sight)
 
     def wants(self, kind: str) -> bool:
         return {RAW: self.raws, JPEG: self.jpegs, VIDEO: self.videos}.get(kind, False)
@@ -787,11 +791,14 @@ def plan_import(scan: Scan, options: ImportOptions, record: "ImportRecord | None
         if not g.folder:
             plan.items.append(PlanItem(src=f, action=COPY, day=k))
             continue
-        fk = os.path.normcase(g.folder)
-        there = existing.setdefault(fk, _listing(g.folder))
+        why_out = (o.left_out or {}).get(f.rel.lower())
+        folder = os.path.join(g.folder, LEFT_OUT_DIR) if why_out else g.folder
+        fk = os.path.normcase(folder)
+        there = existing.setdefault(fk, _listing(folder))
         taken = used.setdefault(fk, set(there))
         mine = planned.setdefault(fk, set())
-        it = PlanItem(src=f, action=COPY, day=k, folder=g.folder, name=f.name)
+        it = PlanItem(src=f, action=COPY, day=k, folder=folder, name=f.name, note=f"left out of a stack: {why_out}"
+                      if why_out else "")
         low = f.name.lower()
         if low in mine or (low in taken and low not in there):
             it.name, it.renamed = _next_free(f.name, taken), True
@@ -1012,6 +1019,7 @@ class ImportReport:
     bytes: int = 0
     seconds: float = 0.0
     log_path: str = ""
+    left_out: int = 0                                   # copied into a day's "Left out" folder
 
     @property
     def all_checked(self) -> bool:
@@ -1026,6 +1034,8 @@ class ImportReport:
             out.append(f"Imported before, skipped: {imported}")
         if there:
             out.append(f"Already in the folder (same photo), skipped: {there}")
+        if self.left_out:
+            out.append(f"Left out of focus stacks, copied into the day's \"{LEFT_OUT_DIR}\" folder: {self.left_out}")
         if self.renamed:
             out.append(f"Same name as a different photo, kept under a new name: {len(self.renamed)}")
         if self.failed:
@@ -1080,7 +1090,8 @@ def run_import(plan: ImportPlan, on_progress=None, cancel=None) -> ImportReport:
     wlog(f"from {plan.source}")
     wlog(f"to   {dest}" + (f"   second copy: {second}" if second else ""))
     wlog(f"options: raws={o.raws} jpegs={o.jpegs} videos={o.videos} by_year={o.by_year} day_start={o.day_start} "
-         f"one_folder={o.one_folder} show_imported_before={o.show_imported_before}")
+         f"one_folder={o.one_folder} show_imported_before={o.show_imported_before} "
+         f"left_out_of_stacks={len(o.left_out or {})}")
     problem = plan.problem
     if not problem and plan.to_copy and not plan.fits:
         problem = f"not enough free space on {drive_of(dest)} ({human_bytes(plan.shortfall)} short)"
@@ -1103,7 +1114,7 @@ def run_import(plan: ImportPlan, on_progress=None, cancel=None) -> ImportReport:
     for it in todo:
         if it.folder and it.folder not in folders:
             folders.append(it.folder)
-    rep.folders = folders
+    rep.folders = [f for f in folders if os.path.basename(f) != LEFT_OUT_DIR]   # Open in Library: the day itself
     total_bytes = sum(it.src.size for it in todo)
     prog = {"done": 0, "bytes": 0, "last": 0.0, "current": ""}
 
@@ -1167,6 +1178,8 @@ def run_import(plan: ImportPlan, on_progress=None, cancel=None) -> ImportReport:
         rep.stopped = rep.stopped or f"unexpected problem: {e}"
         wlog("STOPPED: " + rep.stopped)
     rep.seconds = time.perf_counter() - t0
+    rep.left_out = sum(1 for _, d in rep.copied
+                       if os.path.basename(os.path.dirname(d)) == LEFT_OUT_DIR)
     if not rep.cancelled and not rep.stopped:
         prog["done"], prog["bytes"], prog["current"] = len(todo), total_bytes, ""
         report(force=True)

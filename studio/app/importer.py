@@ -147,6 +147,9 @@ class ImportDialog(QDialog):
         self.running = False
         self.report = None
         self.scan_token = 0
+        self.left_out: dict = {}                       # source rel (lower) -> reason, from Sort focus stacks
+        self.sorting = False
+        self.sort_token = 0
         self.sig = _Sig(self)
         self.sig.progress.connect(self._progress)
         v = QVBoxLayout(self)
@@ -287,6 +290,19 @@ class ImportDialog(QDialog):
         opts.addWidget(label("A new day starts at", "dim"))
         opts.addWidget(self.day_start)
         fbox.addLayout(opts)
+        srow2 = QHBoxLayout()
+        self.sort_c = QCheckBox("Sort focus stacks")
+        self.sort_c.setChecked(bool(self.settings.get("import_sort_stacks", False)))
+        self.sort_c.setToolTip("Finds the focus stacks on the card and copies the frames that would hurt a stack "
+                               "(soft everywhere, adds nothing, shaken...) into a \"Left out\" folder inside that "
+                               "day's folder. Everything is still copied; bursts and single shots are not touched.\n"
+                               "Best for: cards of hand-held focus stacks. Weak at: it reads every raw's preview "
+                               "first (about a minute per 250 photos).")
+        self.sort_c.toggled.connect(self._sort_toggled)
+        self.sort_lbl = label("", "dim", wrap=True)
+        srow2.addWidget(self.sort_c)
+        srow2.addWidget(self.sort_lbl, 1)
+        fbox.addLayout(srow2)
         g.addLayout(fbox, r, 1)
         r += 1
         g.addWidget(label("Second copy", "dim"), r, 0)
@@ -368,6 +384,11 @@ class ImportDialog(QDialog):
         logb.clicked.connect(lambda: self.report and QDesktopServices.openUrl(QUrl.fromLocalFile(self.report.log_path)))
         close = QPushButton("Close")
         close.clicked.connect(self.close)
+        self.s_stacks = QPushButton("Find focus stacks")
+        self.s_stacks.setToolTip("Opens Card to Stacks on what was just copied: every focus stack found, the frames "
+                                 "that would hurt it left out with a reason, ready to stack.")
+        self.s_stacks.clicked.connect(self._find_stacks)
+        row.addWidget(self.s_stacks)
         self.s_open = QPushButton("Open in Library")
         self.s_open.setObjectName("primary")
         self.s_open.setDefault(True)
@@ -433,6 +454,9 @@ class ImportDialog(QDialog):
         """Look at a card or folder: the listing first (fast), then the capture times from the photos."""
         self.source = root
         self.scan, self.plan = None, None
+        self.left_out, self.sorting = {}, False
+        self.sort_token += 1
+        self.sort_lbl.setText("")
         self.scan_token += 1
         token = self.scan_token
         self.card_note.setText("Looking at the card...")
@@ -461,6 +485,8 @@ class ImportDialog(QDialog):
                                        f"video{'s' if sc2.count(I.VIDEO) != 1 else ''}."
                                        + (f" {len(sc2.errors)} could not be read." if sc2.errors else ""))
                 self.replan()
+                if self.sort_c.isChecked():
+                    self._sort_stacks()
             run_bg(confirm, "confirm-times", confirmed)
 
         def failed(_, err):
@@ -482,7 +508,64 @@ class ImportDialog(QDialog):
                                day_start=f"{t.hour():02d}:{t.minute():02d}", one_folder=self.one.isChecked(),
                                names=names, skip_days=skip,
                                second=self.second.text().strip() if self.second_on.isChecked() else "",
-                               show_imported_before=self.before.isChecked())
+                               show_imported_before=self.before.isChecked(),
+                               left_out=dict(self.left_out) if self.sort_c.isChecked() else {})
+
+    # ------------------------------------------------------------------------------------ Sort focus stacks
+    def _sort_toggled(self, on):
+        self.settings.set("import_sort_stacks", bool(on))
+        if on and self.scan is not None and not self.left_out and not self.sorting:
+            self._sort_stacks()
+        else:
+            self.sort_lbl.setText(self._sort_text() if on else "")
+            self.replan()
+
+    def _sort_text(self) -> str:
+        n = len(self.left_out)
+        return (f"{n} frame{'s' if n != 1 else ''} left out of focus stacks will go into \"{I.LEFT_OUT_DIR}\" "
+                f"folders." if n else "No frames to leave out.")
+
+    def _sort_stacks(self):
+        """Read every raw's preview on the card and find the frames a focus stack would leave out (background)."""
+        if self.scan is None:
+            return
+        from ..engine.stack import sorter as SO
+        raws = [f for f in self.scan.files if f.kind == I.RAW]
+        if not raws:
+            self.sort_lbl.setText("No raw files to sort.")
+            return
+        self.sort_token += 1
+        token = self.sort_token
+        self.sorting = True
+        by_path = {os.path.normcase(f.path): f.rel.lower() for f in raws}
+        self.sort_lbl.setText(f"Sorting focus stacks: reading {len(raws)} photos...")
+        self._update_ui()
+        stop = threading.Event()
+        self._sort_stop = stop
+
+        def work():
+            def prog(fr, msg=""):
+                if token != self.sort_token:
+                    stop.set()
+            return SO.left_out_map([f.path for f in raws], progress=prog, cancel=stop)
+
+        def done(_, mp):
+            if token != self.sort_token:
+                return
+            self.sorting = False
+            self.left_out = {by_path[os.path.normcase(p)]: why for p, why in mp.items()
+                             if os.path.normcase(p) in by_path}
+            self.sort_lbl.setText(self._sort_text())
+            self.replan()
+
+        def failed(_, err):
+            if token != self.sort_token:
+                return
+            self.sorting = False
+            self.left_out = {}
+            self.sort_lbl.setText(f"Sorting focus stacks did not work ({err}); everything is copied as usual.")
+            self.replan()
+        run_bg(work, "sort-stacks", done, failed)
 
     def _record(self, dest: str):
         if not dest:
@@ -673,9 +756,14 @@ class ImportDialog(QDialog):
             problem = "Not enough free space on the destination."
         elif not p.second_fits:
             problem = "Not enough free space for the second copy."
-        self.go.setEnabled(p.can_start)
+        if self.sorting and self.sort_c.isChecked() and not problem:
+            problem = "Sorting focus stacks first (untick Sort focus stacks to import without it)."
+            self.go.setEnabled(False)
+        else:
+            self.go.setEnabled(p.can_start)
         self.reason.setText(problem)
-        self.reason.setStyleSheet(f"color:{T.RED};" if problem and n else "")
+        self.reason.setStyleSheet(f"color:{T.AMBER};" if self.sorting and self.sort_c.isChecked() else
+                                  (f"color:{T.RED};" if problem and n else ""))
 
     # ------------------------------------------------------------------------------------ running
     def start(self):
@@ -740,6 +828,7 @@ class ImportDialog(QDialog):
         else:
             self.s_safe.setText("")
         self.s_open.setEnabled(bool(rep.folders))
+        self.s_stacks.setEnabled(bool(rep.folders))
         for k in list(self.records):                   # the record grew: read it again next time
             self.records.pop(k, None)
 
@@ -747,6 +836,13 @@ class ImportDialog(QDialog):
         rep = self.report
         if rep and rep.folders:
             self.page.imported(rep.folders[0])
+        self.close()
+
+    def _find_stacks(self):
+        rep = self.report
+        if rep and rep.folders:
+            self.page.imported(rep.folders[0])
+            self.page.send_to.emit("cardstacks", list(rep.folders))
         self.close()
 
     def closeEvent(self, e):
@@ -757,6 +853,7 @@ class ImportDialog(QDialog):
             return
         self.timer.stop()
         self.scan_token += 1
+        self.sort_token += 1                           # a running sort stops at its next photo
         super().closeEvent(e)
 
 

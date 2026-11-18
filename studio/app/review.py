@@ -56,6 +56,8 @@ class PhotoView(QWidget):
         self._press = None
         self._moved = False
         self.click_zooms = True                        # a click toggles 100% (off where a click picks a place)
+        self.peak = False                              # Show what's in focus (F): cyan over the sharpest detail
+        self._peak_img = None                          # (cacheKey of the image, overlay QImage)
 
     def set_image(self, img: QImage | None, full_w: int = 0, full_h: int = 0) -> None:
         self.img = img
@@ -63,6 +65,27 @@ class PhotoView(QWidget):
             self.full_w = full_w or img.width()
             self.full_h = full_h or img.height()
         self.update()
+
+    def peak_overlay(self) -> QImage | None:
+        """Cyan where the shown image's detail is sharpest (sorter.in_focus_mask), as a see-through layer the size
+        of the image; worked out once per image."""
+        if self.img is None:
+            return None
+        key = self.img.cacheKey()
+        if self._peak_img is not None and self._peak_img[0] == key:
+            return self._peak_img[1]
+        import numpy as np
+        from ..engine.stack.sorter import in_focus_mask
+        g = self.img.convertToFormat(QImage.Format.Format_Grayscale8)
+        w, h, bpl = g.width(), g.height(), g.bytesPerLine()
+        a = np.frombuffer(g.constBits(), np.uint8, count=bpl * h).reshape(h, bpl)[:, :w].astype(np.float32) / 255
+        m = in_focus_mask(a)
+        c = QColor(T.CYAN)
+        rgba = np.zeros((h, w, 4), np.uint8)
+        rgba[m] = (c.red(), c.green(), c.blue(), 210)
+        ov = QImage(rgba.data, w, h, 4 * w, QImage.Format.Format_RGBA8888).copy()
+        self._peak_img = (key, ov)
+        return ov
 
     def set_tile(self, img: QImage | None, rect=None) -> None:
         self.tile, self.tile_rect = img, rect
@@ -111,14 +134,19 @@ class PhotoView(QWidget):
         p.fillRect(self.rect(), QColor(T.BG))
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         if self.img is not None and self.full_w:
+            ov = self.peak_overlay() if self.peak else None
             if not self.zoom:
                 p.drawImage(self.fit_rect(), self.img, QRectF(self.img.rect()))
+                if ov is not None:
+                    p.drawImage(self.fit_rect(), ov, QRectF(ov.rect()))
             else:
                 x, y, w, h = self.window_100()
                 sx = self.img.width() / self.full_w
                 src = QRectF(x * sx, y * sx, w * sx, h * sx)
                 dst = QRectF((self.width() - w) / 2, (self.height() - h) / 2, w, h)
                 p.drawImage(dst, self.img, src)
+                if ov is not None:
+                    p.drawImage(dst, ov, src)
                 if self.tile is not None and self.tile_rect is not None:
                     tx, ty, tw, th = self.tile_rect
                     p.drawImage(QRectF(dst.left() + tx - x, dst.top() + ty - y, tw, th), self.tile,
@@ -228,6 +256,13 @@ class ReviewView(QWidget):
         self.advance = QCheckBox("Go to the next photo after rating")
         self.advance.setChecked(bool(page.settings.get("review_advance", True)))
         self.advance.toggled.connect(lambda on: page.settings.set("review_advance", bool(on)))
+        self.peak_b = QPushButton("In focus (F)")
+        self.peak_b.setCheckable(True)
+        self.peak_b.setToolTip("Show what's in focus: cyan over the sharpest detail in the photo, so a missed focus "
+                               "shows at a glance (judged against the photo itself: a photo soft everywhere still "
+                               "shows its least soft part)")
+        self.peak_b.setChecked(bool(page.settings.get("review_peak", False)))
+        self.peak_b.toggled.connect(self._peak_toggled)
         self.cmp_b = QPushButton("Compare (C)")
         self.cmp_b.setCheckable(True)
         self.cmp_b.toggled.connect(self.set_compare)
@@ -238,6 +273,7 @@ class ReviewView(QWidget):
         bl.addWidget(back)
         bl.addSpacing(10)
         bl.addWidget(self.info, 1)
+        bl.addWidget(self.peak_b)
         bl.addWidget(self.cmp_b)
         bl.addWidget(dev)
         v.addWidget(bar)
@@ -254,6 +290,7 @@ class ReviewView(QWidget):
         views.setContentsMargins(0, 0, 0, 0)
         views.setSpacing(4)
         self.view_a, self.view_b = PhotoView(), PhotoView()
+        self.view_a.peak = self.view_b.peak = self.peak_b.isChecked()
         self.view_b.hide()
         self.view_a.zoom_changed.connect(lambda z, u, vv: self._zoom_moved(self.view_a, z, u, vv))
         self.view_b.zoom_changed.connect(lambda z, u, vv: self._zoom_moved(self.view_b, z, u, vv))
@@ -280,6 +317,12 @@ class ReviewView(QWidget):
         self.strip.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         v.addWidget(self.strip)
         self._tile_timer = QTimer(self, singleShot=True, interval=200, timeout=self._render_tiles)
+
+    def _peak_toggled(self, on):
+        self.page.settings.set("review_peak", bool(on))
+        for v in (self.view_a, self.view_b):
+            v.peak = bool(on)
+            v.update()
 
     # ------------------------------------------------------------------------------------ opening and moving
     def start(self, path: str) -> None:
@@ -631,6 +674,8 @@ class ReviewView(QWidget):
             self.toggle_zoom()
         elif t == "c":
             self.set_compare(not self.compare)
+        elif t == "f":
+            self.peak_b.setChecked(not self.peak_b.isChecked())
         elif t and t in "012345pxu":
             if self.path:
                 self.page.set_flag([self.path], t)
