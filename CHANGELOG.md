@@ -2,6 +2,12 @@
 
 Newest first. Written by tools/whats_new.py from docs/NEXT_UPDATE.md each time Release.bat makes an update.
 
+## 0.1.9 (2026-11-18)
+
+- New: Cameras page: drop everything in one pile. Shoot with the lens cap on (every ISO, at least twice, cool and warm if you can, a few long ones), then drop the whole card or folder on the Cameras page. Nothing needs sorting or renaming: every frame is measured one at a time (hundreds of frames are fine), ordinary photos in the pile are left out with the reason, and each camera in the pile gets its own profile.
+- New: calibration frames add up. Drop more on another day and they join the ones already measured; a frame is never read twice, even from a copy in another folder. Stop keeps what was measured. Start this camera over forgets it.
+- New: the camera's temperature counts. The Cameras page shows your dark frames by ISO and camera temperature (cyan: two or more, amber: one), read noise per temperature in a chart, and what would make the profile better. Clean now uses the read noise measured nearest the temperature the photo was taken at, and the extra noise your camera adds in long exposures.
+
 ## 0.1.8 (2026-11-17)
 
 - New: Card to Stacks (its own place in the sidebar). Point it at a card or a folder, or right-click photos in the Library: Find focus stacks. It sorts everything into focus stacks, bursts and single shots, leaves out the frames that would hurt each stack with the reason (soft everywhere, adds nothing, shaken, camera moved too far, exposure jump, subject moved), and Stack all merges every stack in the background. Nothing is deleted; tick a frame to put it back. Results are saved beside the frames as FIRST_to_LAST_Focus_Studio.tif.
