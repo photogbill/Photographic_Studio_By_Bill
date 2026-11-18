@@ -6,7 +6,7 @@
 [tool.briefcase]
 project_name = "Photographic Studio"
 bundle = "io.github.photogbill"
-version = "0.1.7"
+version = "0.1.8"
 url = "https://github.com/photogbill/Photographic_Studio_By_Bill"
 license.file = "LICENSE"
 author = "Bill"
