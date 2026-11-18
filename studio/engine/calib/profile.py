@@ -37,8 +37,12 @@ class IsoEntry:
     gain_e_per_dn: float | None = None     # from flat pairs (photon transfer); None in a Quick profile
     gain_pairs: int = 0
     full_well_e: float | None = None
-    dark_current: list = field(default_factory=list)   # [{exposure_s, excess_dn, temp_c}]
+    dark_current: list = field(default_factory=list)   # [{exposure_s, temp_c, frames, excess_dn, noise_dn, ...}]
     hot_pixels: int = 0                    # count only; the map itself stays local
+    by_temp: list = field(default_factory=list)        # short darks per camera temperature: [{temp_c, frames,
+    #                                                    paired, read_noise_dn 2x2, row_banding_dn, black_dn}]
+    thermal: dict | None = None            # long exposures: {var_dn2_per_s, at_temp_c, doubling_c, points}
+    read_noise_paired: bool = False        # read noise from two frames compared (else one frame: includes pattern)
 
 
 @dataclass
@@ -61,13 +65,40 @@ class CameraProfile:
         best = min(self.isos, key=lambda e: abs(math.log2(e.iso / iso)))
         return best if abs(math.log2(best.iso / iso)) <= tol_stops + 1e-9 else None
 
-    def noise_model(self, iso: float | None, range_dn: np.ndarray) -> NoiseModel | None:
-        """Calibrated noise model for this ISO, or None. range_dn: 2x2 (white - black) in DN."""
+    def read_noise_at(self, e: IsoEntry, temp_c: float | None) -> np.ndarray:
+        """Read noise (2x2 DN) at the camera temperature the photo was taken at, when frames near it were
+        measured as pairs (within 6 degrees C); else the profile's overall figure."""
+        rn = np.asarray(e.read_noise_dn, float)
+        if temp_c is None or not e.by_temp:
+            return rn
+        near = [t for t in e.by_temp if t.get("paired") and t.get("temp_c") is not None
+                and abs(t["temp_c"] - temp_c) <= 6.0]
+        if not near:
+            return rn
+        return np.asarray(min(near, key=lambda t: abs(t["temp_c"] - temp_c))["read_noise_dn"], float)
+
+    @staticmethod
+    def thermal_variance(e: IsoEntry, temp_c: float | None, exposure_s: float | None) -> float:
+        """Extra noise variance (DN^2) a long exposure adds, from the long dark frames; 0 when not measured."""
+        th = e.thermal
+        if not th or not exposure_s or exposure_s < 1.0:
+            return 0.0
+        rate = float(th.get("var_dn2_per_s") or 0.0)
+        if th.get("doubling_c") and temp_c is not None and th.get("at_temp_c") is not None:
+            rate *= 2.0 ** (min(max(temp_c - th["at_temp_c"], -25.0), 25.0) / th["doubling_c"])
+        return max(rate, 0.0) * float(exposure_s)
+
+    def noise_model(self, iso: float | None, range_dn: np.ndarray, temp_c: float | None = None,
+                    exposure_s: float | None = None) -> NoiseModel | None:
+        """Calibrated noise model for this ISO, or None. range_dn: 2x2 (white - black) in DN. With the photo's
+        camera temperature and shutter speed, the read noise is the one measured near that temperature and a
+        long exposure gets its measured extra noise."""
         e = self.entry_for(iso)
         if e is None or e.read_noise_dn is None:
             return None
         rng = np.asarray(range_dn, float)
-        b = (np.asarray(e.read_noise_dn, float) / rng) ** 2
+        var = self.read_noise_at(e, temp_c) ** 2 + self.thermal_variance(e, temp_c, exposure_s)
+        b = var / rng ** 2
         if e.gain_e_per_dn:
             a = 1.0 / (e.gain_e_per_dn * rng)
             src = "calibrated" if self.origin == "local" else "shared"

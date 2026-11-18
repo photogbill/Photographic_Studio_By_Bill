@@ -42,6 +42,7 @@ from .cardstacks import CardStacksPage  # noqa: E402
 from .superres import SuperResPage  # noqa: E402
 from .infrared import InfraredPage  # noqa: E402  (BUILD_PLAN_PANO_IR: the Infrared tab)
 from .panorama import PanoramaPage  # noqa: E402  (BUILD_PLAN_PANO_IR: the Panorama tab)
+from .cameras import CamerasPage  # noqa: E402  (the drop-everything calibration, 2026-11-18)
 
 log = slog.get("app")
 
@@ -6727,74 +6728,6 @@ class InfoPage(QWidget):
         self.body = QVBoxLayout()
         v.addLayout(self.body)
         v.addStretch(1)
-
-
-class CamerasPage(InfoPage):
-    status = Signal(str)
-
-    def __init__(self):
-        super().__init__("Cameras", "Teach the Studio your camera. A profile is numbers only: noise, banding, "
-                         "black level and gain per ISO. It stays on this PC unless you choose to share it.",
-                         "Calibration engine ready", [
-                             ("Quick", "Dark frames only (body cap on), every ISO up and back down. About 15 "
-                                       "minutes. Gives read noise, banding and hot pixels."),
-                             ("Full", "Adds pairs of evenly lit flats at each ISO: measures gain, so the denoiser "
-                                      "knows the noise exactly (cyan)."),
-                             ("Complete", "Adds the exposure-latitude series (ETTR / ETTL). Planned: a step-by-"
-                                          "step wizard that tells you what to shoot.")])
-        row = QHBoxLayout()
-        b = QPushButton("Calibrate a camera from a folder of frames...")
-        b.setObjectName("primary")
-        b.clicked.connect(self.calibrate)
-        row.addWidget(b)
-        row.addStretch(1)
-        self.body.addSpacing(10)
-        self.body.addLayout(row)
-        self.out = label("", "dim", wrap=True)
-        self.out.setTextFormat(Qt.TextFormat.RichText)
-        self.body.addWidget(self.out)
-        self.refresh()
-
-    def refresh(self):
-        import glob
-        rows = []
-        for d, tier, col in ((paths.get("CALIBRATION_LOCAL") / "profiles", "calibrated on this PC", T.CYAN),
-                             (paths.PROFILES / "cameras", "shared", T.VIOLET)):
-            for f in sorted(glob.glob(str(d / "*.json"))):
-                try:
-                    p = json.load(open(f, encoding="utf-8"))
-                    rows.append(f"<span style='color:{col}'>●</span> <b>{p.get('model')}</b> - {p.get('method')}"
-                                f" profile, {len(p.get('isos', []))} ISOs ({tier})")
-                except Exception:
-                    pass
-        self.out.setText("<br>".join(rows) or "No camera profiles yet. Until there is one, the noise is estimated "
-                                               "from each photo (<span style='color:#f59e0b'>amber</span>).")
-
-    def calibrate(self):
-        d = QFileDialog.getExistingDirectory(self, "Folder of calibration frames")
-        if not d:
-            return
-        self.out.setText("Reading the frames... (this can take a few minutes)")
-
-        def work():
-            from ..cli import collect
-            from ..engine.calib.builder import build_profile
-            from ..engine.io.rawfile import open_raw
-            prof, rep = build_profile([open_raw(f) for f in collect([d], recursive=True)])
-            return prof.save(), prof, rep
-        run_bg(work, d, self._done, lambda _, e: self.out.setText(f"Calibration problem: {e}"))
-
-    def _done(self, _, res):
-        path, prof, rep = res
-        lines = [f"<b>{prof.model}</b>: {prof.method} profile, quality {prof.quality.get('score')}. "
-                 f"Frames: {rep.counts()}"]
-        for e in prof.isos:
-            g = f"{e.gain_e_per_dn:.4f} e-/DN" if e.gain_e_per_dn else "gain: quick profile"
-            lines.append(f"ISO {e.iso:g}: read noise {np.mean(e.read_noise_dn):.2f} DN, row banding "
-                         f"{e.row_banding_dn or 0:.2f} DN, {g}, {e.hot_pixels} hot pixels")
-        lines += [f"<span style='color:#f59e0b'>note:</span> {w}" for w in rep.warnings]
-        self.out.setText("<br>".join(lines))
-        self.refresh()
 
 
 class LensesPage(InfoPage):

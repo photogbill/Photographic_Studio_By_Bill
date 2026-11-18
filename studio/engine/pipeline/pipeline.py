@@ -189,7 +189,8 @@ class Image:
             from ..calib.profile import find_profile
             lv = self.levels(use_optical_black)
             prof = find_profile(self.meta.make, self.meta.model)
-            pm = prof.noise_model(self.meta.iso, lv.range) if prof else None
+            pm = prof.noise_model(self.meta.iso, lv.range, self.meta.camera_temperature_c,
+                                  self.meta.exposure_s) if prof else None
             if pm is not None and np.all(np.isfinite(pm.a)):
                 log.debug("noise model from %s profile (%s)", pm.source, prof.model)
                 self._noise[use_optical_black] = pm          # cyan (this body) or violet (shared)

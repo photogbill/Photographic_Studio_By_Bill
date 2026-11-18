@@ -2,11 +2,12 @@
 setlocal
 title Photographic Studio By Bill - Calibrate a camera
 rem ---------------------------------------------------------------------------
-rem  Calibrate Camera.bat  (Phase 2 engine; the friendly wizard comes in Phase 7)
-rem    Drag the folder of calibration frames onto this file:
-rem      Part A - dark frames (body cap on) at every ISO, up and back down
-rem      Part B - flat frames in PAIRS (same ISO and shutter speed), evenly lit
-rem    Frames are sorted automatically; nothing needs renaming.
+rem  Calibrate Camera.bat  (the same job as the Cameras page in the Studio)
+rem    Drag a folder, a card or files onto this file. One big pile is fine:
+rem      dark frames (lens cap on) at every ISO, cool and warm, short and long
+rem      optional: flat frames in PAIRS (same ISO and shutter speed), evenly lit
+rem    Frames are measured one at a time and sorted automatically; each camera
+rem    in the pile gets its own profile; a later pile adds to the earlier ones.
 rem    The profile is saved privately in calibration_local\profiles (never shared
 rem    unless you choose to). Hot-pixel maps stay on this PC.
 rem ---------------------------------------------------------------------------

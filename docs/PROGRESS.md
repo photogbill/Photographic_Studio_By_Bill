@@ -1,6 +1,40 @@
 # Build progress
 
-Updated 2026-11-17 (session 13: Infrared and Panorama tabs, `BUILD_PLAN_PANO_IR.md`, flare ghosts and Fill; then Card to Stacks on Bill's card). Plan: BUILD_PLAN.md v2.0.
+Updated 2026-11-18 (session 14: drop-everything camera calibration; session 13: Infrared and Panorama tabs, `BUILD_PLAN_PANO_IR.md`, flare ghosts and Fill; then Card to Stacks on Bill's card). Plan: BUILD_PLAN.md v2.0.
+
+## Session 14: drop-everything camera calibration (2026-11-18, chat session with Bill)
+
+Bill, about to shoot his calibration frames: "I won't likely follow the wizard, but most people won't either. So it
+should be able to handle a huge drop of raw photos at different ISO and temp. The key thing is the lens cap on."
+So the step-by-step wizard of plan 7.2 was not built; this is what replaced it.
+
+* **One frame at a time** (`engine/calib/frames.py`): each raw is opened, measured and let go (45 MP: about 2.5 s
+  and under 1 GB on the 2-core build machine; up to 4 at once on a real PC). Kept per frame: a few numbers, a
+  256-pixel centre crop (noise is told from fixed pattern by comparing two frames' crops) and its hot-pixel
+  positions, in `calibration_local\frames` (about 100 KB a frame, private). A frame is known by its content, so a
+  copy in another folder counts once and nothing is read twice. Drops add up across days.
+* **Builder** (`engine/calib/builder.py`: `build_profiles`, `calibrate_drop`): any number of cameras in one pile,
+  one profile each. Per ISO: black, read noise (pairs of short darks at the same temperature), banding, hot pixels
+  present in 70% of frames. **Per camera temperature** (4 degree steps): read noise, banding, black
+  (`IsoEntry.by_temp`). **Long darks**: level, noise and hot pixels by seconds and temperature, and
+  `IsoEntry.thermal` = extra noise variance per second and the degrees that double it (fitted when the frames
+  span 6 degrees or more). Flat pairs give gain from the crops; a pair whose light changed is left out. The
+  profile's quality holds the coverage table and plain-word advice on what is missing. `build_profile(raws)` (the
+  old call) now runs the same code.
+* **Used by Clean:** `CameraProfile.noise_model(iso, range, temp_c, exposure_s)`; the pipeline passes the photo's
+  camera temperature and shutter speed, so read noise comes from the nearest measured temperature (within 6
+  degrees, pairs only) and a long exposure gets its measured extra noise.
+* **Cameras page** (`app/cameras.py`, out of main.py): a drop zone (the whole page takes drops), Add a folder or a
+  card, Add files, Stop; progress with the frame's kind, ISO, temperature and minutes left; what was left out and
+  why; a card per camera with the ISO x temperature grid (cyan two or more, amber one), read noise by ISO with a
+  line per temperature, the heat sentence, what would make it better, and Start this camera over.
+  `Calibrate Camera.bat` / `studio-cli calibrate` do the same job in a console.
+* **Not built:** the settings card for the user's exact camera and the printable checklist (7.2); a light-leak
+  frame is noted, not left out; Part G (ETTR / ETTL) frames are left out as ordinary photos; the hot-pixel maps
+  (`hot_pixels.json`, `hot_pixels_long.npz` by ISO, seconds and temperature) are saved but Clean does not use
+  them yet; sharing a profile; a camera whose files record no temperature gets one profile for all temperatures.
+* **Never run on real dark frames.** Tested on synthetic frames with known noise (tests/test_calibration_drop.py)
+  and timed on a real R5 raw. Bill's first pile is the real test.
 
 ## Session 13b: Card to Stacks on Bill's own card (2026-11-17 evening, chat session with Bill)
 
@@ -170,7 +204,7 @@ push scripts could not be run at all there: Bill runs them once before pushing.*
 |---|---|---|
 | 0. Foundation | **Done, needs Bill's double-click** | Layout (2.2), `Install.bat`, `Run Tests.bat`, logging, `THIRD_PARTY.md`, true-ISO fix in the analyzer. Stack taken as recommended (Python + NumPy/SciPy + rawpy; PySide6 in Phase 4) since Bill was away. Acceptance: `Run Tests.bat` green **on Bill's PC** (green on the Linux test machine: 342 passed, 3 skipped). |
 | 1. Decode + develop engine | **Done, awaiting Bill's eye** | Stages 1, 2, 10, 11, 15 (basic), 21. `studio-cli` / `Develop Raws.bat` turns CR2/CR3 into 16-bit Adobe RGB TIFF. Export now also writes lens, exposure and the true ISO (EXIF in JPEG, XMP in TIFF/PNG). |
-| 2. Calibration engine | **Engine done, awaiting frames** | `Calibrate Camera.bat` / `studio-cli calibrate`. Part G (exposure latitude) not yet. Acceptance needs Bill's Part A and B frames. |
+| 2. Calibration engine | **Drop-everything tool built (session 14), awaiting Bill's frames** | Cameras page drop zone, `Calibrate Camera.bat` / `studio-cli calibrate`: any pile, any cameras, by ISO and camera temperature. Part G (exposure latitude) not yet. Acceptance needs Bill's Part A and B frames. |
 | 3. Denoiser v1 | **Built, awaiting Bill's blind test** | Hybrid NLM + starlet default; MP-PCA and starlet candidates; blind-test tool (10 pairs ready). BM3D-class baseline still to write. Off by default until the blind test. |
 | 4. Studio shell | **Built** | `Start Studio.bat`: Library, Develop (live render, wipe, loupe, histogram, panels, undo, sidecars, Make it good), Export, Cameras, Lenses, Help. |
 | 4b. Library + card import (session 11) | **Built, awaiting Bill's card** | All four steps of 24.9. **Import from card** (Library, primary button): the Photos folder dialog (you choose it: drive buttons with free space, OneDrive warning, nothing created until you confirm), one-screen import dialog (cards = any drive with DCIM, refreshed every 2 s; raws only by default; what stays on the card always said; one folder per shooting day named by its date, a new day at 04:00, grouped by year; your own name per folder or one folder for all; space check; second copy), copied in the background with progress, Cancel and a finish summary; a quiet **Card found** notice. Engine `engine/io/ingest.py`: copy, check (BLAKE2b, read back), then name; never overwrites; import record `<Photos>\_studio\imports.jsonl`; `studio-cli import`. **Library speed**: disk thumbnail cache (1 GB cap, Clear cache), only what is on screen, ratings/details in the background with `cache\library_index.sqlite`. **Review** (Space): large view + filmstrip, keyboard rating with auto-advance, Z / click 100% (zoom kept from photo to photo), C compare with locked zoom, Camera preview (amber) or From the raw (cyan). **Process picks**: picks / selected / shown, own edit or Make it good, background with Cancel. Plus sort, filters (rating, camera, lens, ISO, date, not rated, name), size slider, subfolders, right-click menu, drop a folder, recent and pinned folders, Tools menu, ratings that cannot be saved are shown and can be kept on this PC. Acceptance: Bill goes card to exported picks without Explorer; a tester on another brand does it with no help. |

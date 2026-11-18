@@ -244,42 +244,59 @@ def cmd_info(a) -> int:
 
 
 def cmd_calibrate(a) -> int:
-    from .engine.calib.builder import build_profile
-    from .engine.io.rawfile import open_raw
-    files = collect(a.inputs, recursive=True)
+    from .engine.calib.builder import calibrate_drop
+    files = [f for f in collect(a.inputs, recursive=True) if f.lower().endswith(tuple(_raw_exts()))]
     if not files:
         print("No raw files found. Drag the folder of calibration frames onto 'Calibrate Camera.bat'.")
         return 2
-    print(f"Reading {len(files)} calibration frame(s)...")
-    raws = []
-    for i, f in enumerate(files, 1):
-        try:
-            raws.append(open_raw(f))
-            print(f"  [{i}/{len(files)}] {os.path.basename(f)}")
-        except Exception as e:
-            print(f"  [{i}/{len(files)}] {os.path.basename(f)}: could not read ({e})")
-    prof, rep = build_profile(raws)
-    del raws
-    path = prof.save()
+    print(f"Measuring {len(files)} frame(s), one at a time (frames measured before are not read again)...")
+
+    def progress(n, total, st):
+        what = {"dark": "dark frame", "flat": "flat frame"}.get(st.kind, f"left out: {st.reason}")
+        temp = "" if st.temp_c is None else f", {st.temp_c:g} C"
+        iso = f"ISO {st.iso:g}" if st.iso else "ISO ?"
+        print(f"  [{n}/{total}] {st.name}: {what} ({iso}{temp}){' (known)' if st.cached else ''}")
+
+    res = calibrate_drop(files, progress=progress)
     print("")
-    print(f"Camera: {prof.make} {prof.model}   Profile: {prof.method.upper()}   Quality score: {prof.quality['score']}")
-    print(f"Frames: {rep.counts()}")
-    for inf in rep.frames:
-        if inf.kind == "other":
-            print(f"  ignored {os.path.basename(inf.path)}: {inf.reason}")
-    print("")
-    print("  ISO      black (DN)   read noise (DN)  row band  col band  gain (e-/DN)  hot px")
-    for e in prof.isos:
-        rn = np.mean(e.read_noise_dn) if e.read_noise_dn else float("nan")
-        bl = np.mean(e.black_dn) if e.black_dn else float("nan")
-        g = f"{e.gain_e_per_dn:.4f}" if e.gain_e_per_dn else "  (quick)"
-        print(f"  {e.iso:<8g} {bl:10.2f}   {rn:12.2f}   {e.row_banding_dn or 0:8.2f}  {e.col_banding_dn or 0:8.2f}"
-              f"  {g:>12}  {e.hot_pixels:6d}")
-    for w in rep.warnings:
-        print(f"  note: {w}")
-    print(f"\nSaved (private, on this PC only): {path}")
-    print("Nothing is shared unless you choose to share it later.")
+    print(f"This pile: {res.counts()}")
+    if not res.built:
+        print("No dark frames found, so no profile was made. Dark frames are shot with the lens cap on.")
+        return 1
+    for prof, rep, path in res.built:
+        q = prof.quality
+        print("")
+        print(f"Camera: {prof.make} {prof.model}   Profile: {prof.method.upper()}   Quality score: {q['score']}")
+        print(f"Frames used so far: {q['dark_frames']} dark, {q['flat_frames']} flat"
+              + (f"   Camera temperature: {q['temp_min_c']:g} to {q['temp_max_c']:g} C"
+                 if q.get("temp_min_c") is not None else ""))
+        print("  ISO      black (DN)   read noise (DN)  row band  col band  gain (e-/DN)  hot px")
+        for e in prof.isos:
+            rn = np.mean(e.read_noise_dn) if e.read_noise_dn else float("nan")
+            bl = np.mean(e.black_dn) if e.black_dn else float("nan")
+            g = f"{e.gain_e_per_dn:.4f}" if e.gain_e_per_dn else "  (quick)"
+            print(f"  {e.iso:<8g} {bl:10.2f}   {rn:12.2f}   {e.row_banding_dn or 0:8.2f}  "
+                  f"{e.col_banding_dn or 0:8.2f}  {g:>12}  {e.hot_pixels:6d}")
+            for t in e.by_temp if len(e.by_temp) > 1 else []:
+                print(f"      at {t['temp_c']:g} C: read noise {np.mean(t['read_noise_dn']):.2f} DN "
+                      f"({t['frames']} frames)")
+            if e.thermal:
+                th = e.thermal
+                dbl = f", doubles every {th['doubling_c']:g} C" if th.get("doubling_c") else ""
+                print(f"      long exposures: +{th['var_dn2_per_s']:.3f} DN^2 of noise per second"
+                      + (f" at {th['at_temp_c']:g} C" if th.get("at_temp_c") is not None else "") + dbl)
+        for w in rep.warnings[:40]:
+            print(f"  note: {w}")
+        for tip in q.get("advice", []):
+            print(f"  to make it better: {tip}")
+        print(f"Saved (private, on this PC only): {path}")
+    print("\nNothing is shared unless you choose to share it later.")
     return 0
+
+
+def _raw_exts():
+    from .engine import RAW_EXTENSIONS
+    return RAW_EXTENSIONS
 
 
 def cmd_blindtest(a) -> int:
