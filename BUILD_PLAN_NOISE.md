@@ -71,8 +71,9 @@ where they were.
 * **Fixed pattern is small but not nothing** (centre crop, 7 to 14 frames per ISO): 7 to 9% of the temporal
   noise at ISO 100 to 320, **about 20% from ISO 400 up** (0.39 DN at 400, 13 DN at 12800, 47 DN at 51200). Taking
   it out lowers single-frame noise only about 2%, so the master dark (B.1) must earn its place on the harness.
-  The fixed **row** part is the interesting piece: 2.1 DN at ISO 12800 against about 4.1 DN of row banding in
-  one frame, so roughly a quarter of the banding energy is the same in every photo and can be subtracted exactly.
+  The fixed **row** part, measured over whole frames by deep calibration (0.5): 12% of the row-banding energy
+  at ISO 400, 27% at 3200, 8% at 12800, 9% at 51200 is the same in every photo. (A first estimate from the centre
+  crop said a quarter at 12800; the whole frame says 8%.) Worth subtracting at mid ISO, small elsewhere.
 * **Neighbouring photosites are independent** (lag-1 correlation under 0.04) except at ISO 100 (+0.15) and
   ISO 102400 (+0.11). Methods that assume independent noise (Noise2Noise-style, SURE) are safe from 200 to 51200.
 * **The noise is not a perfect bell curve at low ISO** (excess kurtosis +0.6 to +2.1 up to ISO 1600, near 0
@@ -84,6 +85,50 @@ where they were.
   the model near the top of the range (A.4 asks Bill for a brighter set only if the check fails).
 * **Speed:** 2.5 s to open and measure one 45 MP frame on the 2-core build machine; 131 frames in 2.4 min on
   Bill's PC (14 cores, RTX 3080 Ti 16 GB, 64 GB RAM, Windows 11).
+
+### 0.5 Status: first build, 2026-11-18 (same day; Bill: "Build everything... code everything needed for it to run")
+
+**Built and tested** (tests/test_noise_plan.py, tests/test_lab.py; a subset of Bill's real R5 pile for the numbers):
+
+* **B.2, B.4, part of B.1: Deep calibration** (`engine/calib/deep.py`; button on each camera's card; `studio-cli
+  calibrate --deep`): the noise bank (up to 48 patches of 256 per ISO and exposure class), noise shape numbers,
+  and the fixed row and column pattern per ISO. **Measured, not yet applied** (block C).
+* **A.1, A.2, most of A.3: truth with real noise** (`engine/calib/synth.py`, `tools/noise_bench.py`, `Run Noise
+  Benchmark.bat`): charts (dead leaves strong / in shadow / faint, flat patches, slanted edge) plus clean photo
+  crops once the Lab has prepared some; scores noise left, texture kept, edges kept, colour blotches, residual,
+  seconds; HTML page with crops. On Bill's R5 a synthetic flat matches the model within 1% at ISO 400, 3200,
+  12800 and 51200.
+* **E.1 to E.3: the residual test and the detail guard** (`engine/raw/guard.py`, on by default for new edits,
+  sidecar stage version 3): structure above the noise is returned; the **noise budget** returns what was removed
+  beyond what noise can account for in any neighbourhood and band; the envelope holds every scale, the smooth
+  remainder included. Pure noise: 0.02% returned. Develop shows "Detail returned".
+* **F.1 to F.4: the learned denoiser** (`engine/raw/learned.py`, `studio/lab/`, `Train Camera Model.bat`, method
+  "learned" in Clean): runtime with tiles, training data from clean photos + the noise bank, the network (three
+  sizes), training with held-out scoring, resume, ONNX export and a card; the Cameras card "Clean, taught by this
+  camera" with what is ready, the clean-photo count and **why about 200 varied photos** (`lab.PHOTOS_WHY`, shown
+  on the card, in the training window and when training is refused for too few).
+
+**What the first numbers say (R5 real noise, quick charts):** Hybrid keeps 100% of fine texture at ISO 400 and
+3200, 85% at 12800 and **50% at 51200**; it leaves 45 to 67% of the incoming error. The existing methods at their
+defaults do not over-remove (residual 0.3 to 0.8), so the guard changes nothing there; on a deliberately too
+strong setting it returns 9 points of texture at ISO 12800 and 7 at 51200. Detail fainter than the noise cannot be
+recovered from one photo's residual by any test: keeping it needs a better prior, which is what block F is for.
+The gap to close is high ISO texture.
+
+**Not built yet** (in the plan's order): A.4 against Bill's real flats and A.5 real files with DxO; B.3 banding
+spectrum, B.5 black by temperature, B.6 pushed ISOs, the per-photosite master dark; **all of C** (hot and warm
+pixels from the map, subtracting the fixed pattern, profile-gated banding); D.2 BM3D-class baseline, D.4 SURE,
+D.5 shadow-lift awareness, D.6; E.4's "What Clean removed" view (the number is shown, the view is not); F.5
+published baselines, F.6 a general model with per-camera fine-tuning, F.7 joint demosaic; G; H; most of I.
+
+**Never run:** `Train Camera Model.bat` on Windows (its install step), training on a graphics card, DirectML,
+and any of this on real photographs. The training loop was run on the build machine's processor on synthetic
+photos: 700 steps took the held-out noise left from 70% to 52% and texture kept from 84% to 92%, so it learns;
+that says nothing yet about how good a real model will be.
+
+**Hot / warm count, open question:** "1% of the range above black" counts the same warm photosite as warm at
+ISO 400 (20 DN) and hot at ISO 3200 (160 DN). With gain measured, define it in electrons so the count does not
+depend on ISO.
 
 ### 0.4 Ask Bill once, at the start, in chat (defaults if he is away)
 

@@ -41,8 +41,16 @@ So the step-by-step wizard of plan 7.2 was not built; this is what replaced it.
   the top of the page (dark frames, long dark frames, flat pairs, with what a flat pair is) that tick themselves
   per camera, and file-dialog chatter (0x8001010e) is no longer filed as a crash. Result: a Full profile, gain at
   all 29 ISOs, gain x ISO constant to a few percent. Numbers: `BUILD_PLAN_NOISE.md` 0.3.
-* **Next:** `BUILD_PLAN_NOISE.md` (Bill: "the best noise reduction system possible without smoothing the image or
-  losing details").
+* **`BUILD_PLAN_NOISE.md`, first build the same evening** (Bill: "Build everything... code everything needed for it
+  to run, and make sure that in the software it lets them know to have around 200 varied photos and explain
+  why"). Built: deep calibration (noise bank, fixed row / column pattern), truth with real noise and
+  `Run Noise Benchmark.bat`, the detail guard (on by default for new edits), the learned denoiser (runtime,
+  `studio/lab/` training kit, `Train Camera Model.bat`, method "learned"), and the "Clean, taught by this camera"
+  block on each camera's card with the 200-varied-photos explanation. **The plan's section 0.5 lists what is built,
+  what is not (all of block C among it) and what has never been run** (the training .bat on Windows, a graphics
+  card, real photos). First numbers on the R5's real noise are there too.
+* **Waits for Bill:** about 200 varied clean raws at ISO 400 or lower in one folder; Deep calibration on the R5's
+  card; then Train. And the first blind test against DxO, still never done.
 
 ## Session 13b: Card to Stacks on Bill's own card (2026-11-17 evening, chat session with Bill)
 
