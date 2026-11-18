@@ -63,3 +63,14 @@ def test_engine_package_does_not_import_gui():
     code = ("import sys; import studio.engine, studio.engine.api, studio.engine.pipeline.pipeline; "
             "sys.exit(1 if any(m.startswith(('PySide6', 'PyQt')) for m in sys.modules) else 0)")
     assert subprocess.run([sys.executable, "-c", code], cwd=str(APP_ROOT)).returncode == 0
+
+
+def test_file_dialog_chatter_is_not_a_crash():
+    """Windows file dialogs raise and handle 0x8001010e themselves; faulthandler logs each. That is not a crash."""
+    from studio import log as L
+    chatter = ("Windows fatal exception: code 0x8001010e\n\nThread 0x000135c0 (most recent call first):\n"
+               '  File "stackui.py", line 507 in choose_files\n') * 5 + "Windows fatal exception: code 0x in 8001010e\n"
+    assert not L.is_real_crash(chatter)
+    assert L.is_real_crash(chatter + "Windows fatal exception: access violation\n")
+    assert L.is_real_crash("Windows fatal exception: code 0xc0000005\n")
+    assert L.is_real_crash("Fatal Python error: Segmentation fault\n\nThread 0x1 (most recent call first):\n")

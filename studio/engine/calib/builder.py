@@ -75,6 +75,11 @@ def _ob_black_and_noise(img: RawImage) -> tuple[float, float]:
     return float(np.mean(img.black_libraw)), float("nan")
 
 
+FLAT_CENTRE = 0.04          # the centre of a flat varies less than this (where gain is measured)
+FLAT_STEP = 0.065           # neighbouring areas of a flat differ by less than this: lens falloff is gentle
+FLAT_FALLOFF = 0.35         # and the whole half-frame by less than this
+
+
 def classify(img: RawImage) -> FrameInfo:
     m = img.meta
     info = FrameInfo(path=img.path, kind="other", iso=m.iso, exposure_s=m.exposure_s, temp_c=m.camera_temperature_c)
@@ -94,13 +99,21 @@ def classify(img: RawImage) -> FrameInfo:
     if mean > 0.92 * rng:
         info.reason = "over-exposed (clipped)"
         return info
-    # smoothness: block means of one green plane vary little across the centre
+    # A flat is smooth, not uniform. Bill's first flats (2026-11-18, a fast lens wide open) fell off 8 to 11% across
+    # the half-frame from the lens alone and 78 of 89 were left out by the old "varies under 8%" test. What gain
+    # is measured from is the small centre crop, so: the very centre must be even, the wider area may fall off
+    # as a lens does (gently, block to block), and it must not have the texture or edges of a real photo.
     g = c[0::2, 1::2] if int(img.cfa_rgb[0, 1]) == 1 else c[0::2, 0::2]
     bh, bw = g.shape[0] // 16, g.shape[1] // 16
     blocks = g[:bh * 16, :bw * 16].reshape(16, bh, 16, bw).mean(axis=(1, 3)) - black
-    cv = float(blocks.std() / max(blocks.mean(), 1e-6))
-    if cv < 0.08:
-        info.kind, info.reason = "flat", f"even light (variation {100 * cv:.1f}%)"
+    level = max(float(blocks.mean()), 1e-6)
+    cv = float(blocks.std() / level)
+    inner = blocks[6:10, 6:10]
+    cv_in = float(inner.std() / max(float(inner.mean()), 1e-6))
+    steps = np.concatenate([np.abs(np.diff(blocks, axis=0)).ravel(), np.abs(np.diff(blocks, axis=1)).ravel()])
+    rough = float(np.percentile(steps, 90) / level)
+    if cv_in < FLAT_CENTRE and rough < FLAT_STEP and cv < FLAT_FALLOFF:
+        info.kind, info.reason = "flat", f"even light (centre varies {100 * cv_in:.1f}%, falloff {100 * cv:.0f}%)"
     else:
         info.reason = f"not even enough for a flat (variation {100 * cv:.0f}%)"
     return info
@@ -152,8 +165,13 @@ def _pairs_noise(frames: list) -> np.ndarray | None:
     return np.median(est, axis=0) if est else None
 
 
+HOT_FRACTION = 0.01         # a HOT pixel stands at least this much of the sensor's range above black with no
+#                             light: a bright dot in any photo. Below that it is WARM: it stands out of the
+#                             noise at this ISO (and is healed), but only shows when shadows are lifted.
+
+
 def _persistent_hot(frames: list) -> np.ndarray | None:
-    """Photosites hot in (nearly) every frame: hot pixels, not cosmic rays or noise."""
+    """Photosites that stand out in (nearly) every frame: defects, not cosmic rays or noise."""
     lists = [f.hot for f in frames if f.hot is not None]
     if not lists:
         return None
@@ -161,6 +179,27 @@ def _persistent_hot(frames: list) -> np.ndarray | None:
         return np.asarray(lists[0], np.int64)
     idx, n = np.unique(np.concatenate([np.asarray(h, np.int64) for h in lists]), return_counts=True)
     return idx[n >= max(2, math.ceil(0.7 * len(lists)))]
+
+
+def _hot_and_warm(frames: list, keep: np.ndarray, black: float) -> tuple[int, int]:
+    """Of the persistent photosites ``keep``: how many are hot (HOT_FRACTION of the range above black, median
+    over the frames) and how many only warm. Frames measured before the excess was kept count all as warm."""
+    if keep is None or keep.size == 0:
+        return 0, 0
+    fr = [f for f in frames if f.hot is not None and f.hot_dn is not None]
+    if not fr:
+        return 0, int(keep.size)
+    rows = []
+    for f in fr:
+        h = np.asarray(f.hot, np.int64)
+        pos = np.clip(np.searchsorted(h, keep), 0, max(h.size - 1, 0))
+        found = h.size > 0 and h[pos] == keep
+        vals = np.where(found, np.asarray(f.hot_dn, np.float64)[pos] if h.size else 0.0, np.nan)
+        rows.append(vals)
+    med = np.nanmedian(np.stack(rows), axis=0)
+    limit = HOT_FRACTION * max(float(np.median([f.clip_dn for f in fr])) - black, 1.0)
+    hot = int(np.sum(med >= limit))
+    return hot, int(keep.size) - hot
 
 
 def _gain_from_flats(flats: list, black: np.ndarray, rn: np.ndarray, warnings: list, iso: float):
@@ -297,7 +336,7 @@ def _build_camera(make: str, model: str, frames: list, save_local_data: bool) ->
             e.col_banding_dn = round(float(np.median([f.col_band for f in short])), 3)
             hp = _persistent_hot(short)
             if hp is not None:
-                e.hot_pixels = int(hp.size)
+                e.hot_pixels, e.warm_pixels = _hot_and_warm(short, hp, float(np.mean(black)))
                 hot_short[iso] = (hp, short[0].width)
             # per camera temperature (short frames): read noise, banding, black
             tb_groups = defaultdict(list)
@@ -336,7 +375,7 @@ def _build_camera(make: str, model: str, frames: list, save_local_data: bool) ->
                 if exp >= LONG_S:
                     hp = _persistent_hot(g)
                     if hp is not None:
-                        row["hot_pixels"] = int(hp.size)
+                        row["hot_pixels"], row["warm_pixels"] = _hot_and_warm(g, hp, base)
                         hot_long[f"{iso:g}|{exp:g}|{'' if tb is None else f'{tb:g}'}"] = hp
                 e.dark_current.append(row)
             e.thermal = _thermal(e.dark_current, _rms(rn))

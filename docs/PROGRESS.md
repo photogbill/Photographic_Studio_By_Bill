@@ -33,8 +33,16 @@ So the step-by-step wizard of plan 7.2 was not built; this is what replaced it.
   frame is noted, not left out; Part G (ETTR / ETTL) frames are left out as ordinary photos; the hot-pixel maps
   (`hot_pixels.json`, `hot_pixels_long.npz` by ISO, seconds and temperature) are saved but Clean does not use
   them yet; sharing a profile; a camera whose files record no temperature gets one profile for all temperatures.
-* **Never run on real dark frames.** Tested on synthetic frames with known noise (tests/test_calibration_drop.py)
-  and timed on a real R5 raw. Bill's first pile is the real test.
+* **Run on Bill's real pile the same day** (449 R5 raws: 360 darks, 89 flats, ISO 100 to 102400, 24 to 40 C;
+  131 frames in 2.4 min on his PC). It found three faults, all fixed: two frames a degree apart either side of a
+  temperature step were not paired; flats from a fast lens wide open were left out as "not even" (78 of 89; a flat
+  must be smooth, not uniform); "6,486 hot pixels" at ISO 400 were mostly warm ones (now hot = 1% of the range
+  above black, warm = the rest, store version 2 keeps each one's level). Also: three **What to shoot** cards at
+  the top of the page (dark frames, long dark frames, flat pairs, with what a flat pair is) that tick themselves
+  per camera, and file-dialog chatter (0x8001010e) is no longer filed as a crash. Result: a Full profile, gain at
+  all 29 ISOs, gain x ISO constant to a few percent. Numbers: `BUILD_PLAN_NOISE.md` 0.3.
+* **Next:** `BUILD_PLAN_NOISE.md` (Bill: "the best noise reduction system possible without smoothing the image or
+  losing details").
 
 ## Session 13b: Card to Stacks on Bill's own card (2026-11-17 evening, chat session with Bill)
 

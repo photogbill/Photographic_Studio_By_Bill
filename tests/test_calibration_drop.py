@@ -156,6 +156,9 @@ def test_cameras_page_takes_a_dropped_folder(pile):
     app = QApplication.instance() or QApplication([])
     page = CamerasPage()
     assert page.cards == [] and "No camera profiles yet" in page.shared.text()
+    from PySide6.QtWidgets import QLabel
+    said_at_top = " ".join(lb.text() for c in page.need_cards for lb in c.findChildren(QLabel))
+    assert len(page.need_cards) == 3 and "lens cap on" in said_at_top and "A <b>pair</b> is two" in said_at_top
     said = []
     page.status.connect(said.append)
     page.add([str(tmp / "drop")])
@@ -173,9 +176,26 @@ def test_cameras_page_takes_a_dropped_folder(pile):
     assert "12 dark frames" in page.out.text() and "holiday.cr2" in page.out.text()
     assert any("long dark frames" in a for a in card.advice)
     assert said and "Test Camera" in said[-1]
+    ticks = [lb.text() for lb in page.need_status]         # the three cards say how this camera stands
+    assert "✓ 3 ISO settings" in ticks[0] and "Test Camera" in ticks[0]
+    assert "not yet" in ticks[1] and "not yet" in ticks[2] and all(not lb.isHidden() for lb in page.need_status)
     page.grab()                                             # paints the grid and the chart without error
     page.start_over("Synthetic", "Test Camera", ask=False)
     assert page.cards == [] and F.load_store() == []
+    assert all(lb.isHidden() for lb in page.need_status)
+
+
+def test_shoot_status_partly_and_fully_covered(pile):
+    from studio.app.cameras import shoot_status
+    from studio.app import theme as T
+    add, _, _ = pile
+    files = [add(f"d{s}.cr2", iso=800, seed=s) for s in range(2)] + [add("one.cr2", iso=1600, seed=9)]
+    files += [add(f"f{s}.cr2", iso=800, level_dn=5000, seed=20 + s) for s in range(2)]
+    files += [add(f"l{s}.cr2", iso=800, rn=6.0, exposure=30.0, seed=30 + s) for s in range(2)]
+    darks, long_, flats = shoot_status(B.calibrate_drop(files, workers=1).built[0][0])
+    assert darks[0] == T.AMBER and "1 of 2" in darks[1]
+    assert long_[0] == T.AMBER and "one temperature" in long_[1]
+    assert flats[0] == T.AMBER and "1 of 2" in flats[1]
 
 
 def test_two_frames_either_side_of_a_temperature_step_are_still_a_pair(pile):
@@ -187,3 +207,24 @@ def test_two_frames_either_side_of_a_temperature_step_are_still_a_pair(pile):
     assert e.read_noise_paired and np.allclose(e.read_noise_dn, 3.0, atol=0.25)
     far = [add("c.cr2", iso=800, temp=20.0, seed=3), add("h.cr2", iso=800, temp=40.0, seed=4)]
     assert not B.calibrate_drop(far, workers=1).built[0][0].entry_for(800).read_noise_paired
+
+
+def test_hot_pixels_are_told_from_warm_ones(pile):
+    """A hot pixel is a bright dot in any photo (1% of the range above black, no light). A pixel that only stands
+    out of a quiet ISO's noise is warm: it is on the map, but it is not counted as hot (Bill, 2026-11-18: the R5
+    showed '6,486 hot pixels' at ISO 400 and 4 at ISO 6400)."""
+    add, _, _ = pile
+    files = []
+    for s in range(3):
+        files.append(add(f"w{s}.cr2", iso=400, rn=2.0, seed=s, hot=[(50, 60), (200, 301)]))
+    import studio.engine.io.rawfile as R
+    real = R.open_raw
+
+    def with_warm(path):
+        img = real(path)
+        for (y, x) in ((120, 130), (300, 400), (310, 90)):
+            img.mosaic[img.top + y, img.left + x] += 60          # 30 read-noise sigmas, 0.4% of the range
+        return img
+    R.open_raw = with_warm
+    e = B.calibrate_drop(files, workers=1).built[0][0].entry_for(400)
+    assert e.hot_pixels == 2 and e.warm_pixels == 3

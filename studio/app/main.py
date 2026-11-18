@@ -1683,7 +1683,7 @@ class DevelopPage(QWidget):
         self.dn_g = g.add(ValueSlider("Keep grain", 0.0, 1.0, 0.0, 0.05, "{:.0%}",
                                       "Puts back a fine, film-like fraction of the luminance noise."))
         self.dn_m = g.add(QComboBox())
-        self.dn_m.addItems(["hybrid", "starlet", "nlm", "mppca"])
+        self.dn_m.addItems(["hybrid", "starlet", "nlm", "mppca", "learned"])
         self.dn_m.setToolTip("Method: hybrid = NLM luminance + starlet colour (recommended)")
         self.dn_info = g.add(label("", "dim", wrap=True))
         self.dn_m.currentIndexChanged.connect(lambda *_: self._dn_method_text())
@@ -1694,6 +1694,14 @@ class DevelopPage(QWidget):
                                 "not noise: the original is kept there. Pure noise almost never does that, so "
                                 "nothing visible is let back in.")
         self.dn_safe_chip = g.add(chip("Protected: -"))
+        self.dn_guard = g.add(QCheckBox("Detail guard: give back whatever was not noise"))
+        self.dn_guard.setChecked(True)
+        self.dn_guard.setToolTip("What Clean removed is tested against the camera's known noise, band by band. "
+                                 "Structure that stands above the noise is returned; where more was removed than "
+                                 "noise can account for, the surplus is returned too (the area keeps a little grain "
+                                 "and all of its texture); and nothing may be added that noise could not have "
+                                 "hidden. It applies to every method, the learned one included.")
+        self.dn_guard_chip = g.add(chip("Detail returned: -"))
         self.band = g.add(QCheckBox("Remove row banding (measured, never added)"))
         self.band.setChecked(True)
         self.noise_chip = g.add(chip("Noise model: -"))
@@ -2476,7 +2484,7 @@ class DevelopPage(QWidget):
                   self.f_gsize, self.f_grough):
             w.changed.connect(self.controls_changed)
         for w in (self.dn_on, self.band, self.mcb, self.ca, self.dfr, self.dist, self.vig, self.constrain, self.sh_on,
-                  self.c_bw, self.f_gcol, self.dn_safe, self.hdr_on):
+                  self.c_bw, self.f_gcol, self.dn_safe, self.dn_guard, self.hdr_on):
             w.toggled.connect(self.controls_changed)
         self.hdr_amt.changed.connect(self.controls_changed)
         for w in (self.film_range, self.st_amt, self.st_sens, self.scr_amt, self.scr_size, self.col_amt,
@@ -2541,6 +2549,7 @@ class DevelopPage(QWidget):
         e.denoise.chroma = round(self.dn_c.value() * s, 3)
         e.denoise.grain = round(self.dn_g.value(), 3)
         e.denoise.safeguard = self.dn_safe.isChecked()
+        e.denoise.guard = self.dn_guard.isChecked()
         e.banding = self.band.isChecked()
         e.exposure_ev = round(self.ev.value(), 3)
         e.tone.contrast = round(self.con.value(), 3)
@@ -2703,6 +2712,9 @@ class DevelopPage(QWidget):
         self.dn_safe.blockSignals(True)
         self.dn_safe.setChecked(bool(e.denoise.safeguard))
         self.dn_safe.blockSignals(False)
+        self.dn_guard.blockSignals(True)
+        self.dn_guard.setChecked(bool(e.denoise.guard))
+        self.dn_guard.blockSignals(False)
         self._dn_method_text()
         self.band.setChecked(e.banding)
         self.ev.set_value(e.exposure_ev, emit=False)
@@ -2914,12 +2926,29 @@ class DevelopPage(QWidget):
                 self.dn_safe_chip.setText("Protected: -")
             return
         r = getattr(self.image, "denoise_report", None) if self.image is not None else None
+        self._dn_guard_refresh(r)
         on = self.image is not None and self.edit.denoise.enabled and self.edit.denoise.safeguard
         if not on or not r:
             self.dn_safe_chip.setText("Protected: -")
             return
         self.dn_safe_chip.setText(f"Protected: {r['protected']:,} photosites kept as shot "
                                   f"({r['protected'] / max(r['sites'], 1) * 1e6:.0f} per million)")
+
+    def _dn_guard_refresh(self, r):
+        """The detail guard's number, and which network cleaned the photo when the learned method is chosen."""
+        on = self.image is not None and self.edit.denoise.enabled
+        g = (r or {}).get("guard") if on and self.edit.denoise.guard else None
+        if g:
+            self.dn_guard_chip.setText(f"Detail returned: {100 * g['returned']:.2f}% of what was removed")
+            self.dn_guard_chip.setStyleSheet(f"color:{T.CYAN}; border-color:{T.alpha(T.CYAN, 0.4)};")
+        else:
+            self.dn_guard_chip.setText("Detail returned: -")
+            self.dn_guard_chip.setStyleSheet("")
+        learned = (r or {}).get("learned") if on else None
+        if learned and self.dn_m.currentText() == "learned":
+            self.dn_info.setText(f"Learned: {learned}." if "Hybrid used" not in learned else
+                                 "Learned: no model for this camera yet, so Hybrid was used. Train one on the "
+                                 "Cameras page.")
 
     # ------------------------------------------------------------------------------------ detail by scale
     def _ds_sync_simple(self):

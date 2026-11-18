@@ -165,3 +165,5 @@ node_modules/
 # 7. The test raws copied from Bill's drives (test_raws/README.txt). Photos, so never shared: the whole folder
 #    stays out, notes included. Kept last so nothing above can let a file back in.
 /test_raws/
+# The Lab's optional training tools (PyTorch, ONNX Runtime), installed by Train Camera Model.bat. Never committed.
+/lab_packages/

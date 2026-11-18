@@ -1234,7 +1234,7 @@ def schema() -> dict:
             "highlight_mode": ["clip", "rebuild", "glow", "none"],
             "white_balance.mode": ["as_shot", "daylight", "temp_tint", "multipliers"],
             "tone.mode": ["standard", "camera_match", "linear"],
-            "denoise.method": ["hybrid", "starlet", "nlm", "mppca"],
+            "denoise.method": ["hybrid", "starlet", "nlm", "mppca", "learned"],
             "hdr.strength": list(hdr.STRENGTHS), "hdr.engine": list(hdr.ENGINES),
             "detail": {k: {"lo": v["lo"], "hi": v["hi"], "does": v.get("does", "")} for k, v in scales.METHODS.items()},
             "detail_presets": {k: dict(v) for k, v in scales.PRESETS.items()},

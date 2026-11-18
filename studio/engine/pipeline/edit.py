@@ -16,7 +16,8 @@ STAGE_VERSIONS = {
     "banding": 1,
     "lens_ca": 1,
     "defringe": 1,
-    "denoise": 2,                    # 2: the safeguard exists (version 1 sidecars render without it)
+    "denoise": 3,                    # 2: the safeguard exists (version 1 sidecars render without it)
+    #                                  3: the detail guard exists (older sidecars render without it)
     "white_balance": 1,
     "highlights": 1,
     "demosaic": 1,
@@ -79,10 +80,13 @@ class Tone:
 @dataclass
 class Denoise:
     enabled: bool = False            # off by default until Bill's blind test (Phase 3 acceptance)
-    method: str = "hybrid"           # hybrid (NLM luminance + starlet colour) | starlet | nlm | mppca
+    method: str = "hybrid"           # hybrid (NLM luminance + starlet colour) | starlet | nlm | mppca |
+                                     # learned (this camera's own trained network, when there is one)
     luma: float = 1.0                # luminance strength (1 = matched to the measured noise)
     chroma: float = 1.5              # colour-noise strength
     grain: float = 0.0               # keep-grain: fraction of removed luminance noise put back
+    guard: bool = True               # the detail guard (BUILD_PLAN_NOISE E): whatever Clean removed that is not
+                                     # noise is given back, and nothing may be added that noise could not hide
     safeguard: bool = True           # "restore" step (23.12): a photosite the denoiser moved by more than 4.5x
                                      # its noise was not noise (a star, a spark): the original is kept there
 
@@ -249,6 +253,8 @@ class Edit:
         dn = Denoise(**{k: v for k, v in dn_d.items() if k in Denoise.__dataclass_fields__})
         if "safeguard" not in dn_d and (d.get("stage_versions") or {}).get("denoise", 2) < 2:
             dn.safeguard = False     # written before the safeguard existed: renders exactly as it did
+        if "guard" not in dn_d and (d.get("stage_versions") or {}).get("denoise", 3) < 3:
+            dn.guard = False         # written before the detail guard existed: renders exactly as it did
         ln = LensFix(**{k: v for k, v in d.pop("lens", {}).items() if k in LensFix.__dataclass_fields__})
         ge = Geometry(**{k: v for k, v in (d.pop("geometry", None) or {}).items() if k in Geometry.__dataclass_fields__})
         sh = Sharpen(**{k: v for k, v in (d.pop("sharpen", None) or {}).items() if k in Sharpen.__dataclass_fields__})

@@ -31,7 +31,8 @@ from ..raw.linearize import clipped_stats
 
 log = slog.get("engine.calib")
 
-VERSION = 1                 # of what is measured: raise it and stored frames are measured again
+VERSION = 2                 # of what is measured: raise it and stored frames are measured again
+#                             (2: how far each hot pixel stands above black is kept, 2026-11-18)
 CROP = 256                  # side of the kept centre crop (photosites)
 HOT_SIGMA = 10.0            # a hot pixel stands this many read-noise sigmas above black
 HOT_CAP = 250_000           # more "hot pixels" than this in one frame is not a list worth keeping
@@ -66,10 +67,11 @@ class FrameStats:
     cached: bool = False                # read from the store, not measured now
     crop: np.ndarray | None = None      # uint16 centre crop, CFA phase of the visible area kept
     hot: np.ndarray | None = None       # flat indices (y * width + x) of hot pixels; None = not kept
+    hot_dn: np.ndarray | None = None    # how far each of them stands above black (DN, uint16), same order
 
     def to_json(self) -> dict:
         d = asdict(self)
-        d.pop("crop"), d.pop("hot"), d.pop("cached")
+        d.pop("crop"), d.pop("hot"), d.pop("hot_dn"), d.pop("cached")
         return d
 
     @property
@@ -155,16 +157,21 @@ def measure(img, key: str = "") -> FrameStats:
                             "eyepiece, check the cap)")
     del v, d, keep
     # hot pixels over the whole visible area
-    parts, w = [], vis.shape[1]
+    parts, above, w = [], [], vis.shape[1]
     for i in (0, 1):
         for j in (0, 1):
             thr = black[i, j] + HOT_SIGMA * max(float(sig[i, j]), 0.5)
-            yy, xx = np.nonzero(vis[i::2, j::2] > thr)
+            plane = vis[i::2, j::2]
+            yy, xx = np.nonzero(plane > thr)
             parts.append((yy.astype(np.int64) * 2 + i) * w + (xx.astype(np.int64) * 2 + j))
-    hot = np.sort(np.concatenate(parts))
+            above.append(np.clip(plane[yy, xx].astype(np.float64) - black[i, j], 0, 65535))
+    hot, excess = np.concatenate(parts), np.concatenate(above)
+    order = np.argsort(hot)
+    hot, excess = hot[order], excess[order]
     st.hot_count = int(hot.size)
     if hot.size <= HOT_CAP:
         st.hot = hot.astype(np.uint32)
+        st.hot_dn = np.rint(excess).astype(np.uint16)
     else:
         st.notes.append(f"{hot.size:,} photosites far above black: too many to be hot pixels (is the cap on?)")
     return st
@@ -198,6 +205,8 @@ def save(st: FrameStats) -> None:
         arrays["crop"] = st.crop
     if st.hot is not None:
         arrays["hot"] = st.hot
+    if st.hot_dn is not None:
+        arrays["hot_dn"] = st.hot_dn
     tmp = _store_path(st.key) + ".partial"
     with open(tmp, "wb") as fh:
         np.savez_compressed(fh, **arrays)
@@ -216,6 +225,7 @@ def load(key: str) -> FrameStats | None:
             st = FrameStats(**{k: v for k, v in meta.items() if k in FrameStats.__dataclass_fields__})
             st.crop = z["crop"] if "crop" in z.files else None
             st.hot = z["hot"] if "hot" in z.files else None
+            st.hot_dn = z["hot_dn"] if "hot_dn" in z.files else None
         st.cached = True
         return st
     except Exception:                                   # a store file cut short: measure the frame again

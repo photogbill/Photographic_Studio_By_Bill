@@ -28,6 +28,7 @@ original values are blended back there.
 """
 from __future__ import annotations
 
+import dataclasses
 import math
 from dataclasses import dataclass
 from functools import lru_cache
@@ -59,6 +60,9 @@ class DenoiseParams:
     chroma_method: str | None = None
     impulses: bool = False      # isolated-outlier filter; off: on real texture it cost 2 dB (RESULTS.md).
                                 # Hot pixels will come from the calibration map (section 8.3) instead.
+    camera: tuple | None = None # (make, model): where the "learned" method looks for this camera's network
+    guard: bool = False         # the detail guard (BUILD_PLAN_NOISE E): what was removed is tested band by band and
+                                # anything in it that is not noise is given back; then the noise envelope.
     safeguard: float = 0.0      # "restore" step (plan 23.12): no photosite may move by more than this many times
                                 # its own noise; beyond that the original is kept. 0 = off. The Studio uses 4.5.
 
@@ -71,6 +75,10 @@ METHOD_INFO = {
                     weak="Softens fine low-contrast texture more than hybrid.", speed="Fast."),
     "nlm": dict(name="Non-local means", best="Repeating texture (fabric, foliage).",
                 weak="Colour blotches survive more than with hybrid.", speed="Medium."),
+    "learned": dict(name="Learned (this camera's own network)",
+                    best="Fine texture at high ISO: it was trained on this camera's real noise.",
+                    weak="Needs a model trained for this camera (Cameras page) and is slow without a graphics "
+                         "card. With no model, Hybrid is used.", speed="Fast on a graphics card, slow without."),
     "mppca": dict(name="MP-PCA (from MRI)", best="Structured detail; a principled signal / noise cut.",
                   weak="Slow; can leave faint patch patterns in flat areas.", speed="Slow."),
 }
@@ -298,7 +306,18 @@ def denoise_mosaic(mos: np.ndarray, pattern, model: NoiseModel, params: DenoiseP
     """Denoise a normalised mosaic (black-subtracted, 1.0 = clip, BEFORE white balance). Returns a new array.
     ``stats`` (optional) receives {"protected": photosites kept by the safeguard, "sites": photosites seen}."""
     p = params or DenoiseParams()
+    learned_net = None
+    if p.method == "learned":                     # this camera's own network, on the four planes together
+        from . import learned as LN
+        learned_net = LN.for_camera(p.camera)
+        if learned_net is None:                   # no model (or no runtime): say so and use the recommended one
+            log.info("denoise: no learned model for %s; using hybrid", p.camera)
+            if stats is not None:
+                stats["learned"] = "no model for this camera: Hybrid used"
+            p = dataclasses.replace(p, method="hybrid")
     lm, cm = p.luma_method, p.chroma_method
+    if learned_net is not None:
+        lm = cm = "starlet"                       # (unused; the network does all four planes)
     if p.method == "hybrid":                      # detail-keeping NLM on luminance, starlet on colour blotches
         lm, cm = lm or "nlm", cm or "starlet"
     lm, cm = lm or p.method, cm or p.method
@@ -321,12 +340,36 @@ def denoise_mosaic(mos: np.ndarray, pattern, model: NoiseModel, params: DenoiseP
         log.debug("denoise: %d impulse pixels replaced (%.1f per MP)", n_imp, n_imp / (h * w / 1e6))
     Y, C1, C2, C3 = to_yc(planes["R"], planes["G1"], planes["G2"], planes["B"])
     with slog.stage("denoise." + p.method, log, luma=p.luma, chroma=p.chroma):
-        Yd = fn(Y, p.luma, p.luma_scales)
-        C1d = fc(C1, p.chroma, p.chroma_scales)
-        C2d = fc(C2, p.chroma, p.chroma_scales)
-        C3d = fn(C3, max(p.luma, p.chroma), p.luma_scales)
+        if learned_net is not None:
+            net = learned_net.run(np.stack([planes["R"], planes["G1"], planes["G2"], planes["B"]]))
+            Yd, C1d, C2d, C3d = to_yc(net[0], net[1], net[2], net[3])
+            # Strength still means something: 1 = what the network gives, less = part of the noise left in
+            Yd = Y + np.float32(min(max(p.luma, 0.0), 1.0)) * (Yd - Y)
+            for c, cd in ((C1, C1d), (C2, C2d), (C3, C3d)):
+                cd += np.float32(1.0 - min(max(p.chroma, 0.0), 1.0)) * (c - cd)
+            if stats is not None:
+                stats["learned"] = learned_net.name
+        else:
+            Yd = fn(Y, p.luma, p.luma_scales)
+            C1d = fc(C1, p.chroma, p.chroma_scales)
+            C2d = fc(C2, p.chroma, p.chroma_scales)
+            C3d = fn(C3, max(p.luma, p.chroma), p.luma_scales)
         if p.grain > 0:
             Yd = Yd + float(p.grain) * (Y - Yd)
+    if p.guard:
+        from . import guard as GD
+        with slog.stage("denoise.guard", log):
+            Yd, grep = GD.give_back(Y, Yd)
+            C1d, _ = GD.give_back(C1, C1d)
+            C2d, _ = GD.give_back(C2, C2d)
+            Yd, held = GD.envelope(Y, Yd)
+            C1d, _ = GD.envelope(C1, C1d, GD.ENVELOPE_K_COLOUR)
+            C2d, _ = GD.envelope(C2, C2d, GD.ENVELOPE_K_COLOUR)
+            C3d, _ = GD.envelope(C3, C3d, GD.ENVELOPE_K_COLOUR)
+            if stats is not None:
+                stats["guard"] = dict(grep, held=round(held, 6))
+        log.debug("detail guard: %.2f%% of the removed energy returned to luminance; residual bands %s -> %s",
+                  100 * grep["returned"], grep["band_energy"], grep["band_energy_after"])
     R, G1, G2, B = from_yc(Yd, C1d, C2d, C3d)
     if p.safeguard > 0:
         kept = 0

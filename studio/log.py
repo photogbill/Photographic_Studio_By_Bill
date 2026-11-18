@@ -236,6 +236,26 @@ def latest_error_report() -> Path | None:
 _crash_file = None
 
 
+# Windows "exceptions" that are raised and handled inside Windows itself while the Studio carries on. faulthandler
+# writes each one down as "Windows fatal exception" all the same. 0x8001010e (a COM call on the wrong thread) comes
+# by the dozen from the native file dialogs: Bill's Studio filed a crash report on 2026-11-18 for a run that had
+# not crashed. The others: a C++ exception that was caught, a debugger message, a thread being named.
+_HANDLED_CODES = {"0x8001010e", "0xe06d7363", "0x40010006", "0x406d1388"}
+_CRASH_WORDS = ("Fatal Python error", "access violation", "stack overflow", "Segmentation fault", "Aborted",
+                "Illegal instruction", "Bus error", "Floating point exception", "int divide by zero")
+
+
+def is_real_crash(trace: str) -> bool:
+    """True when a faulthandler trace shows the Studio died, not only exceptions Windows handled by itself."""
+    import re
+    if any(w.lower() in trace.lower() for w in _CRASH_WORDS):
+        return True
+    codes = {c.lower() for c in re.findall(r"exception: code (0x[0-9a-fA-F]{8})", trace)}
+    if codes - _HANDLED_CODES:
+        return True
+    return "Windows fatal exception" not in trace and bool(trace.strip())
+
+
 def watch_for_crashes() -> Path | None:
     """A crash inside Qt or the raw decoder ends the Studio with no Python error to report. Python's faulthandler
     writes where every thread was into logs/crash_trace.log as it dies; the next start finds that and turns it into
@@ -247,6 +267,10 @@ def watch_for_crashes() -> Path | None:
         trace_path = paths.get("LOGS") / "crash_trace.log"
         if trace_path.exists() and trace_path.stat().st_size > 0:
             old = trace_path.read_text(encoding="utf-8", errors="replace")
+            if not is_real_crash(old):
+                log.info("crash trace holds only exceptions Windows handles itself (file dialogs): not a crash")
+                old = ""
+        if trace_path.exists() and trace_path.stat().st_size > 0 and old:
             report = save_error_report("The Studio stopped unexpectedly the last time it ran (found at this start).",
                                        old[-20000:])
         _crash_file = open(trace_path, "w", encoding="utf-8")      # kept open for as long as the Studio runs

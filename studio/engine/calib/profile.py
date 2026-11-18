@@ -38,7 +38,9 @@ class IsoEntry:
     gain_pairs: int = 0
     full_well_e: float | None = None
     dark_current: list = field(default_factory=list)   # [{exposure_s, temp_c, frames, excess_dn, noise_dn, ...}]
-    hot_pixels: int = 0                    # count only; the map itself stays local
+    hot_pixels: int = 0                    # count only; the map itself stays local. HOT: at least 1% of the
+    #                                        range above black with no light (a bright dot in any photo)
+    warm_pixels: int = 0                   # stand out of the noise at this ISO but below that (healed too)
     by_temp: list = field(default_factory=list)        # short darks per camera temperature: [{temp_c, frames,
     #                                                    paired, read_noise_dn 2x2, row_banding_dn, black_dn}]
     thermal: dict | None = None            # long exposures: {var_dn2_per_s, at_temp_c, doubling_c, points}

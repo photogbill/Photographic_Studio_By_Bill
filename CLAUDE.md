@@ -9,6 +9,9 @@ Read these before changing anything in this folder:
 - `BUILD_PLAN_PLATE_GLOW_BURST_MACRO.md`: the next build (Bill, 2026-11-17): variable IR filter, then **card to
   finished stacks** (block F: mostly built in session 13b as Card to Stacks; F.8 says what is left), Best of burst,
   Macro planner, Plate Reader, Glow guard. Bill's real card for testing: `test_raws\DCIM\100CANON`.
+- `BUILD_PLAN_NOISE.md`: Clean rebuilt on the camera's own calibration (Bill, 2026-11-18): truth harness with
+  real noise, the residual test and detail guard, deep calibration, a network trained on the camera's own dark
+  frames. Not started. Bill's R5 pile (449 raws) is in `calibration_local\`; section 0.3 has what it measured.
 - `docs/PROGRESS.md`: where things stand. Keep it current.
 - `docs/CLI.md`: the Studio from the command line for other programs (the RPG Forge, Claude): `studio/cli_tools.py`,
   `studio-cli.bat`. A new tool gets its command there, with a test in `tests/test_cli_tools.py`. The MCP server

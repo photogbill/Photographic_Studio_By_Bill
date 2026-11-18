@@ -196,12 +196,17 @@ def test_safeguard_blends_between_k_and_one_and_a_half_k():
 def test_safeguard_in_the_edit_and_old_sidecars():
     from studio import engine as E
     e = E.Edit()
-    assert e.denoise.safeguard and e.stage_versions["denoise"] == 2
+    assert e.denoise.safeguard and e.denoise.guard and e.stage_versions["denoise"] == 3
     assert E.Edit.from_json(e.to_json()).denoise.safeguard
     off = E.Edit()
     off.denoise.safeguard = False
     assert off.raw_key() != e.raw_key()
     old = E.Edit.from_dict({"denoise": {"enabled": True, "luma": 0.6}, "stage_versions": {"denoise": 1}})
     assert old.denoise.enabled and not old.denoise.safeguard, "an older sidecar renders exactly as it did"
-    assert set(DN.METHOD_INFO) == {"hybrid", "starlet", "nlm", "mppca"}
+    v2 = E.Edit.from_dict({"denoise": {"enabled": True, "safeguard": True}, "stage_versions": {"denoise": 2}})
+    assert v2.denoise.safeguard and not v2.denoise.guard, "written before the detail guard: renders as it did"
+    g_off = E.Edit()
+    g_off.denoise.guard = False
+    assert g_off.raw_key() != e.raw_key()
+    assert set(DN.METHOD_INFO) == {"hybrid", "starlet", "nlm", "mppca", "learned"}
     assert all(i["best"] and i["weak"] and i["speed"] for i in DN.METHOD_INFO.values())

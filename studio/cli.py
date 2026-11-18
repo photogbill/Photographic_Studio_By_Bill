@@ -270,13 +270,13 @@ def cmd_calibrate(a) -> int:
         print(f"Frames used so far: {q['dark_frames']} dark, {q['flat_frames']} flat"
               + (f"   Camera temperature: {q['temp_min_c']:g} to {q['temp_max_c']:g} C"
                  if q.get("temp_min_c") is not None else ""))
-        print("  ISO      black (DN)   read noise (DN)  row band  col band  gain (e-/DN)  hot px")
+        print("  ISO      black (DN)   read noise (DN)  row band  col band  gain (e-/DN)  hot px  warm px")
         for e in prof.isos:
             rn = np.mean(e.read_noise_dn) if e.read_noise_dn else float("nan")
             bl = np.mean(e.black_dn) if e.black_dn else float("nan")
             g = f"{e.gain_e_per_dn:.4f}" if e.gain_e_per_dn else "  (quick)"
             print(f"  {e.iso:<8g} {bl:10.2f}   {rn:12.2f}   {e.row_banding_dn or 0:8.2f}  "
-                  f"{e.col_banding_dn or 0:8.2f}  {g:>12}  {e.hot_pixels:6d}")
+                  f"{e.col_banding_dn or 0:8.2f}  {g:>12}  {e.hot_pixels:6d}  {e.warm_pixels:7d}")
             for t in e.by_temp if len(e.by_temp) > 1 else []:
                 print(f"      at {t['temp_c']:g} C: read noise {np.mean(t['read_noise_dn']):.2f} DN "
                       f"({t['frames']} frames)")
@@ -290,6 +290,12 @@ def cmd_calibrate(a) -> int:
         for tip in q.get("advice", []):
             print(f"  to make it better: {tip}")
         print(f"Saved (private, on this PC only): {path}")
+    if getattr(a, "deep", False):
+        from .engine.calib.deep import deep_calibrate
+        print("\nDeep calibration: keeping patches of the real noise (the noise bank) and the fixed banding...")
+        for r in deep_calibrate(files, progress=lambda n, t, name: print(f"  [{n}/{t}] {name}")):
+            print(f"  {r['model']}: {r['patches']} patches in {len(r['groups'])} groups; fixed pattern at "
+                  f"{len(r['fixed'])} ISO settings.")
     print("\nNothing is shared unless you choose to share it later.")
     return 0
 
@@ -484,6 +490,8 @@ def build_parser() -> argparse.ArgumentParser:
     i.add_argument("inputs", nargs="+")
     c = sub.add_parser("calibrate", help="build a camera profile from calibration frames (darks, flat pairs)")
     c.add_argument("inputs", nargs="+")
+    c.add_argument("--deep", action="store_true", help="also build the noise bank and fixed pattern (for the "
+                   "benchmark on real noise and for training the camera's own network)")
     b = sub.add_parser("blindtest", help="blind test: Studio vs your DxO exports (NAME_DxO.jpg beside the raw)")
     b.add_argument("folder", nargs="?")
     b.add_argument("--pairs", type=int, default=10)

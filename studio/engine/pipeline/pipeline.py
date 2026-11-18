@@ -369,6 +369,7 @@ def linear_rgb(image: Image, edit: Edit, region=None, half_size: bool = False, c
             st = {}
             mos = denoise_mosaic(mos, raw.cfa_rgb, model,
                                  DenoiseParams(method=dn.method, luma=dn.luma, chroma=dn.chroma, grain=dn.grain,
+                                               guard=bool(dn.guard), camera=(image.meta.make, image.meta.model),
                                                safeguard=SAFEGUARD_K if dn.safeguard else 0.0), stats=st)
             if region is None and st:              # whole frame: what the Clean panel reports
                 image.denoise_report = dict(st, half=half_size)

@@ -146,3 +146,18 @@ Planned (not yet used): LittleCMS through Pillow's ImageCms (MIT; used today onl
   uses that portrait only when scikit-image happens to be installed (it is not a dependency).
 * `profiles/lenses/manual_lenses.json`: a starter list of manual lens names for tagging (our own list, CC BY-SA 4.0).
 * `profiles/looks/*.psblook`: eight starter looks (our own settings, CC BY-SA 4.0). No third-party LUTs are shipped.
+
+## Optional: the Lab (training a camera's own Clean network), installed by `Train Camera Model.bat`
+
+Not part of the Studio and not needed to use it. Installed only when the person starts training, into
+`lab_packages\` beside the app; deleting that folder removes them. Never bundled in the installers.
+
+| Package | What for | Licence (verify before any bundling) |
+|---|---|---|
+| PyTorch | training the network on the user's graphics card (`studio/lab`) | BSD-3-Clause |
+| ONNX | writing the trained network to a file | Apache-2.0 |
+| ONNX Runtime (DirectML build on Windows) | running the trained network in Clean (`engine/raw/learned.py`) | MIT |
+
+The networks themselves are trained on the user's PC from their own photos and dark frames and stay in
+`calibration_local\<camera>\models\`. No third-party weights are downloaded or shipped by this code.
+
