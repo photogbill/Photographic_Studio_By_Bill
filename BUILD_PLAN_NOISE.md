@@ -76,6 +76,11 @@ where they were.
   crop said a quarter at 12800; the whole frame says 8%.) Worth subtracting at mid ISO, small elsewhere.
 * **Neighbouring photosites are independent** (lag-1 correlation under 0.04) except at ISO 100 (+0.15) and
   ISO 102400 (+0.11). Methods that assume independent noise (Noise2Noise-style, SURE) are safe from 200 to 51200.
+  **Corrected the same evening (0.6):** that figure was for *adjacent* photosites, which are different colours.
+  Clean works in colour planes, where the neighbours are photosites of ONE colour, two apart. Those agree by
+  **+0.08 to +0.10 in dark frames at ISO 400** (all four colours, both directions, three pairs, 2048 x 2048), and
+  by nothing at ISO 3200 and 12800. In flat frames (the light's own noise) they agree by nothing at any ISO. So
+  the sharing is in the read noise only, and matters only in very dark parts of low-ISO photos.
 * **The noise is not a perfect bell curve at low ISO** (excess kurtosis +0.6 to +2.1 up to ISO 1600, near 0
   above 12800). Formula noise is a fair stand-in at high ISO and a poor one at low ISO: draw real noise (B.2).
 * **Hot and warm pixels.** A few dozen truly hot photosites (66 at ISO 400: at least 1% of the range above
@@ -129,6 +134,94 @@ that says nothing yet about how good a real model will be.
 **Hot / warm count, open question:** "1% of the range above black" counts the same warm photosite as warm at
 ISO 400 (20 DN) and hot at ISO 3200 (160 DN). With gain measured, define it in electrons so the count does not
 depend on ISO.
+
+### 0.6 Status: second build, 2026-11-18 evening (Bill: "build everything on the Not Built Yet list. Make it easy for the user, make sure everything is explained as well")
+
+**Built and tested** (tests/test_calibrated.py, test_denoise.py, test_referee.py, test_clean_ui.py, test_lab.py,
+test_noise_plan.py; and run on Bill's real files in the build machine: 63 of his calibration raws, a candlelit
+ISO 3200 photo, his Dual Pixel file):
+
+* **C, all of it** (`engine/raw/calibrated.py`; `Edit.calibrated`, on for new edits; Develop > Clean > "Use this
+  camera's calibration" with a cyan chip): black offset per colour (picture area against masked border), the
+  fixed rows and columns (shared with the per-photo row step so nothing is taken out twice), hot photosites
+  always and warm ones only where they show above the photo's local noise. On Bill's candlelit ISO 3200 photo: 42
+  hot and 117 warm healed of 4,095 mapped, fixed rows 0.24 DN and columns 0.26 DN out, black corrected by up to
+  0.33 DN.
+* **B.3** banding spectrum (`deep._periodic`): on the R5 nothing periodic at ISO 400, 3200, 12800, 51200: the
+  banding is random from row to row. **B.6** pushed ISOs flagged (gain x ISO well above the sensor's, or a comb
+  in the histogram) and said in Develop. **Hot and warm in electrons** (`profile.HOT_ELECTRONS = 100`): the open
+  question of 0.5 is closed.
+* **The master dark, decided and not built:** per-photosite fixed pattern is 19 to 24% of the temporal noise on
+  the R5. Subtracting a mean of n frames adds 1/n of the temporal variance and removes the fixed part: it only
+  helps above about 20 frames per ISO; Bill has 8 to 16. The Cameras card says this with the camera's own numbers.
+* **D.2** a BM3D-class method in our own code (`engine/raw/collab.py`, method "collab": block matching, two
+  passes, hard threshold then Wiener). **D.4 Auto strength, detail first** (`engine/raw/auto_strength.py`,
+  `pipeline.clean_auto`; `Denoise.auto`, on for new edits): Monte-Carlo SURE for the error, and **the same lemma
+  on the finest band alone for the share of fine detail kept** (the Studio's own use of it; on charts the estimate
+  is within 3 points of the truth). Plain least-error SURE was built first and measured: it gave up 4 points of
+  texture for 2 of noise, so lost detail is now weighed `DETAIL_WEIGHT = 4` times more and the lightest strength
+  within 3% of the best is taken. Only with a measured noise model (a profile with gain): with the noise put 30%
+  too low a smooth photo was left 83% as noisy as it came, so an uncalibrated camera keeps its sliders and is told
+  why. Read noise shared between neighbours is allowed for (generalised SURE: the probe is shaped like the
+  noise, by the profile's figure times the photo's read-noise share). `Denoise.lean` leans from the choice.
+* **D.5** shadow-lift awareness (`Edit.shadow_lift`, `Denoise.lift`). **D.6**, differently: no tuned tables
+  per ISO regime; each photo chooses (D.4), "Make it good" keeps its ISO-scaled strengths for cameras without a
+  profile, and pushed ISOs are said.
+* **E.4** "What Clean removed" (`app/removed.py`, `pipeline.clean_removed`): before, after, removed (in units of
+  the camera's noise), magenta where the residual test finds picture, a verdict in words and colour, with or
+  without the guard. On Bill's candlelit photo at Auto: removed strength 0.96 and 0.89 of the noise, nothing that
+  is not noise, guard returned 0.003%.
+* **G** fusion (method "fusion": non-local means where there is texture, stronger wavelets where it is flat).
+* **H.1, H.2 the Dual Pixel referee** (`engine/raw/referee.py`): one half cleaned and judged against the other
+  for error and for fine detail kept; blocks where the halves disagree (out of focus), dark blocks (read noise
+  rules) and photos whose halves share noise (measured in their flat places) are left out or give no verdict.
+  Auto uses it for Dual Pixel CR3 files. On Bill's file (ISO 1600): 88% of the pieces usable, no shared noise
+  found in its flat places.
+* **F.6** a general network (`python -m studio.lab.train --general`, the Cameras card's "Train a general
+  network"): trained over every calibrated camera, used by cameras with no network of their own (Clean says
+  so), and the starting point of each camera's own training (`--start-from`, automatic when one exists).
+* **A.4** the harness against real flat pairs (`noise_bench.honesty`, on the report page): on the R5 all six
+  pairs within 1% (0.992 to 1.003). The flats are at 7 to 13% of the range; above that it is not checked.
+  **A.5** real photos without truth (`noise_bench.real_photos`, a folder dragged onto the .bat): the Auto
+  estimates per method. The blind test page already existed (Blind Test vs DxO.bat).
+* **I**: all of the above in Develop with texts (best for / weak at), the Cameras card "What Clean takes from this
+  calibration", Help cards, `docs/CLEAN.md`, `studio-cli clean --auto-strength` and the new methods.
+
+**What the numbers say (R5 real noise, quick charts, guard on; noise left / texture kept / colour blotches left):**
+
+| ISO | Hybrid, old defaults | Hybrid, Auto | Fusion, Auto |
+|---|---|---|---|
+| 400 | 66.9 / 100.0 / 38.5 | 66.3 / 100.0 / 31.1 | 65.1 / 100.0 / 31.1 |
+| 3200 | 63.1 / 99.6 / 39.5 | 62.7 / 99.3 / 32.4 | 61.6 / 99.3 / 32.3 |
+| 12800 | 54.4 / 85.2 / 37.4 | 55.8 / 91.1 / 30.6 | 54.4 / 91.2 / 30.6 |
+| 51200 | 44.3 / 50.6 / 41.9 | 48.0 / 61.9 / 40.4 | 46.3 / 62.6 / 40.6 |
+
+Auto buys texture where it was being lost (6 points at 12800, 11 to 12 at 51200) for 0 to 4 points of noise, and
+takes a fifth off the colour blotches everywhere. Collaborative with Auto at 12800: 53.9 / 88.4 / 30.6. **Texture
+at 51200 is still only 62%:** that is the gap a trained network is for.
+
+**Not built, and why:**
+* **F.5 published networks as baselines** (RawNIND, RawForge). Their weights, input conventions and licences were
+  not checked on this machine, and a wrong convention gives a bad score that would be blamed on the model. Needs
+  a session that can download and verify them.
+* **F.7 joint denoise and demosaic.** It replaces the demosaic stage and needs a trained F.3 model first.
+* **H.3** per-photo fine-tune and **H.4** depth-steered strength.
+* **B.5** black level by temperature (Bill's short frames span 24 to 40 °C with no visible drift to model).
+* **D.3** NL-Bayes and dual-domain candidates.
+* **Removing a periodic banding line** (none was found on the R5; it is recorded if a camera has one).
+
+**Never run:** `Train Camera Model.bat` on Windows, training on a graphics card, DirectML, the general network on
+more than one camera, the 5D Mark IV's Dual Pixel CR2 (the referee reads CR3 only), the full test suite on Windows
+after this build, and Bill's blind test against DxO. Auto and the calibration were run on two of Bill's photos
+and judged by numbers, not by eye. On the build machine the whole suite passes except three tests that fail there
+before this build too (two Portrait tests and one iris test that need model files the build machine lacks).
+
+**A miss from the first build, fixed here:** `tests/test_imgops.py::test_every_import_is_installed_by_requirements`
+has failed since 0.1.10, because the Lab's optional imports (torch, onnx, onnxruntime) were not listed as
+optional. Run Tests.bat on Bill's PC would have shown it.
+
+**Speed, measured on the build machine's two slow cores:** Auto costs 15 to 25 s once per photo and method
+(remembered while the photo is open); on the cloud build machine 4 s. Not measured on Bill's PC.
 
 ### 0.4 Ask Bill once, at the start, in chat (defaults if he is away)
 

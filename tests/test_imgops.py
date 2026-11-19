@@ -27,7 +27,10 @@ def test_every_import_is_installed_by_requirements():
     req = (ROOT / "requirements.txt").read_text(encoding="utf-8").lower()
     names = {"numpy": "numpy", "scipy": "scipy", "rawpy": "rawpy", "tifffile": "tifffile", "PIL": "pillow",
              "exifread": "exifread", "PySide6": "pyside6", "pytest": "pytest"}
-    optional = {"lensfunpy"}                          # tried inside try/except; the Studio works without it
+    optional = {"lensfunpy",                          # tried inside try/except; the Studio works without it
+                "torch", "onnx", "onnxruntime"}       # the Lab (training a camera's own Clean network): installed
+    #                                                   only by Train Camera Model.bat, into lab_packages beside the
+    #                                                   app; nothing in the Studio needs them to start (THIRD_PARTY.md)
     std = set(sys.stdlib_module_names) | {"studio", "photographic_studio"}
     missing = set()
     for p in (ROOT / "studio").rglob("*.py"):

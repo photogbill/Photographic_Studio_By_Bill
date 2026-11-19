@@ -61,6 +61,9 @@ class DenoiseParams:
     impulses: bool = False      # isolated-outlier filter; off: on real texture it cost 2 dB (RESULTS.md).
                                 # Hot pixels will come from the calibration map (section 8.3) instead.
     camera: tuple | None = None # (make, model): where the "learned" method looks for this camera's network
+    lift: float = 0.0           # stops by which the edit lifts the shadows (0 = not at all): lifted shadows are
+                                # cleaned harder, because lifting makes their noise visible (D.5)
+    lift_mid: float = 0.11      # the raw level the edit renders as mid grey (shadows are counted from there)
     guard: bool = False         # the detail guard (BUILD_PLAN_NOISE E): what was removed is tested band by band and
                                 # anything in it that is not noise is given back; then the noise envelope.
     safeguard: float = 0.0      # "restore" step (plan 23.12): no photosite may move by more than this many times
@@ -79,6 +82,16 @@ METHOD_INFO = {
                     best="Fine texture at high ISO: it was trained on this camera's real noise.",
                     weak="Needs a model trained for this camera (Cameras page) and is slow without a graphics "
                          "card. With no model, Hybrid is used.", speed="Fast on a graphics card, slow without."),
+    "fusion": dict(name="Fusion (each method where it is best)",
+                   best="Photos with both smooth areas and fine texture: non-local means where there is texture, "
+                        "stronger wavelets where it is flat.",
+                   weak="A little slower than Hybrid; where texture is very faint it is treated as flat.",
+                   speed="Medium."),
+    "collab": dict(name="Collaborative (BM3D class, the yardstick)",
+                   best="The lowest error of the classical methods on most photos: it stacks look-alike blocks "
+                        "and filters them together.",
+                   weak="Very slow (minutes on a 45 MP photo). Meant for the photo that matters and as the bar "
+                        "the others are measured against.", speed="Very slow."),
     "mppca": dict(name="MP-PCA (from MRI)", best="Structured detail; a principled signal / noise cut.",
                   weak="Slow; can leave faint patch patterns in flat areas.", speed="Slow."),
 }
@@ -277,7 +290,58 @@ def denoise_nlm(x: np.ndarray, strength: float, scales: int = 0, search: int = 7
     return num / den
 
 
-METHODS = {"starlet": denoise_starlet, "mppca": denoise_mppca, "nlm": denoise_nlm}
+def denoise_collab(x: np.ndarray, strength: float, scales: int = 0) -> np.ndarray:
+    from .collab import denoise_collab as _collab
+    return _collab(x, strength, scales)
+
+
+def texture_weight(y: np.ndarray) -> np.ndarray:
+    """0 where a unit-noise plane is flat (nothing there but noise), 1 where it holds texture or edges: the local
+    energy of the middle wavelet bands against what noise alone puts there, smoothed."""
+    bands = starlet(y, 3)
+    sig = starlet_noise_sigma()
+    rho = 0.5 * (uniform_filter(bands[1] * bands[1], 9, mode="mirror") / np.float32(sig[1] * sig[1])
+                 + uniform_filter(bands[2] * bands[2], 13, mode="mirror") / np.float32(sig[2] * sig[2]))
+    t = np.clip((rho - 1.3) / 1.5, 0.0, 1.0)
+    return uniform_filter(t * t * (3.0 - 2.0 * t), 9, mode="mirror")
+
+
+def denoise_fusion(x: np.ndarray, strength: float, scales: int = 4) -> np.ndarray:
+    """Each method where it is best (BUILD_PLAN_NOISE G): non-local means where the plane holds texture (it keeps
+    fine detail), wavelets a little stronger where it is flat (they leave the smoothest skies and walls)."""
+    if strength <= 0:
+        return x
+    w = texture_weight(x)
+    flat = denoise_starlet(x, 1.3 * strength, scales or 4)
+    return flat + w * (denoise_nlm(x, strength) - flat)
+
+
+METHODS = {"starlet": denoise_starlet, "mppca": denoise_mppca, "nlm": denoise_nlm, "collab": denoise_collab,
+           "fusion": denoise_fusion}
+PAIRS = {"hybrid": ("nlm", "starlet"), "collab": ("collab", "starlet"), "fusion": ("fusion", "starlet")}
+LIFT_GAIN = 1.6             # lifted shadows: luminance cleaned this much harder at full weight
+LIFT_GAIN_COLOUR = 1.5
+
+
+def method_fns(method: str, luma_method: str | None = None, chroma_method: str | None = None) -> tuple:
+    """(luminance cleaner, colour cleaner) for a method name. Several methods are a pair: fine detail and colour
+    blotches are different problems, and wavelets at coarse scales are the right tool for blotches."""
+    lm, cm = luma_method, chroma_method
+    if method in PAIRS:
+        lm, cm = lm or PAIRS[method][0], cm or PAIRS[method][1]
+    lm, cm = lm or method, cm or method
+    for m in (lm, cm):
+        if m not in METHODS:
+            raise ValueError(f"unknown denoise method {m!r}; available: {sorted(set(METHODS) | set(PAIRS))}")
+    return METHODS[lm], METHODS[cm]
+
+
+def lift_weight(yd: np.ndarray, lift: float, lift_mid: float, a: float) -> np.ndarray:
+    """How much harder to clean each place because the edit lifts it: 0 from mid grey up, rising to its most four
+    stops below mid grey, in proportion to the stops of lift (full at three)."""
+    level = np.float32(a / 16.0) * yd * yd                    # the stabilised luminance back as a raw level
+    below = np.log2(np.float32(max(lift_mid, 1e-5)) / np.maximum(level, 1e-7))
+    return np.clip(below / 4.0, 0.0, 1.0) * np.float32(min(lift / 3.0, 1.0) * 0.8)
 
 
 # ------------------------------------------------------------------------------------------ impulses
@@ -315,16 +379,7 @@ def denoise_mosaic(mos: np.ndarray, pattern, model: NoiseModel, params: DenoiseP
             if stats is not None:
                 stats["learned"] = "no model for this camera: Hybrid used"
             p = dataclasses.replace(p, method="hybrid")
-    lm, cm = p.luma_method, p.chroma_method
-    if learned_net is not None:
-        lm = cm = "starlet"                       # (unused; the network does all four planes)
-    if p.method == "hybrid":                      # detail-keeping NLM on luminance, starlet on colour blotches
-        lm, cm = lm or "nlm", cm or "starlet"
-    lm, cm = lm or p.method, cm or p.method
-    for m in (lm, cm):
-        if m not in METHODS:
-            raise ValueError(f"unknown denoise method {m!r}; available: {sorted(METHODS) + ['hybrid']}")
-    fn, fc = METHODS[lm], METHODS[cm]
+    fn, fc = method_fns("starlet" if learned_net is not None else p.method, p.luma_method, p.chroma_method)
     h, w = (mos.shape[0] // 2) * 2, (mos.shape[1] // 2) * 2
     roles = plane_roles(pattern)
     planes = {}
@@ -348,12 +403,23 @@ def denoise_mosaic(mos: np.ndarray, pattern, model: NoiseModel, params: DenoiseP
             for c, cd in ((C1, C1d), (C2, C2d), (C3, C3d)):
                 cd += np.float32(1.0 - min(max(p.chroma, 0.0), 1.0)) * (c - cd)
             if stats is not None:
-                stats["learned"] = learned_net.name
+                stats["learned"] = learned_net.name + (
+                    " (the general network: not trained on this camera)" if getattr(learned_net, "general", False)
+                    else "")
         else:
             Yd = fn(Y, p.luma, p.luma_scales)
             C1d = fc(C1, p.chroma, p.chroma_scales)
             C2d = fc(C2, p.chroma, p.chroma_scales)
             C3d = fn(C3, max(p.luma, p.chroma), p.luma_scales)
+            if p.lift >= 0.5:                     # the edit lifts the shadows: clean what it lifts harder
+                t = lift_weight(Yd, p.lift, p.lift_mid, float(np.mean(model.a)))
+                if float(t.max()) > 0.02:
+                    Yd = Yd + t * (fn(Y, LIFT_GAIN * p.luma, p.luma_scales) - Yd)
+                    if p.lift >= 1.0:
+                        C1d = C1d + t * (fc(C1, LIFT_GAIN_COLOUR * p.chroma, p.chroma_scales) - C1d)
+                        C2d = C2d + t * (fc(C2, LIFT_GAIN_COLOUR * p.chroma, p.chroma_scales) - C2d)
+                    if stats is not None:
+                        stats["lift"] = dict(stops=p.lift, share=round(float(np.mean(t > 0.05)), 4))
         if p.grain > 0:
             Yd = Yd + float(p.grain) * (Y - Yd)
     if p.guard:

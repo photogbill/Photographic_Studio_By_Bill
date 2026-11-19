@@ -598,7 +598,9 @@ def _p_clean(a):
     from .engine.pipeline.edit import Denoise
     d = {"enabled": True, "luma": round(Denoise().luma * a.strength, 3),
          "chroma": round((a.chroma if a.chroma is not None else Denoise().chroma) * a.strength, 3),
-         "grain": a.keep_grain}
+         "grain": a.keep_grain, "auto": bool(getattr(a, "auto_strength", False))}
+    if d["auto"]:                                  # the photo chooses; --strength leans from its choice
+        d["lean"] = round(float(a.strength), 3)
     if a.method:
         d["method"] = a.method
     return {"denoise": d}
@@ -1234,7 +1236,7 @@ def schema() -> dict:
             "highlight_mode": ["clip", "rebuild", "glow", "none"],
             "white_balance.mode": ["as_shot", "daylight", "temp_tint", "multipliers"],
             "tone.mode": ["standard", "camera_match", "linear"],
-            "denoise.method": ["hybrid", "starlet", "nlm", "mppca", "learned"],
+            "denoise.method": ["hybrid", "fusion", "starlet", "nlm", "mppca", "collab", "learned"],
             "hdr.strength": list(hdr.STRENGTHS), "hdr.engine": list(hdr.ENGINES),
             "detail": {k: {"lo": v["lo"], "hi": v["hi"], "does": v.get("does", "")} for k, v in scales.METHODS.items()},
             "detail_presets": {k: dict(v) for k, v in scales.PRESETS.items()},
@@ -1418,8 +1420,12 @@ def add_parsers(sub) -> None:
     p = sub.add_parser("clean", parents=full, help=HELP["clean"])
     p.add_argument("--strength", type=float, default=1.0, help="overall strength, 1 = matched to the measured noise")
     p.add_argument("--chroma", type=float, default=None, help="colour-noise strength (default 1.5)")
-    p.add_argument("--method", default=None, choices=["hybrid", "starlet", "nlm", "mppca"])
+    p.add_argument("--method", default=None,
+                   choices=["hybrid", "fusion", "starlet", "nlm", "mppca", "collab", "learned"])
     p.add_argument("--keep-grain", type=float, default=0.0, help="share of the removed grain put back, 0..1")
+    p.add_argument("--auto-strength", action="store_true",
+                   help="let each photo choose its own strength, detail first (needs a calibrated camera; "
+                        "--strength then leans lighter or heavier from that choice)")
 
     p = sub.add_parser("relight", parents=full, help=HELP["relight"])
     p.add_argument("--amount", type=float, default=60.0, help="0..100")

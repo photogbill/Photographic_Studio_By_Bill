@@ -1,6 +1,37 @@
 # Build progress
 
-Updated 2026-11-18 (session 14: drop-everything camera calibration; session 13: Infrared and Panorama tabs, `BUILD_PLAN_PANO_IR.md`, flare ghosts and Fill; then Card to Stacks on Bill's card). Plan: BUILD_PLAN.md v2.0.
+Updated 2026-11-18 (session 15: Clean rebuilt on the calibration, `BUILD_PLAN_NOISE.md` 0.5 and 0.6; session 14: drop-everything camera calibration; session 13: Infrared and Panorama tabs, `BUILD_PLAN_PANO_IR.md`, flare ghosts and Fill; then Card to Stacks on Bill's card). Plan: BUILD_PLAN.md v2.0.
+
+## Session 15: Clean, rebuilt on the calibration (2026-11-18, same day, chat session with Bill)
+
+Bill: "the best noise reduction system possible without smoothing the image or losing details", then "Build
+everything", then "build everything on the Not Built Yet list. Make it easy for the user, make sure everything is
+explained as well." The plan is `BUILD_PLAN_NOISE.md`; **its sections 0.5 and 0.6 are the status** (what is built,
+the numbers on Bill's R5, what is not built and why, what was never run). The user guide is `docs/CLEAN.md`.
+
+In short, what a photographer gets:
+
+* **Cameras page:** drop lens-cap frames and flat pairs, press Deep calibration. The card lists what Clean takes
+  from the calibration and what it leaves alone with the reason. Optional: train the camera's own network, or a
+  general one over every calibrated camera.
+* **Develop > Clean:** Auto (each photo chooses its strength, detail first; needs the camera's gain), the
+  camera's calibration taken out first (hot and warm pixels, fixed banding, black), lifted shadows cleaned
+  harder, methods Hybrid / Fusion / Starlet / NLM / MP-PCA / Collaborative / Learned each with best-for and
+  weak-at, the detail guard, and "Show what Clean removed" (the proof, with a verdict).
+* **A Dual Pixel photo** is judged by its own two halves.
+* **Run Noise Benchmark.bat** scores it all on the camera's real noise, checks itself against the real flats, and
+  takes a folder of the photographer's own raws.
+
+Three things found on Bill's R5 while building, each of which changed the build:
+1. Least-error strength (plain SURE) costs texture; weighing lost detail four times more gives 6 to 12 points of
+   texture back at ISO 12800 and 51200 for 0 to 4 points of noise.
+2. Read noise at ISO 400 is shared between neighbouring photosites of one colour (0.08 to 0.10); the light's own
+   noise is not. The earlier "neighbours are independent" was measured on adjacent photosites (other colours).
+3. Auto on a guessed noise level is worse than no Auto, so it is only offered for a measured one.
+
+**To do on Bill's PC after this update:** restart the Studio, drop `calibration_local` on the Cameras page again
+(every frame is measured again for the new figures, about 8 minutes), press Deep calibration. Then open a
+high-ISO photo, turn Clean on, and press "Show what Clean removed".
 
 ## Session 14: drop-everything camera calibration (2026-11-18, chat session with Bill)
 

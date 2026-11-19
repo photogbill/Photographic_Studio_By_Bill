@@ -16,8 +16,9 @@ STAGE_VERSIONS = {
     "banding": 1,
     "lens_ca": 1,
     "defringe": 1,
-    "denoise": 3,                    # 2: the safeguard exists (version 1 sidecars render without it)
+    "denoise": 4,                    # 2: the safeguard exists (version 1 sidecars render without it)
     #                                  3: the detail guard exists (older sidecars render without it)
+    #                                  4: automatic strength and shadow-lift awareness exist (likewise)
     "white_balance": 1,
     "highlights": 1,
     "demosaic": 1,
@@ -85,6 +86,10 @@ class Denoise:
     luma: float = 1.0                # luminance strength (1 = matched to the measured noise)
     chroma: float = 1.5              # colour-noise strength
     grain: float = 0.0               # keep-grain: fraction of removed luminance noise put back
+    auto: bool = True                # strength chosen from the photo itself (raw/auto_strength.py); luma and
+                                     # chroma above are then not used. Off = the sliders decide.
+    lean: float = 1.0                # with auto: the photo's own choice times this (1 = as chosen)
+    lift: bool = True                # clean harder what the edit lifts out of the shadows
     guard: bool = True               # the detail guard (BUILD_PLAN_NOISE E): whatever Clean removed that is not
                                      # noise is given back, and nothing may be added that noise could not hide
     safeguard: bool = True           # "restore" step (23.12): a photosite the denoiser moved by more than 4.5x
@@ -236,6 +241,9 @@ class Edit:
                                      # the channels, mono raw, palette, hot spot; set in the Infrared tab
     use_optical_black: bool = True
     banding: bool = True             # row banding from the masked border, Wiener-gated (never adds bands)
+    calibrated: bool = True          # take out what this camera's calibration measured (raw/calibrated.py): hot
+                                     # and warm photosites that show, the fixed banding, the black offset. Does
+                                     # nothing for a camera with no profile.
     gamut_compress: bool = True      # smooth gamut compression before the tone curve (gamut.py)
     stage_versions: dict = field(default_factory=lambda: dict(STAGE_VERSIONS))
 
@@ -255,6 +263,11 @@ class Edit:
             dn.safeguard = False     # written before the safeguard existed: renders exactly as it did
         if "guard" not in dn_d and (d.get("stage_versions") or {}).get("denoise", 3) < 3:
             dn.guard = False         # written before the detail guard existed: renders exactly as it did
+        if (d.get("stage_versions") or {}).get("denoise", 4) < 4:
+            dn.auto = bool(dn_d.get("auto", False))     # written before these existed: renders exactly as it did
+            dn.lift = bool(dn_d.get("lift", False))
+        if "calibrated" not in d and "stage_versions" in d:
+            d["calibrated"] = False  # a sidecar written before the calibration was used: renders exactly as it did
         ln = LensFix(**{k: v for k, v in d.pop("lens", {}).items() if k in LensFix.__dataclass_fields__})
         ge = Geometry(**{k: v for k, v in (d.pop("geometry", None) or {}).items() if k in Geometry.__dataclass_fields__})
         sh = Sharpen(**{k: v for k, v in (d.pop("sharpen", None) or {}).items() if k in Sharpen.__dataclass_fields__})
@@ -280,11 +293,22 @@ class Edit:
     def from_json(cls, s: str) -> "Edit":
         return cls.from_dict(json.loads(s))
 
+    def shadow_lift(self) -> float:
+        """Roughly how many stops this edit lifts the shadows, to the nearest half (0 to 4): from exposure, the
+        Shadows and Blacks sliders, Smart lighting and Auto HDR. Clean uses it to clean the lifted parts harder."""
+        lift = max(float(self.exposure_ev), 0.0) + 2.0 * max(float(self.light.shadows), 0.0) / 100.0 \
+            + 2.0 * max(float(self.light.smart), 0.0) / 100.0 + max(float(self.light.blacks), 0.0) / 100.0 \
+            + (1.0 if self.hdr.enabled else 0.0)
+        return round(min(lift, 4.0) * 2.0) / 2.0
+
     def raw_key(self) -> str:
         """Cache key for everything up to and including the camera matrix (stages 1-11)."""
         d = self.to_dict()
         keep = {k: d[k] for k in ("white_balance", "highlight_mode", "demosaic", "green_eq", "use_optical_black", "denoise", "banding",
+                                          "calibrated",
                                           "lens", "sharpen", "profile")}
+        if self.denoise.enabled and self.denoise.lift:      # Clean follows the lift (in half-stop steps)
+            keep["lift"] = (self.shadow_lift(), round(float(self.exposure_ev) * 2.0) / 2.0)
         if d.get("film"):                          # a negative is turned positive in stages 1-12
             keep["film"] = d["film"]
             keep["film_v"] = d["stage_versions"].get("film", 1)

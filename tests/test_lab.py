@@ -143,6 +143,37 @@ def test_train_a_tiny_network_and_run_it_in_clean(camera_and_photos):
     assert "Hybrid used" in st2["learned"]                       # no model: says so, uses Hybrid
 
 
+def test_a_general_network_serves_cameras_without_their_own_and_starts_their_training(camera_and_photos, capsys):
+    """BUILD_PLAN_NOISE F.6: one network over every calibrated camera; a camera with none of its own uses it (and
+    Clean says so); a camera's own training starts from it and then takes its place."""
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("onnxruntime")
+    from studio.engine.raw import denoise as DN
+    from studio.engine.raw import learned as LN
+    from studio.lab import train as T
+    prof, folder = camera_and_photos
+    torch.manual_seed(0)
+    kw = dict(size="fast", hours=1.0, batch_size=4, patch=64, force_few=True, quiet=True)
+    path = T.train(folder, steps=30, eval_every=30, general=True, **kw)
+    card = LN.card(path)
+    assert card["general"] and card["cameras"] == ["Test Camera"] and LN.is_general(path)
+    LN._NETS.clear()
+    assert LN.find_model("Synthetic", "Another Camera") == path
+    assert LN.find_model("Synthetic", "Another Camera", general=False) is None
+    assert LN.status("Synthetic", "Another Camera")["general"]
+    src = S.NoiseSource(prof, D.find_bank("Synthetic", "Test Camera"))
+    noisy = src.add(S.mosaic_of(S.dead_leaves(96, 96, seed=2) * 0.5), 6400.0, np.random.default_rng(3))
+    st = {}
+    DN.denoise_mosaic(noisy, S.RGGB, src.model(6400.0),
+                      DN.DenoiseParams(method="learned", camera=("Synthetic", "Another Camera")), stats=st)
+    assert "general network" in st["learned"]
+    capsys.readouterr()
+    own = T.train(folder, steps=10, eval_every=10, **kw)          # this camera's own: a fine-tune of the general one
+    assert "Starting from general_fast.checkpoint.pt" in capsys.readouterr().out
+    assert LN.card(own)["started_from"] == "general_fast.checkpoint.pt" and not LN.is_general(own)
+    assert LN.find_model("Synthetic", "Test Camera") == own and not LN.status("Synthetic", "Test Camera")["general"]
+
+
 def test_training_refuses_too_few_photos_and_says_why(camera_and_photos, capsys):
     pytest.importorskip("torch")
     from studio.lab import train as T
@@ -196,6 +227,11 @@ def test_cameras_page_teaches_clean(camera_and_photos):
     assert page.train_model(prof, launch=lambda bat, args: started.append((bat, args))) is True
     assert started[0][0].endswith("Train Camera Model.bat") and started[0][1] == [folder, "--camera", "Test Camera"]
     assert "around 200 varied ones is the aim" in page.out.text()
+    assert page.train_model("general", launch=lambda bat, args: started.append((bat, args))) is True
+    assert started[1][1] == [folder, "--general"] and "the general network" in page.out.text()
+    assert "Best for" in page.cards[0].general_b.toolTip() and "Weak at" in page.cards[0].general_b.toolTip()
+    uses = " ".join(t for _, t in page.cards[0].uses)           # what Clean takes from the calibration, in words
+    assert "Banding: about" in uses and "Auto strength in Develop" in uses
     D._CACHE.clear()
     page.deep_calibration(prof, folder=os.path.join(os.path.dirname(folder), "cal"))
     wait(lambda: page.deep_last is not None and not page.busy)

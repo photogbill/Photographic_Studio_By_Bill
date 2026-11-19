@@ -147,7 +147,8 @@ def test_the_harness_scores_methods_on_real_noise(pile, tmp_path):
     D.deep_calibrate(files, workers=1)
     res = NB.run(prof, [800.0, 6400.0], quick=True, say=lambda *_: None)
     rows = res["rows"]
-    assert {r["method"] for r in rows} == {"hybrid", "starlet", "nlm", "starlet x2.5"} and len(rows) == 16
+    assert {r["method"] for r in rows} == {"hybrid", "starlet", "nlm", "starlet x2.5", "hybrid, auto strength",
+                                           "fusion, auto strength", "collab (BM3D class), auto"} and len(rows) == 28
     assert all(r["real_noise"] and 0 < r["noise_left"] < 1.2 and "texture_kept" in r and "blotches_left" in r
                for r in rows)
     for iso in (800.0, 6400.0):                               # the guard never loses texture; usually it gains
@@ -162,3 +163,33 @@ def test_the_harness_scores_methods_on_real_noise(pile, tmp_path):
             assert on["texture_kept"] > off["texture_kept"] + 0.02 and on["noise_left"] < off["noise_left"]
     text = NB.page(res)
     assert "Texture kept" in text and "data:image/png" in text and "detail guard" in text
+
+
+def test_the_harness_is_checked_against_real_flats_and_scores_photos_that_have_no_truth(pile):
+    """A.4: a harness flat has the noise of the camera's real flat pair; a wrong gain is caught. A.5: a real
+    photo, which has no truth, still gets an estimated error and strength for every method."""
+    import copy
+    import sys
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent / "tools"))
+    import noise_bench as NB
+    add, _, _ = pile
+    files = _camera(add)
+    prof = B.calibrate_drop(files, workers=1).built[0][0]
+    D.deep_calibrate(files, workers=1)
+    src = S.NoiseSource(prof, D.find_bank("Synthetic", "Test Camera"))
+    hon = NB.honesty(prof, src)
+    assert {r["iso"] for r in hon} == {800.0, 6400.0} and all(r["ok"] for r in hon), hon
+    wrong = copy.deepcopy(prof)
+    for e in wrong.isos:
+        e.gain_e_per_dn *= 2.0                                 # half the photon noise: the check must notice
+    bad = NB.honesty(wrong, S.NoiseSource(wrong, D.find_bank("Synthetic", "Test Camera")))
+    assert bad and not any(r["ok"] for r in bad)
+    photo = add("photo.cr2", iso=6400, rn=30.0, level_dn=3000, gain=0.057, seed=77)
+    import studio.engine.io.rawfile as R
+    from studio.engine.pipeline.pipeline import Image
+    said = []
+    rows = NB.real_photos([photo], methods=("starlet",), say=said.append, opener=lambda f: Image(R.open_raw(f)))
+    assert rows, said
+    assert rows[0]["kind"] == "strength" and 0.0 <= rows[0]["noise_left"] < 0.6 and rows[0]["luma"] >= 1.0
+    text = NB.page(dict(camera="Test Camera", made="now", rows=[], crops={}, honesty=hon, photos=rows))
+    assert "Is this benchmark honest?" in text and "2 of 2 do" in text and "photo.cr2" in text

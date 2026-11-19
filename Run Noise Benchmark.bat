@@ -12,6 +12,9 @@ rem    it removed was only noise.
 rem    Needs a Full profile (dark frames and flat pairs) and, for real noise,
 rem    Deep calibration on the camera's card in the Cameras page.
 rem    Add --quick for a few minutes instead of many.
+rem    Drag a folder of your own raws onto this file to score them too: they
+rem    have no known right answer, so their figures are estimates and say so.
+rem    The report also checks itself against your real flat frames.
 rem  The report opens in your browser; it stays on this PC (outputs\noisebench).
 rem ---------------------------------------------------------------------------
 cd /d "%~dp0"

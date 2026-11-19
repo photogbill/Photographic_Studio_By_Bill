@@ -31,8 +31,9 @@ from ..raw.linearize import clipped_stats
 
 log = slog.get("engine.calib")
 
-VERSION = 2                 # of what is measured: raise it and stored frames are measured again
-#                             (2: how far each hot pixel stands above black is kept, 2026-11-18)
+VERSION = 3                 # of what is measured: raise it and stored frames are measured again
+#                             (2: how far each hot pixel stands above black is kept; 3: the black level of the
+#                             masked border beside the picture is kept too, 2026-11-18)
 CROP = 256                  # side of the kept centre crop (photosites)
 HOT_SIGMA = 10.0            # a hot pixel stands this many read-noise sigmas above black
 HOT_CAP = 250_000           # more "hot pixels" than this in one frame is not a list worth keeping
@@ -57,6 +58,8 @@ class FrameStats:
     height: int = 0
     clip_dn: float = 0.0
     black: list | None = None           # 2x2, darks
+    ob_black: list | None = None        # 2x2, black of the masked (optical-black) border of the same frame, darks:
+                                        # what a photo's own black level is taken from; None = no usable border
     sigma: list | None = None           # 2x2 spatial noise of this one frame (row pattern removed), darks
     row_band: float | None = None
     col_band: float | None = None
@@ -140,6 +143,9 @@ def measure(img, key: str = "") -> FrameStats:
     sig = _per_position(d, lambda p: clipped_stats(p[::2, ::2])[1])
     s_all = float(np.sqrt(np.mean(sig ** 2))) or s0
     st.black = black.round(3).tolist()
+    from ..raw.linearize import measure_optical_black
+    ob = measure_optical_black(img)
+    st.ob_black = None if ob is None else np.asarray(ob[0], float).round(3).tolist()
     st.sigma = sig.round(3).tolist()
     st.row_band = round(math.sqrt(max(float(rows.var()) - s_all ** 2 / v.shape[1], 0.0)), 3)
     st.col_band = round(math.sqrt(max(float(cols.var()) - s_all ** 2 / v.shape[0], 0.0)), 3)

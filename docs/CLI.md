@@ -58,7 +58,7 @@ The recipe is the Studio's own Edit, as JSON, holding only what differs from the
 | Command | What it does |
 |---|---|
 | `edit` | Any picture + any settings: a finished file. `--dry-run` reports the settings and writes nothing. |
-| `clean` | Noise removal. `--strength 1` `--chroma` `--method` `--keep-grain`. Best on raws. |
+| `clean` | Noise removal. `--strength 1` `--chroma` `--method` (hybrid, fusion, starlet, nlm, mppca, collab, learned) `--keep-grain`. `--auto-strength`: each photo chooses its own strength, detail first (needs a calibrated camera; `--strength` then leans from that choice; a Dual Pixel photo is judged by its two halves). Best on raws. |
 | `relight` | Move the light using the picture's depth (estimated). `--azimuth --elevation --amount --soft`. |
 | `colourize` | Black and white to colour (a plausible guess). `--amount --warm --tint`. |
 | `restore` | Old photos and scans: `--scratches` `--stains` `--descreen` `--jpeg` `--colourize`. |

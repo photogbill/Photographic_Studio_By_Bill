@@ -7,7 +7,9 @@ rem    Needs, for that camera: a Full profile (dark frames and flat pairs droppe
 rem    on the Cameras page), its noise bank (Deep calibration on its card) and a
 rem    folder of about 200 varied clean photos (raws at ISO 400 or lower).
 rem    Start it from the camera's card in the Studio, or drag the folder of clean
-rem    photos onto this file.
+rem    photos onto this file. The card's "Train a general network" starts it for
+rem    every calibrated camera at once (one network, used by cameras with none of
+rem    their own, and the starting point of each camera's own training).
 rem  The first time it installs the training tools (PyTorch, ONNX Runtime) into
 rem  the lab_packages folder beside the Studio: about 2.5 GB to download. Nothing
 rem  goes outside this folder; delete lab_packages to remove them.

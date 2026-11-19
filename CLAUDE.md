@@ -9,11 +9,21 @@ Read these before changing anything in this folder:
 - `BUILD_PLAN_PLATE_GLOW_BURST_MACRO.md`: the next build (Bill, 2026-11-17): variable IR filter, then **card to
   finished stacks** (block F: mostly built in session 13b as Card to Stacks; F.8 says what is left), Best of burst,
   Macro planner, Plate Reader, Glow guard. Bill's real card for testing: `test_raws\DCIM\100CANON`.
-- `BUILD_PLAN_NOISE.md`: Clean rebuilt on the camera's own calibration (Bill, 2026-11-18). **Section 0.5 says what
-  is built** (deep calibration and the noise bank, truth with real noise and `tools/noise_bench.py`, the detail
-  guard, the learned denoiser's runtime and training kit in `studio/lab/`) and what is not (all of block C, SURE,
-  the BM3D baseline, and more). Bill's R5 pile (449 raws) is in `calibration_local\`. Optional packages for
-  training go in `lab_packages\` (never committed); nothing in the Studio may need them to start.
+- `BUILD_PLAN_NOISE.md`: Clean rebuilt on the camera's own calibration (Bill, 2026-11-18). **Sections 0.5 and 0.6
+  say what is built** (0.5: deep calibration and the noise bank, truth with real noise and `tools/noise_bench.py`,
+  the detail guard, the learned denoiser's runtime and training kit in `studio/lab/`; 0.6: the calibration used
+  inside Clean, Auto strength, the Dual Pixel referee, "What Clean removed", fusion, the BM3D-class method, a
+  general network) and what is not, with the reason (published networks as baselines, joint demosaic, more).
+  The user guide is `docs/CLEAN.md`: keep it true when Clean changes. Bill's R5 pile (449 raws) is in
+  `calibration_local\`. Optional packages for training go in `lab_packages\` (never committed); nothing in the
+  Studio may need them to start.
+- `BUILD_PLAN_PORTRAIT.md`: **the next build** (Bill, 2026-11-18, 20:00), to start once the noise work above is
+  committed: Portrait, second pass. One skin model (melanin, haemoglobin, shading, shine) for Redness, Pigment,
+  Freckles, Shine and white balance from skin; a light map for dodge and burn and automatic contouring; pitted
+  skin; mixed-light white balance; and the faults found in the audit (hair guard, faces across a shoot,
+  per-person settings). **Bill's priorities: the Shape track (face sliders, wide-angle faces, bodies found or
+  shown) and Glasses come first.** Sections 0.4 to 0.6 say what is decided, what Bill's portraits are for and
+  the patent facts; section M is the order.
 - `docs/PROGRESS.md`: where things stand. Keep it current.
 - `docs/CLI.md`: the Studio from the command line for other programs (the RPG Forge, Claude): `studio/cli_tools.py`,
   `studio-cli.bat`. A new tool gets its command there, with a test in `tests/test_cli_tools.py`. The MCP server

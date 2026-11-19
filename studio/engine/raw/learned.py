@@ -51,9 +51,44 @@ def model_dir(make: str, model: str) -> str:
     return d
 
 
-def find_model(make: str, model: str) -> str | None:
+def general_dir() -> str:
+    """Where a general network trained on this PC lives (private, like everything in calibration_local)."""
+    from ... import paths
+    d = os.path.join(str(paths.get("CALIBRATION_LOCAL")), "_general", "models")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def shared_dir() -> str:
+    """Where a general network that ships with the Studio would be (none does yet)."""
+    from ... import paths
+    return os.path.join(str(paths.APP_ROOT), "models", "clean")
+
+
+def find_general() -> str | None:
+    """The newest general network: one trained here first, else one that came with the Studio."""
+    for d in (general_dir(), shared_dir()):
+        files = sorted(glob.glob(os.path.join(d, "*.onnx")), key=os.path.getmtime)
+        if files:
+            return files[-1]
+    return None
+
+
+def is_general(path: str | None) -> bool:
+    if not path:
+        return False
+    d = os.path.normcase(os.path.abspath(os.path.dirname(path)))
+    return d in (os.path.normcase(os.path.abspath(general_dir())), os.path.normcase(os.path.abspath(shared_dir())))
+
+
+def find_model(make: str, model: str, general: bool = True) -> str | None:
+    """This camera's own newest network; with none, the general one (BUILD_PLAN_NOISE F.6). The network works on
+    planes whose noise the camera's profile has already brought to strength one, so a general network is valid on
+    any calibrated camera; it has only never seen this one's banding and fixed pattern."""
     files = sorted(glob.glob(os.path.join(model_dir(make, model), "*.onnx")), key=os.path.getmtime)
-    return files[-1] if files else None
+    if files:
+        return files[-1]
+    return find_general() if general else None
 
 
 def card(path: str) -> dict:
@@ -67,6 +102,7 @@ class Net:
     def __init__(self, path: str, session):
         self.path, self.session = path, session
         self.name = os.path.splitext(os.path.basename(path))[0]
+        self.general = is_general(path)
         self.input = session.get_inputs()[0].name
         self.providers = session.get_providers()
 
@@ -144,4 +180,4 @@ def status(make: str, model: str) -> dict:
     path = find_model(make, model)
     ort = runtime()
     return dict(runtime=ort is not None, providers=ort.get_available_providers() if ort else [],
-                model=path, card=card(path) if path else {})
+                model=path, card=card(path) if path else {}, general=is_general(path))

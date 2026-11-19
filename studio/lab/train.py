@@ -1,6 +1,11 @@
 """Train a camera's own denoising network (BUILD_PLAN_NOISE F.4). Run by "Train Camera Model.bat".
 
     python -m studio.lab.train --clean FOLDER [--camera "Canon EOS R5"] [--size balanced] [--hours 8]
+    python -m studio.lab.train --clean FOLDER --general        (F.6: one network for every calibrated camera)
+
+A camera's training starts from the general network when there is one of the same size (a fine-tune: it has
+already learned what photographs look like and only has to learn this camera's noise), or from any checkpoint
+given with --start-from.
 
 Needs: that camera's Full profile (dark frames and flat pairs, Cameras page), its noise bank (Deep calibration,
 made here if missing and the raws are still where they were), clean photos (see studio.lab.PHOTOS_WHY), PyTorch.
@@ -74,13 +79,27 @@ def ready(prof: CameraProfile) -> S.NoiseSource:
     return S.NoiseSource(prof, bank)
 
 
+def general_sources() -> tuple:
+    """(noise sources, camera names, what was left out and why) over every camera calibrated on this PC."""
+    sources, names, skipped = [], [], []
+    for p in local_profiles():
+        try:
+            sources.append(ready(p))
+            names.append(p.model)
+        except SystemExit as e:
+            skipped.append(str(e))
+    return sources, names, skipped
+
+
 def evaluate(net, torch, device, clean_set, source, seed: int = 1234, batches: int = 6, size: int = 256) -> dict:
+    """``source``: one camera's noise, or a list of them (a general model is scored on all of them in turn)."""
+    sources = list(source) if isinstance(source, (list, tuple)) else [source]
     rng = np.random.default_rng(seed)                         # the same held-out patches every time
     err, err_in, kept = [], [], []
     net.eval()
     with torch.no_grad():
-        for _ in range(batches):
-            x, t = data.batch(clean_set, source, rng, n=8, size=size, held_out=True)
+        for k in range(max(batches, len(sources))):
+            x, t = data.batch(clean_set, sources[k % len(sources)], rng, n=8, size=size, held_out=True)
             y = net(torch.from_numpy(x).to(device)).float().cpu().numpy()
             err.append(float(np.mean((y - t) ** 2))), err_in.append(float(np.mean((x - t) ** 2)))
             kept.append(data.texture_kept(y, x, t))
@@ -91,8 +110,11 @@ def evaluate(net, torch, device, clean_set, source, seed: int = 1234, batches: i
 
 def train(clean_folder: str, camera: str | None = None, size: str = "balanced", hours: float = 8.0,
           steps: int | None = None, batch_size: int = 16, patch: int = 256, eval_every: int = 500,
-          patience: int = 12, force_few: bool = False, quiet: bool = False) -> str:
-    """Returns the path of the exported model."""
+          patience: int = 12, force_few: bool = False, quiet: bool = False, general: bool = False,
+          start_from: str | None = None) -> str:
+    """Returns the path of the exported model. ``general``: one network over every calibrated camera's noise,
+    kept in calibration_local/_general/models and used for any camera that has no network of its own.
+    ``start_from``: a checkpoint (.pt) to start this training from instead of from nothing."""
     LN._add_lab_packages()
     try:
         import torch
@@ -100,10 +122,24 @@ def train(clean_folder: str, camera: str | None = None, size: str = "balanced", 
         raise SystemExit("PyTorch is not installed. Run 'Train Camera Model.bat': it installs it beside the "
                          "Studio (lab_packages) the first time.") from e
     from .model import CameraNet, export_onnx
-    prof = pick_profile(camera)
-    source = ready(prof)
-    say(f"Camera: {prof.model}. ISO settings with gain and real noise: "
-        f"{sum(1 for i in source.isos() if source.has_real_noise(i))} of {len(source.isos())}.")
+    if general:
+        sources, names, skipped = general_sources()
+        for why in skipped:
+            say("Left out: " + why)
+        if not sources:
+            raise SystemExit("No camera on this PC is ready (each needs a Full profile and its noise bank: "
+                             "Cameras page, flat pairs, then Deep calibration).")
+        say(f"General network over {len(sources)} camera{'s' if len(sources) != 1 else ''}: {', '.join(names)}.")
+        if len(sources) < 3:
+            say("Note: a general network is only as general as the cameras it saw. With fewer than three it is "
+                "mostly a copy of those cameras' own; it still gives an uncalibrated-for-training camera a start.")
+        prof, source, model_name, make = None, sources[0], "general", ""
+    else:
+        prof = pick_profile(camera)
+        source = ready(prof)
+        sources, names, model_name, make = [source], [prof.model], prof.model, prof.make
+        say(f"Camera: {prof.model}. ISO settings with gain and real noise: "
+            f"{sum(1 for i in source.isos() if source.has_real_noise(i))} of {len(source.isos())}.")
     # ---- clean photos
     sv = data.survey(clean_folder, progress=None if quiet else lambda a, b: print(f"\r  looking at photos {a}/{b}",
                                                                                  end="", flush=True))
@@ -141,16 +177,29 @@ def train(clean_folder: str, camera: str | None = None, size: str = "balanced", 
         say("No NVIDIA graphics card found by PyTorch: training on the processor works but is very slow.")
     net = CameraNet(size).to(device)
     opt = torch.optim.AdamW(net.parameters(), lr=3e-4, weight_decay=1e-4)
-    slug = "".join(ch if ch.isalnum() else "_" for ch in prof.model).strip("_")
-    out_dir = LN.model_dir(prof.make, prof.model)
+    slug = "".join(ch if ch.isalnum() else "_" for ch in model_name).strip("_")
+    out_dir = LN.general_dir() if general else LN.model_dir(make, model_name)
     ckpt = os.path.join(out_dir, f"{slug}_{size}.checkpoint.pt")
     onnx_path = os.path.join(out_dir, f"{slug}_{size}.onnx")
-    step, best, since_best, history = 0, None, 0, []
+    step, best, since_best, history, started = 0, None, 0, [], ""
     if os.path.isfile(ckpt):
         st = torch.load(ckpt, map_location=device)
         net.load_state_dict(st["net"]), opt.load_state_dict(st["opt"])
-        step, best, history = st["step"], st.get("best"), st.get("history", [])
+        step, best, history, started = st["step"], st.get("best"), st.get("history", []), st.get("started", "")
         say(f"Carrying on from step {step} (stopped earlier).")
+    else:
+        base = start_from or (None if general else os.path.join(LN.general_dir(), f"general_{size}.checkpoint.pt"))
+        if base and os.path.isfile(base):
+            try:
+                net.load_state_dict(torch.load(base, map_location=device)["net"])
+                started = os.path.basename(base)
+                say(f"Starting from {started}: the network already knows what photographs look like, so this is "
+                    f"a fine-tune to {model_name}'s noise and needs far fewer steps than starting from nothing.")
+            except Exception as e:                            # noqa: BLE001  (another size, an old file)
+                slog.log_exception(f"could not start from {base}", log)
+                say(f"Could not start from {os.path.basename(base)} ({e}); starting from nothing.")
+        elif start_from:
+            say(f"The checkpoint to start from was not found ({start_from}); starting from nothing.")
     total = steps or 10 ** 9
     t_end = time.time() + hours * 3600.0
     rng = np.random.default_rng(step + 17)
@@ -161,14 +210,21 @@ def train(clean_folder: str, camera: str | None = None, size: str = "balanced", 
         return v - torch.nn.functional.avg_pool2d(torch.nn.functional.pad(v, (1, 1, 1, 1), mode="reflect"), 3, 1)
 
     def save(final: bool = False):
-        torch.save(dict(net=net.state_dict(), opt=opt.state_dict(), step=step, best=best, history=history), ckpt)
+        torch.save(dict(net=net.state_dict(), opt=opt.state_dict(), step=step, best=best, history=history,
+                        started=started), ckpt)
+
+    def card(**more):
+        data.write_card(onnx_path, camera=model_name, make=make, size=size, step=step, studio=__version__,
+                        made=_dt.datetime.now().strftime("%Y-%m-%d %H:%M"), clean_photos=len(clean_set),
+                        held_out=len(clean_set.hold), clean_verdict=verdict, isos=source.isos(),
+                        general=bool(general), cameras=names, started_from=started, **more)
 
     say(f"Training the '{size}' network on {device}. It stops by itself after {hours:g} hours, or sooner when the "
         f"held-back score stops improving. Ctrl+C stops it now; what it learned so far is kept.")
     t0, shown = time.time(), time.time()
     try:
         while step < total and time.time() < t_end:
-            x, t = data.batch(clean_set, source, rng, n=batch_size, size=patch)
+            x, t = data.batch(clean_set, sources[int(rng.integers(len(sources)))], rng, n=batch_size, size=patch)
             x, t = torch.from_numpy(x).to(device), torch.from_numpy(t).to(device)
             with torch.autocast(device_type=device, enabled=use_amp):
                 y = net(x)
@@ -187,7 +243,7 @@ def train(clean_folder: str, camera: str | None = None, size: str = "balanced", 
                 print(f"\r  step {step}  loss {float(loss):.4f}  {step / max(time.time() - t0, 1e-6):.1f} steps/s   ",
                       end="", flush=True)
             if step % eval_every == 0 or step == total:
-                ev = evaluate(net, torch, device, clean_set, source, size=patch)
+                ev = evaluate(net, torch, device, clean_set, sources, size=patch)
                 history.append(dict(step=step, **ev))
                 score = ev["noise_left"] + 0.5 * max(0.0, 1.0 - ev["texture_kept"])
                 better = best is None or score < best - 1e-4
@@ -198,10 +254,7 @@ def train(clean_folder: str, camera: str | None = None, size: str = "balanced", 
                     best, since_best = score, 0
                     export_onnx(net, onnx_path)
                     net.to(device)
-                    data.write_card(onnx_path, camera=prof.model, make=prof.make, size=size, step=step,
-                                    made=_dt.datetime.now().strftime("%Y-%m-%d %H:%M"), studio=__version__,
-                                    clean_photos=len(clean_set), held_out=len(clean_set.hold),
-                                    clean_verdict=verdict, isos=source.isos(), history=history[-20:], **ev)
+                    card(history=history[-20:], **ev)
                 else:
                     since_best += 1
                 save()
@@ -214,12 +267,13 @@ def train(clean_folder: str, camera: str | None = None, size: str = "balanced", 
     save(final=True)
     if not os.path.isfile(onnx_path):                         # stopped before the first score: export what there is
         export_onnx(net, onnx_path)
-        data.write_card(onnx_path, camera=prof.model, make=prof.make, size=size, step=step, studio=__version__,
-                        clean_photos=len(clean_set), held_out=len(clean_set.hold), clean_verdict=verdict,
-                        made=_dt.datetime.now().strftime("%Y-%m-%d %H:%M"), isos=source.isos(), history=history,
-                        note="stopped before its first score: not a finished model")
+        card(history=history, note="stopped before its first score: not a finished model")
     say(f"Model: {onnx_path}")
-    say("In the Studio: Develop > Clean > method 'learned'. It is always followed by the detail guard.")
+    if general:
+        say("In the Studio: Develop > Clean > method 'learned' now works for every calibrated camera that has no "
+            "network of its own, and each camera's own training starts from this one.")
+    else:
+        say("In the Studio: Develop > Clean > method 'learned'. It is always followed by the detail guard.")
     return onnx_path
 
 
@@ -232,6 +286,9 @@ def main(argv=None) -> int:
     ap.add_argument("--steps", type=int)
     ap.add_argument("--batch", type=int, default=16)
     ap.add_argument("--force-few", action="store_true", help="train even with fewer than the minimum of photos")
+    ap.add_argument("--general", action="store_true",
+                    help="one network over every calibrated camera's noise, used for cameras with none of their own")
+    ap.add_argument("--start-from", help="a checkpoint (.pt) to start from (default: the general network's)")
     a = ap.parse_args(argv)
     slog.setup(console_level=None, filename="lab_train.log")
     clean = a.clean
@@ -247,7 +304,8 @@ def main(argv=None) -> int:
         say("What is needed: " + PHOTOS_WHY)
         return 2
     try:
-        train(clean, a.camera, a.size, a.hours, a.steps, a.batch, force_few=a.force_few)
+        train(clean, a.camera, a.size, a.hours, a.steps, a.batch, force_few=a.force_few, general=a.general,
+              start_from=a.start_from)
     except SystemExit as e:
         if e.code and not isinstance(e.code, int):
             say(str(e.code))

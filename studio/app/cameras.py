@@ -240,7 +240,12 @@ def teach_status(prof, clean: dict | None = None) -> list:
     else:
         out.append((T.DIM, f"Clean photos: none chosen yet. Around {lab.PHOTOS_WANTED} varied ones is the aim"))
     st = LN.status(prof.make, prof.model)
-    if st["model"]:
+    if st["model"] and st.get("general"):
+        c = st["card"]
+        out.append((T.VIOLET, f"No network of its own yet: the general network is used (trained "
+                              f"{c.get('made', '')} on the noise of {len(c.get('cameras') or [])} camera(s)). This "
+                              f"camera's own training starts from it and needs far fewer steps."))
+    elif st["model"]:
         c = st["card"]
         score = (f": noise left {100 * c['noise_left']:.0f}%, texture kept {100 * c['texture_kept']:.0f}% on "
                  f"photos it never saw" if "noise_left" in c else "")
@@ -250,6 +255,92 @@ def teach_status(prof, clean: dict | None = None) -> list:
                                                "Model.bat installs it")))
     else:
         out.append((T.DIM, "No network trained for this camera yet"))
+    return out
+
+
+def _iso_list(isos: list, most: int = 6) -> str:
+    isos = sorted(isos)
+    txt = ", ".join(f"{i:g}" for i in isos[:most])
+    return txt + (f" and {len(isos) - most} more" if len(isos) > most else "")
+
+
+def clean_uses(prof, bank=None) -> list:
+    """What Develop > Clean takes from this camera's calibration, in plain words, and what it leaves alone and
+    why. [(colour, text)]: cyan = measured here and used, amber = measured but waiting on something, dim = looked
+    at and deliberately not used."""
+    out = []
+    isos = list(prof.isos)
+    hot = max((e.hot_pixels for e in isos), default=0)
+    warm = max((e.warm_pixels for e in isos), default=0)
+    if hot or warm:
+        out.append((T.CYAN, f"Hot and warm photosites are healed from this camera's own map before Clean looks at "
+                            f"a photo: the {hot:,} hot ones always, a warm one only where it really shows in that "
+                            f"photo (most are hidden under the photo's own noise, and are left alone)."))
+    off = [float(np.max(np.abs(e.black_offset_dn))) for e in isos if e.black_offset_dn]
+    if off and max(off) >= 0.05:
+        out.append((T.CYAN, f"Black level: the picture area sits up to {max(off):.2f} raw levels away from the "
+                            f"masked border a photo takes its black from. That is corrected per colour, which "
+                            f"keeps deep shadows from taking a faint colour cast."))
+    info = (bank.meta.get("fixed") or {}) if bank is not None else {}
+    share = [v["fixed_rows_dn"] ** 2 / max(v["one_frame_rows_dn"] ** 2, 1e-9) for v in info.values()
+             if v.get("one_frame_rows_dn")]
+    if share:
+        out.append((T.CYAN, f"Banding: about {100 * float(np.median(share)):.0f}% of the row banding is the same "
+                            f"in every photo (measured at {_isos(len(share))}) and is subtracted exactly. The rest "
+                            f"changes from photo to photo and is measured in each photo's own masked border."))
+        per = {iso: v["periodic"] for iso, v in info.items() if v.get("periodic")}
+        if per:
+            iso, lines = max(per.items(), key=lambda kv: kv[1][0]["times_background"])
+            out.append((T.AMBER, f"A repeating pattern was found in the banding (strongest at ISO {iso}: every "
+                                 f"{lines[0]['period_rows']:g} rows, {lines[0]['amplitude_dn']:.2f} raw levels). "
+                                 f"It is recorded; it is not removed separately yet."))
+        else:
+            out.append((T.DIM, "No repeating (periodic) pattern was found in the banding: it is random from row "
+                               "to row, so there is nothing to notch out."))
+    elif bank is None:
+        out.append((T.AMBER, "Fixed banding: not measured yet. Deep calibration (below) measures the part of the "
+                             "banding that is the same in every photo, so it can be subtracted exactly."))
+    # a master dark frame: worth it only when there are enough frames
+    fp = [(e.iso, e.fixed_pattern_dn / max(float(np.mean(e.read_noise_dn)), 1e-9), e.frames) for e in isos
+          if e.fixed_pattern_dn and e.read_noise_dn is not None]
+    if fp:
+        ratio = float(np.median([r for _, r, _ in fp]))
+        need = int(np.ceil(1.0 / max(ratio * ratio, 1e-6)))
+        have = int(np.median([n for _, _, n in fp]))
+        if have > need:
+            txt = (f"Each photosite's own fixed offset is about {100 * ratio:.0f}% of the random noise. With "
+                   f"{have} dark frames per ISO a master dark frame would help a little; it is not built yet.")
+        else:
+            txt = (f"Master dark frame: looked at and not used. Each photosite's own fixed offset is only about "
+                   f"{100 * ratio:.0f}% of the random noise here, so subtracting an average dark frame would ADD "
+                   f"noise unless it were made from more than {need} frames per ISO (you have about {have}). The "
+                   f"hot and warm map does the part that matters.")
+        out.append((T.DIM, txt))
+    pushed = [e.iso for e in isos if getattr(e, "pushed", False)]
+    if pushed:
+        out.append((T.AMBER, f"ISO {_iso_list(pushed)}: pushed settings. The camera multiplies the numbers of a "
+                             f"lower ISO, so nothing is gained over that ISO brightened afterwards, and a stop of "
+                             f"highlights is lost for each doubling. Develop says so when you open such a photo."))
+    from ..engine.raw.auto_strength import MAX_NEIGHBOUR, MIN_NEIGHBOUR
+    some = [e for e in isos if e.neighbour_corr is not None and MIN_NEIGHBOUR <= e.neighbour_corr <= MAX_NEIGHBOUR]
+    much = [e.iso for e in isos if e.neighbour_corr is not None and e.neighbour_corr > MAX_NEIGHBOUR]
+    if some:
+        top = max(some, key=lambda e: e.neighbour_corr)
+        out.append((T.CYAN, f"ISO {_iso_list([e.iso for e in some])}: the noise the camera itself adds (what a "
+                            f"lens-cap frame shows) is shared a little between neighbouring photosites of one "
+                            f"colour here (most at ISO {top.iso:g}: {100 * top.neighbour_corr:.0f}%). Clean's "
+                            f"Auto strength is told the measured figure and allows for it, in proportion to how "
+                            f"much of a photo's noise is the camera's own rather than the light's."))
+    if much:
+        out.append((T.AMBER, f"ISO {_iso_list(much)}: the camera's own noise is shared heavily between "
+                             f"neighbouring photosites here. In a very dark photo at these settings Clean's Auto "
+                             f"strength cannot be trusted and says so (your sliders are used); a Dual Pixel photo "
+                             f"is still judged by its two halves."))
+    gain = sum(1 for e in isos if e.gain_e_per_dn)
+    out.append((T.CYAN, f"Auto strength in Develop > Clean works for this camera at {_isos(gain)}: the noise is "
+                        f"measured, so each photo can choose how hard to be cleaned.") if gain else
+               (T.AMBER, "Auto strength in Develop > Clean needs the gain: shoot flat pairs (card 3 at the top). "
+                         "Until then your sliders decide."))
     return out
 
 
@@ -289,8 +380,9 @@ class CameraCard(QFrame):
         hot = max((e.hot_pixels for e in prof.isos), default=0)
         warm = max((e.warm_pixels for e in prof.isos), default=0)
         if hot or warm:
-            hot_txt = (f"{hot:,} hot pixels (a bright dot in any photo) and up to {warm:,} warm ones (they only "
-                       f"stand out of the noise at some ISOs) found; their map stays on this PC.")
+            hot_txt = (f"{hot:,} hot pixels (a bright dot in any photo: at least 100 electrons with no light) and up "
+                       f"to {warm:,} warm ones (they only stand out of the noise at some ISOs) found; their map "
+                       f"stays on this PC.")
         else:
             hot_txt = "No hot pixels found in the short frames."
         self.summary = label(f"{q.get('dark_frames', 0)} dark frames and {q.get('flat_frames', 0)} flat frames "
@@ -324,7 +416,30 @@ class CameraCard(QFrame):
                 v.addWidget(label(f"<span style='color:{T.AMBER}'>●</span> {a}", None, wrap=True))
         else:
             v.addWidget(label(f"<span style='color:{T.GREEN}'>●</span> Nothing is missing.", None))
+        self._uses(v)
         self._teach(v, clean)
+
+    def _uses(self, v):
+        """What Clean takes from this calibration: every item says what it is and why it is or is not used."""
+        from ..engine.calib import deep as D
+        v.addSpacing(12)
+        line = QFrame()
+        line.setFixedHeight(1)
+        line.setStyleSheet(f"background:{T.LINE};")
+        v.addWidget(line)
+        v.addSpacing(8)
+        head = QHBoxLayout()
+        head.addWidget(label("What Clean takes from this calibration", "h2"))
+        head.addSpacing(8)
+        head.addWidget(chip("measured on this body", T.CYAN))
+        head.addStretch(1)
+        v.addLayout(head)
+        v.addWidget(label("Noise is random; these things are not. They are the same in every photo this camera "
+                          "takes, so they are taken out exactly, before any noise reduction has to guess at them. "
+                          "In Develop: Clean > Use this camera's calibration.", "dim", wrap=True))
+        self.uses = clean_uses(self.prof, D.find_bank(self.prof.make, self.prof.model))
+        for colour, text in self.uses:
+            v.addWidget(label(f"<span style='color:{colour}'>●</span> {text}", None, wrap=True))
 
     def _teach(self, v, clean):
         """Clean, taught by this camera: the noise bank, the clean photos (how many, and why), the training."""
@@ -369,7 +484,15 @@ class CameraCard(QFrame):
                                 "installs the training tools beside the Studio (about 2.5 GB). It can be stopped "
                                 "and started again.")
         self.train_b.clicked.connect(lambda: self.train.emit(self.prof))
-        for b in (self.deep_b, self.clean_b, self.train_b):
+        self.general_b = QPushButton("Train a general network")
+        self.general_b.setToolTip("One network trained on the noise of every camera calibrated on this PC. Any "
+                                  "calibrated camera that has no network of its own then uses it, and each "
+                                  "camera's own training starts from it instead of from nothing.\n\nBest for: "
+                                  "several cameras, or a first network before a camera's own. Weak at: it is only "
+                                  "as general as the cameras it saw; a camera's own network knows its banding and "
+                                  "fixed pattern better.")
+        self.general_b.clicked.connect(lambda: self.train.emit("general"))
+        for b in (self.deep_b, self.clean_b, self.train_b, self.general_b):
             row.addWidget(b)
         row.addStretch(1)
         v.addLayout(row)
@@ -758,9 +881,12 @@ class CamerasPage(QWidget):
                 fixed = (f" About {100 * float(np.median(share)):.0f}% of the row banding is the same in every "
                          f"photo and can be subtracted exactly." if share else "")
                 lines.append(f"<span style='color:{T.CYAN}'>●</span> <b>{r['model']}:</b> noise bank built, "
-                             f"{r['patches']:,} patches of real dark frame in {len(r['groups'])} groups.{fixed}")
+                             f"{r['patches']:,} patches of real dark frame in {len(r['groups'])} groups.{fixed} "
+                             f"The camera's card below now lists everything Clean takes from this calibration, "
+                             f"and what it leaves alone and why.")
             self.out.setText("<br>".join(lines))
-            self.status.emit("Noise bank built. The benchmark and the training now use this camera's real noise.")
+            self.status.emit("Noise bank built. Clean, the benchmark and the training now use this camera's real "
+                             "noise.")
         self.refresh()
         self._next()
 
@@ -789,9 +915,11 @@ class CamerasPage(QWidget):
             self.refresh()
 
     def train_model(self, prof, launch=None):
-        """Start the training window (Train Camera Model.bat) for this camera, or say what is missing first."""
+        """Start the training window (Train Camera Model.bat) for this camera, or for the general network over
+        every calibrated camera (``prof == "general"``), or say what is missing first."""
         from .. import lab
-        missing = [t for c, t in teach_status(prof, self.clean_info)[:2] if c == T.AMBER]
+        general = isinstance(prof, str) and prof == "general"
+        missing = [] if general else [t for c, t in teach_status(prof, self.clean_info)[:2] if c == T.AMBER]
         folder = self.settings.get("lab_clean_folder")
         n = int((self.clean_info or {}).get("usable", 0))
         if not folder or not self.clean_info:
@@ -807,7 +935,8 @@ class CamerasPage(QWidget):
             note = (f"<span style='color:{T.AMBER}'>●</span> {lab.photos_verdict(n)[1]} Training starts anyway; "
                     f"add photos and train again for a better network.<br>")
         bat = paths.APP_ROOT / "Train Camera Model.bat"
-        args = [folder, "--camera", prof.model]
+        args = [folder, "--general"] if general else [folder, "--camera", prof.model]
+        name = "the general network" if general else f"the {prof.model}'s network"
         try:
             if launch is not None:
                 launch(str(bat), args)
@@ -817,14 +946,15 @@ class CamerasPage(QWidget):
                                  cwd=str(paths.APP_ROOT))
             else:
                 self.out.setText(note + "Training runs from a console here: <code>python -m studio.lab.train --clean "
-                                 f"\"{folder}\" --camera \"{prof.model}\"</code> (it needs PyTorch).")
+                                 f"\"{folder}\" " + ("--general" if general else f"--camera \"{prof.model}\"")
+                                 + "</code> (it needs PyTorch).")
                 return False
         except OSError as e:
             report_problem("Starting the training window", e)
             self.out.setText(f"<span style='color:{T.RED}'>●</span> The training window could not be started: {e}")
             return False
-        log.info("training started for %s on %s (%d clean photos)", prof.model, folder, n)
-        self.out.setText(note + f"<span style='color:{T.CYAN}'>●</span> Training the {prof.model}'s network has "
+        log.info("training started for %s on %s (%d clean photos)", name, folder, n)
+        self.out.setText(note + f"<span style='color:{T.CYAN}'>●</span> Training {name} has "
                          f"started in its own window. Leave it overnight; it stops by itself and can be stopped "
                          f"and started again. When it is done, choose the method 'learned' in Develop &gt; Clean.")
         return True

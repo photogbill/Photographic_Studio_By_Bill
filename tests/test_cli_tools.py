@@ -212,3 +212,21 @@ def test_infrared_says_plainly_that_it_needs_a_raw(tmp_path, capsys):
     src = _picture(tmp_path / "a.png")
     code, res = _run(["infrared", src, "--out", tmp_path / "i"], capsys)
     assert code == 1 and "raw" in res["problems"][0]["text"] and "error_report" not in res["problems"][0]
+
+
+def test_clean_auto_and_the_new_methods_from_the_command_line(tmp_path, capsys):
+    """`clean --auto-strength`: the photo chooses and --strength leans from its choice; without it the strengths
+    given decide, as before. The schema lists every method Develop offers."""
+    import argparse
+    ns = dict(strength=1.2, chroma=None, keep_grain=0.0, method=None)
+    d0 = cli_tools._p_clean(argparse.Namespace(auto_strength=False, **ns))["denoise"]
+    d1 = cli_tools._p_clean(argparse.Namespace(auto_strength=True, **dict(ns, method="fusion")))["denoise"]
+    assert d0["auto"] is False and d0["luma"] == pytest.approx(1.2) and "lean" not in d0
+    assert d1["auto"] is True and d1["lean"] == pytest.approx(1.2) and d1["method"] == "fusion"
+    src = _picture(tmp_path / "n.png")
+    code, res = _run(["clean", src, "--out", tmp_path / "o", "--strength", "1.2", "--auto-strength", "--method",
+                      "fusion", "--scale", "0.5"], capsys)
+    assert code == 0 and os.path.basename(res["outputs"][0]["output"]).endswith("_Studio.png")
+    code3, sch = _run(["schema"], capsys)
+    from studio.engine.raw.denoise import METHOD_INFO
+    assert code3 == 0 and set(sch["data"]["choices"]["denoise.method"]) == set(METHOD_INFO)

@@ -165,9 +165,9 @@ def _pairs_noise(frames: list) -> np.ndarray | None:
     return np.median(est, axis=0) if est else None
 
 
-HOT_FRACTION = 0.01         # a HOT pixel stands at least this much of the sensor's range above black with no
-#                             light: a bright dot in any photo. Below that it is WARM: it stands out of the
-#                             noise at this ISO (and is healed), but only shows when shadows are lifted.
+# A HOT photosite collects at least profile.HOT_ELECTRONS with no light: a bright dot in any photo. Below that it
+# is WARM: it stands out of the noise at some ISOs (and is healed where it shows), but only shows when shadows are
+# lifted. Counted in electrons, so the same photosites are hot at every ISO.
 
 
 def _persistent_hot(frames: list) -> np.ndarray | None:
@@ -181,25 +181,91 @@ def _persistent_hot(frames: list) -> np.ndarray | None:
     return idx[n >= max(2, math.ceil(0.7 * len(lists)))]
 
 
-def _hot_and_warm(frames: list, keep: np.ndarray, black: float) -> tuple[int, int]:
-    """Of the persistent photosites ``keep``: how many are hot (HOT_FRACTION of the range above black, median
-    over the frames) and how many only warm. Frames measured before the excess was kept count all as warm."""
-    if keep is None or keep.size == 0:
-        return 0, 0
+def _defect_levels(frames: list, keep: np.ndarray) -> np.ndarray | None:
+    """How far each persistent photosite stands above black (DN, median over the frames it shows in)."""
     fr = [f for f in frames if f.hot is not None and f.hot_dn is not None]
-    if not fr:
-        return 0, int(keep.size)
+    if keep is None or keep.size == 0 or not fr:
+        return None
     rows = []
     for f in fr:
         h = np.asarray(f.hot, np.int64)
-        pos = np.clip(np.searchsorted(h, keep), 0, max(h.size - 1, 0))
-        found = h.size > 0 and h[pos] == keep
-        vals = np.where(found, np.asarray(f.hot_dn, np.float64)[pos] if h.size else 0.0, np.nan)
+        vals = np.full(keep.size, np.nan)
+        if h.size:                                            # (a frame with no outliers at all has none of them)
+            pos = np.clip(np.searchsorted(h, keep), 0, h.size - 1)
+            found = h[pos] == keep
+            vals[found] = np.asarray(f.hot_dn, np.float64)[pos[found]]
         rows.append(vals)
-    med = np.nanmedian(np.stack(rows), axis=0)
-    limit = HOT_FRACTION * max(float(np.median([f.clip_dn for f in fr])) - black, 1.0)
-    hot = int(np.sum(med >= limit))
+    with np.errstate(all="ignore"):
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            return np.nanmedian(np.stack(rows), axis=0)
+
+
+def _hot_and_warm(frames: list, keep: np.ndarray, black: float, gain: float | None = None) -> tuple[int, int]:
+    """Of the persistent photosites ``keep``: how many are hot and how many only warm. Hot: at least
+    HOT_ELECTRONS collected with no light (profile.hot_limit_dn; with no gain known, HOT_FRACTION of the range),
+    median over the frames. Frames measured before the excess was kept count all as warm."""
+    from .profile import hot_limit_dn
+    if keep is None or keep.size == 0:
+        return 0, 0
+    med = _defect_levels(frames, keep)
+    if med is None:
+        return 0, int(keep.size)
+    fr = [f for f in frames if f.hot is not None and f.hot_dn is not None]
+    limit = hot_limit_dn(max(float(np.median([f.clip_dn for f in fr])) - black, 1.0), gain)
+    hot = int(np.sum(np.nan_to_num(med) >= limit))
     return hot, int(keep.size) - hot
+
+
+def _crop_numbers(short: list, rn: np.ndarray) -> dict:
+    """What the frames' centre crops say beyond read noise: the per-photosite fixed pattern (the mean of n frames
+    still holds 1/n of the random noise: that is taken out of the estimate), how much neighbouring photosites
+    agree, the tails, and whether the camera stretches the values digitally (a comb in the histogram)."""
+    fr = [f for f in _order(short) if f.crop is not None]
+    fr = [f for f in fr if f.crop.shape == fr[0].crop.shape]
+    out = {}
+    if not fr:
+        return out
+    s = max(_rms(rn), 1e-6)
+    P = np.stack([f.crop[0::2, 0::2].astype(np.float64) for f in fr])
+    n = P.shape[0]
+    if n >= 3:
+        mean = P.mean(0)
+        mean = mean - np.median(mean, axis=1, keepdims=True) - np.median(mean, axis=0, keepdims=True) + np.median(mean)
+        keep = np.abs(mean) < 6.0 * max(float(mean.std()), 1e-9)
+        out["fixed_pattern_dn"] = round(math.sqrt(max(float(mean[keep].var()) - s * s / n, 0.0)), 4)
+    if n >= 2:
+        # how much the noise of neighbouring photosites OF ONE COLOUR agrees (they are neighbours in the planes
+        # Clean works in): from the difference of two frames, so nothing fixed is in it; rows and columns taken
+        # out as Clean gets them; all four colours and up to four pairs, for a figure good to a few thousandths
+        cc, first = [], None
+        for k in range(min(n - 1, 4)):
+            for i in (0, 1):
+                for j in (0, 1):
+                    d = fr[k].crop[i::2, j::2].astype(np.float64) - fr[k + 1].crop[i::2, j::2].astype(np.float64)
+                    d = d - np.median(d, axis=1, keepdims=True)
+                    d = d - np.median(d, axis=0, keepdims=True)
+                    v0 = float(d.var()) or 1.0
+                    d = np.where(np.abs(d) < 6.0 * math.sqrt(v0), d, 0.0)       # a flickering photosite is not it
+                    v = float((d * d).mean()) or 1.0
+                    cc.append(0.5 * (float((d[:, :-1] * d[:, 1:]).mean()) + float((d[:-1] * d[1:]).mean())) / v)
+                    first = d if first is None else first
+        out["neighbour_corr"] = round(float(np.mean(cc)), 4)
+        d = P[0] - P[1]
+        d = d - np.median(d, axis=1, keepdims=True)
+        v = float(d.var()) or 1.0
+        q = d[np.abs(d) < 8.0 * math.sqrt(v)]
+        out["excess_kurtosis"] = round(float((q ** 4).mean() / max(float(q.var()), 1e-12) ** 2 - 3.0), 3)
+    # a comb: with the values stretched k times in the camera, only one raw value in k is ever used
+    vals = fr[0].crop.astype(np.int64).ravel()
+    med = int(np.median(vals))
+    span = int(max(4.0 * s, 8.0))
+    core = vals[np.abs(vals - med) <= span]
+    used = np.unique(core).size / float(2 * span + 1)
+    if core.size >= 40 * (2 * span + 1) and used < 0.9:        # enough samples that every value should appear
+        out["digital_gain"] = round(1.0 / max(used, 0.05), 2)
+    return out
 
 
 def _gain_from_flats(flats: list, black: np.ndarray, rn: np.ndarray, warnings: list, iso: float):
@@ -309,7 +375,8 @@ def _build_camera(make: str, model: str, frames: list, save_local_data: bool) ->
     for f in frames:
         for n in f.notes:
             report.warnings.append(f"{f.name}: {n}")
-    entries, hot_short, hot_long = [], {}, {}
+    entries, hot_short, hot_long, recount = [], {}, {}, []
+    defects = {}                                          # "<iso>|short" or "<iso>|<seconds>|<temp>" -> (idx, DN)
     cov = dict(short={}, temps=[], cells={})
     all_temps = set()
     for iso in sorted(set(by_dark) | set(by_flat)):
@@ -337,7 +404,16 @@ def _build_camera(make: str, model: str, frames: list, save_local_data: bool) ->
             hp = _persistent_hot(short)
             if hp is not None:
                 e.hot_pixels, e.warm_pixels = _hot_and_warm(short, hp, float(np.mean(black)))
+                recount.append((e, None, short, hp, float(np.mean(black))))
                 hot_short[iso] = (hp, short[0].width)
+                lv = _defect_levels(short, hp)
+                if lv is not None:
+                    defects[f"{iso:g}|short"] = (hp, lv)
+            ob = [np.asarray(f.black, float) - np.asarray(f.ob_black, float) for f in short if f.ob_black]
+            if len(ob) >= 2:                              # what a photo's border-based black level misses here
+                e.black_offset_dn = np.round(np.median(ob, axis=0), 3).tolist()
+            for k, v in _crop_numbers(short, rn).items():
+                setattr(e, k, v)
             # per camera temperature (short frames): read noise, banding, black
             tb_groups = defaultdict(list)
             for f in short:
@@ -376,6 +452,10 @@ def _build_camera(make: str, model: str, frames: list, save_local_data: bool) ->
                     hp = _persistent_hot(g)
                     if hp is not None:
                         row["hot_pixels"], row["warm_pixels"] = _hot_and_warm(g, hp, base)
+                        recount.append((e, row, g, hp, base))
+                        lv = _defect_levels(g, hp)
+                        if lv is not None:
+                            defects[f"{iso:g}|{exp:g}|{'' if tb is None else f'{tb:g}'}"] = (hp, lv)
                         hot_long[f"{iso:g}|{exp:g}|{'' if tb is None else f'{tb:g}'}"] = hp
                 e.dark_current.append(row)
             e.thermal = _thermal(e.dark_current, _rms(rn))
@@ -389,6 +469,28 @@ def _build_camera(make: str, model: str, frames: list, save_local_data: bool) ->
             e.full_well_e = None if fw is None else round(fw, 0)
         if e.read_noise_dn is not None:
             entries.append(e)
+    # pushed ISOs: gain x ISO is one number for a sensor's real gains; a setting well above it is a lower gain
+    # stretched afterwards (its highlights clip early and its noise is the lower setting's, multiplied)
+    # hot and warm, now that the gain is known: counted in electrons, so that the same photosites are "hot" at
+    # every ISO (1% of the range called a 20-electron photosite hot at ISO 3200 and warm at ISO 400)
+    gx_all = [e.gain_e_per_dn * e.iso for e in entries if e.gain_e_per_dn]
+    if gx_all:
+        k = float(np.median(gx_all))
+        for e, row, frames_, hp, base in recount:
+            n_hot, n_warm = _hot_and_warm(frames_, hp, base, float(e.gain_e_per_dn or k / e.iso))
+            if row is None:
+                e.hot_pixels, e.warm_pixels = n_hot, n_warm
+            else:
+                row["hot_pixels"], row["warm_pixels"] = n_hot, n_warm
+    gx = [e.gain_e_per_dn * e.iso for e in entries if e.gain_e_per_dn]
+    if len(gx) >= 4:
+        mid = float(np.median(gx))
+        for e in entries:
+            if e.gain_e_per_dn and e.gain_e_per_dn * e.iso > 1.12 * mid:
+                e.pushed = True
+    for e in entries:
+        if e.digital_gain > 1.15:
+            e.pushed = True
     cov["temps"] = sorted(all_temps)
     cov["short"] = {f"{k:g}": v for k, v in cov["short"].items()}
     method = "full" if any(e.gain_e_per_dn for e in entries) else "quick"
@@ -414,6 +516,14 @@ def _build_camera(make: str, model: str, frames: list, save_local_data: bool) ->
         with open(os.path.join(d, "hot_pixels.json"), "w", encoding="utf-8") as fh:   # private, never shared
             json.dump({str(k): np.stack([hp // w, hp % w], axis=1).tolist() for k, (hp, w) in hot_short.items()},
                       fh)
+        if defects:                                      # what Clean heals from (engine/raw/calibrated.py)
+            arrays = {"width": np.array(next(iter(hot_short.values()))[1] if hot_short else frames[0].width)}
+            for k, (idx, lv) in defects.items():
+                arrays[k] = np.asarray(idx, np.uint32)
+                arrays[k + "|dn"] = np.clip(np.nan_to_num(lv), 0, 65535).astype(np.float32)
+            with open(os.path.join(d, "defects.npz.partial"), "wb") as fh:
+                np.savez_compressed(fh, **arrays)
+            os.replace(os.path.join(d, "defects.npz.partial"), os.path.join(d, "defects.npz"))
         if hot_long:                                     # by ISO | seconds | temperature: flat indices
             with open(os.path.join(d, "hot_pixels_long.npz"), "wb") as fh:
                 np.savez_compressed(fh, **{k: v.astype(np.uint32) for k, v in hot_long.items()})

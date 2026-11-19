@@ -1673,9 +1673,25 @@ class DevelopPage(QWidget):
         g = Group("Clean", "Noise is removed from the raw data itself, before colour is made: the best place to "
                            "do it. Shoot raw for the cleanest results.")
         self.dn_on = g.add(QCheckBox("Clean up noise"))
-        self.dn_s = g.add(ValueSlider("Strength", 0.0, 2.0, 1.0, 0.05, "{:.0%}", "1 = matched to the measured "
-                                      "noise: the camera's own at this ISO for a raw, measured in the picture "
-                                      "for a scan or JPEG."))
+        self.dn_auto = g.add(QCheckBox("Auto: the photo chooses the strength"))
+        self.dn_auto.setChecked(True)
+        self.dn_auto.setToolTip(
+            "The camera's noise is known exactly, so the Studio can work out, from the photo alone, how much error "
+            "each strength would leave and how much of the finest detail it would keep. It tries a handful of "
+            "strengths on five pieces of the photo and takes the lightest one that is close to the best, counting "
+            "lost detail five times as heavily as noise left in. A photo of smooth walls is cleaned hard, a photo "
+            "full of fine texture gently.\n\nA Dual Pixel photo is judged by its own two halves instead "
+            "(measured, not estimated).\n\nBest for: every raw photo from a camera you have calibrated on the "
+            "Cameras page. Weak at: it needs the camera's noise to be measured, so for an uncalibrated camera, "
+            "for ISO settings where neighbouring photosites share noise, and for scans or JPEGs it says so and "
+            "the sliders decide. Untick it to set the strengths yourself.")
+        self.dn_auto.toggled.connect(self._dn_auto_toggled)
+        self.dn_auto_chip = g.add(chip("Auto: -"))
+        self.dn_auto_chip.setWordWrap(True)
+        self.dn_s = g.add(ValueSlider("Strength", 0.0, 2.0, 1.0, 0.05, "{:.0%}", "With Auto on: 100% is the "
+                                      "photo's own choice; move it to lean lighter or heavier. With Auto off: "
+                                      "1 = matched to the measured noise (the camera's own at this ISO for a raw, "
+                                      "measured in the picture for a scan or JPEG)."))
         self.dn_l = g.add(ValueSlider("Luminance (grain)", 0.0, 2.5, Denoise().luma, 0.05, "{:.2f}",
                                       "Fine, grain-like noise. Lower keeps more texture."))
         self.dn_c = g.add(ValueSlider("Colour (blotches)", 0.0, 4.0, Denoise().chroma, 0.05, "{:.2f}",
@@ -1683,8 +1699,10 @@ class DevelopPage(QWidget):
         self.dn_g = g.add(ValueSlider("Keep grain", 0.0, 1.0, 0.0, 0.05, "{:.0%}",
                                       "Puts back a fine, film-like fraction of the luminance noise."))
         self.dn_m = g.add(QComboBox())
-        self.dn_m.addItems(["hybrid", "starlet", "nlm", "mppca", "learned"])
-        self.dn_m.setToolTip("Method: hybrid = NLM luminance + starlet colour (recommended)")
+        self.dn_m.addItems(["hybrid", "fusion", "starlet", "nlm", "mppca", "collab", "learned"])
+        self.dn_m.setToolTip("How the noise is removed. Each method says below what it is best for and weak at. "
+                             "Hybrid is the recommended one; Fusion uses two methods, each where it is best; "
+                             "Collaborative is the slow yardstick; Learned is this camera's own trained network.")
         self.dn_info = g.add(label("", "dim", wrap=True))
         self.dn_m.currentIndexChanged.connect(lambda *_: self._dn_method_text())
         self._dn_method_text()
@@ -1702,10 +1720,39 @@ class DevelopPage(QWidget):
                                  "and all of its texture); and nothing may be added that noise could not have "
                                  "hidden. It applies to every method, the learned one included.")
         self.dn_guard_chip = g.add(chip("Detail returned: -"))
+        self.dn_removed = g.add(QPushButton("Show what Clean removed..."))
+        self.dn_removed.setToolTip("The proof for this photo: a piece of it before Clean, after Clean, and what "
+                                   "was taken out. If what was taken out looks like television static, only noise "
+                                   "was removed.")
+        self.dn_removed.clicked.connect(self._dn_show_removed)
+        self.dn_lift = g.add(QCheckBox("Clean lifted shadows harder"))
+        self.dn_lift.setChecked(True)
+        self.dn_lift.setToolTip("Clean works on the raw data, before brightness is changed. When you brighten the "
+                                "photo or open the shadows (Exposure, Shadows, Smart lighting, Blacks, Auto HDR), "
+                                "noise that was invisible in the dark is lifted into view. With this on, the parts "
+                                "that end up lifted are cleaned harder, in proportion to how far they are lifted; "
+                                "parts at normal brightness are not touched.\n\nBest for: underexposed photos "
+                                "and strong shadow recovery. Weak at: it follows the sliders in half-stop steps, "
+                                "and does not know about brightening done with masks or the tone curve.")
+        self.dn_cal = g.add(QCheckBox("Use this camera's calibration"))
+        self.dn_cal.setChecked(True)
+        self.dn_cal.setToolTip("If this camera was calibrated on the Cameras page, what its dark frames showed is "
+                               "taken out before Clean looks at the photo:\n"
+                               "- hot and warm photosites from the camera's own map (a warm one is only replaced "
+                               "where it actually shows in this photo);\n"
+                               "- the part of the row and column banding that is the same in every photo;\n"
+                               "- the small difference between the black of the picture area and of the masked "
+                               "border.\nThese are not random, so no noise reduction should have to guess at "
+                               "them.\n\nBest for: long exposures, high ISO, deep shadows. Weak at: needs a "
+                               "profile for this camera (and Deep calibration for the fixed pattern); a camera "
+                               "without one is simply left alone.")
+        self.dn_cal_chip = g.add(chip("Calibration: -"))
+        self.dn_cal_chip.setWordWrap(True)
         self.band = g.add(QCheckBox("Remove row banding (measured, never added)"))
         self.band.setChecked(True)
         self.noise_chip = g.add(chip("Noise model: -"))
-        self.full_only = [self.dn_l, self.dn_c, self.dn_g, self.dn_m, self.dn_info]
+        self.full_only = [self.dn_l, self.dn_c, self.dn_g, self.dn_m, self.dn_info, self.dn_lift, self.dn_cal,
+                          self.dn_cal_chip]
         self.clean_scan_note = g.add(label(
             "Scan or JPEG: Clean measures the noise in the picture itself and removes it there. It does its best "
             "work on raw files, where it knows every photosite's noise from the sensor, before the camera has "
@@ -2484,7 +2531,8 @@ class DevelopPage(QWidget):
                   self.f_gsize, self.f_grough):
             w.changed.connect(self.controls_changed)
         for w in (self.dn_on, self.band, self.mcb, self.ca, self.dfr, self.dist, self.vig, self.constrain, self.sh_on,
-                  self.c_bw, self.f_gcol, self.dn_safe, self.dn_guard, self.hdr_on):
+                  self.c_bw, self.f_gcol, self.dn_safe, self.dn_guard, self.hdr_on, self.dn_auto, self.dn_lift,
+                  self.dn_cal):
             w.toggled.connect(self.controls_changed)
         self.hdr_amt.changed.connect(self.controls_changed)
         for w in (self.film_range, self.st_amt, self.st_sens, self.scr_amt, self.scr_size, self.col_amt,
@@ -2509,6 +2557,7 @@ class DevelopPage(QWidget):
         self._refresh_range_ui()
         self._refresh_hsl_ui()
         self.apply_level()
+        self._dn_auto_ui()
         self._old_photo_visibility()        # before a photo is open too: sliders of tools that are off stay hidden
         self._glow_visibility()
         self._composite_controls()
@@ -2545,11 +2594,17 @@ class DevelopPage(QWidget):
         s = self.dn_s.value()
         e.denoise.enabled = self.dn_on.isChecked()
         e.denoise.method = self.dn_m.currentText()
-        e.denoise.luma = round(self.dn_l.value() * s, 3)
-        e.denoise.chroma = round(self.dn_c.value() * s, 3)
+        e.denoise.auto = self.dn_auto.isChecked()
+        if self._dn_auto_in_effect():              # the photo chose: the two sliders only show its choice, and
+            e.denoise.lean = round(s, 3)           # Strength leans lighter or heavier from it
+        else:                                      # no Auto, or Auto could not choose here: the sliders decide
+            e.denoise.luma = round(self.dn_l.value() * s, 3)
+            e.denoise.chroma = round(self.dn_c.value() * s, 3)
         e.denoise.grain = round(self.dn_g.value(), 3)
         e.denoise.safeguard = self.dn_safe.isChecked()
         e.denoise.guard = self.dn_guard.isChecked()
+        e.denoise.lift = self.dn_lift.isChecked()
+        e.calibrated = self.dn_cal.isChecked()
         e.banding = self.band.isChecked()
         e.exposure_ev = round(self.ev.value(), 3)
         e.tone.contrast = round(self.con.value(), 3)
@@ -2704,7 +2759,12 @@ class DevelopPage(QWidget):
         for w in ws:
             w.blockSignals(True)
         self.dn_on.setChecked(e.denoise.enabled)
-        self.dn_s.set_value(1.0, emit=False)
+        for box, on in ((self.dn_auto, e.denoise.auto), (self.dn_lift, e.denoise.lift),
+                        (self.dn_cal, getattr(e, "calibrated", True))):
+            box.blockSignals(True)
+            box.setChecked(bool(on))
+            box.blockSignals(False)
+        self.dn_s.set_value(float(e.denoise.lean) if self._dn_auto_in_effect() else 1.0, emit=False)
         self.dn_l.set_value(e.denoise.luma, emit=False)
         self.dn_c.set_value(e.denoise.chroma, emit=False)
         self.dn_g.set_value(e.denoise.grain, emit=False)
@@ -2716,6 +2776,7 @@ class DevelopPage(QWidget):
         self.dn_guard.setChecked(bool(e.denoise.guard))
         self.dn_guard.blockSignals(False)
         self._dn_method_text()
+        self._dn_auto_ui()
         self.band.setChecked(e.banding)
         self.ev.set_value(e.exposure_ev, emit=False)
         self.con.set_value(e.tone.contrast, emit=False)
@@ -2927,12 +2988,139 @@ class DevelopPage(QWidget):
             return
         r = getattr(self.image, "denoise_report", None) if self.image is not None else None
         self._dn_guard_refresh(r)
+        self._dn_auto_refresh()
+        self._dn_cal_refresh()
         on = self.image is not None and self.edit.denoise.enabled and self.edit.denoise.safeguard
         if not on or not r:
             self.dn_safe_chip.setText("Protected: -")
             return
         self.dn_safe_chip.setText(f"Protected: {r['protected']:,} photosites kept as shot "
                                   f"({r['protected'] / max(r['sites'], 1) * 1e6:.0f} per million)")
+
+    # ---- Clean: Auto, calibration, "What Clean removed" (BUILD_PLAN_NOISE C, D.4, E.4, H)
+    def _is_scan(self) -> bool:
+        image = getattr(self, "image", None)
+        return image is not None and bool(getattr(getattr(image, "raw", None), "is_scan", False))
+
+    def _dn_auto_active(self) -> bool:
+        """Auto decides the strengths: ticked, and the picture is a raw (a scan or JPEG uses the sliders)."""
+        return self.dn_auto.isChecked() and not self._is_scan()
+
+    def _dn_auto_in_effect(self) -> bool:
+        """Auto has chosen for the open photo (it is ticked, and this photo's report holds a choice). Only then
+        does Strength lean from the choice; in every other case the sliders are what Clean uses."""
+        image = getattr(self, "image", None)
+        rep = getattr(image, "auto_report", None) if image is not None else None
+        return self._dn_auto_active() and bool(rep) and "luma" in rep
+
+    def _dn_auto_ui(self):
+        """With Auto on, the two strength sliders only show what the photo chose: greyed, not editable. Where
+        Auto could not choose (the report says why), they work as always."""
+        scan = self._is_scan()
+        image = getattr(self, "image", None)
+        rep = getattr(image, "auto_report", None) if image is not None else None
+        told_no = bool(rep) and "luma" not in rep            # Auto looked at this photo and could not choose
+        auto = self._dn_auto_active() and not told_no
+        self.dn_auto.setEnabled(not scan)
+        for w in (self.dn_l, self.dn_c):
+            w.setEnabled(not auto)
+        for w in (self.dn_lift, self.dn_cal, self.dn_removed):
+            w.setEnabled(not scan)
+
+    def _dn_auto_toggled(self, on: bool):
+        """Auto off: the sliders start from what the photo chose, so nothing jumps. Auto on: lean back to 100%."""
+        r = getattr(self.image, "denoise_report", None) if self.image is not None else None
+        if not on and r and r.get("auto"):
+            self.dn_l.set_value(float(r["luma"]), emit=False)
+            self.dn_c.set_value(float(r["chroma"]), emit=False)
+        self.dn_s.set_value(1.0, emit=False)
+        self._dn_auto_ui()
+
+    def _dn_auto_refresh(self):
+        """What Auto chose for this photo, how it knows, and how much fine detail that keeps."""
+        if self.image is None or not self.edit.denoise.enabled or not self._dn_auto_active():
+            self.dn_auto_chip.setText("Auto: off, the sliders decide" if not self.dn_auto.isChecked() else
+                                      "Auto: for raw photos (this picture uses the sliders)" if self._is_scan() else
+                                      "Auto: -")
+            self.dn_auto_chip.setStyleSheet("")
+            return
+        rep = getattr(self.image, "auto_report", None) or {}
+        r = getattr(self.image, "denoise_report", None) or {}
+        note = rep.get("note") or ""
+        if "luma" not in rep:
+            self.dn_auto_chip.setText(note or "Auto: working it out...")
+            self.dn_auto_chip.setStyleSheet(f"color:{T.AMBER}; border-color:{T.alpha(T.AMBER, 0.4)};" if note else "")
+            for w in (self.dn_l, self.dn_c):       # nothing was chosen: the sliders decide, so they must work
+                w.setEnabled(True)
+            return
+        lean = float(getattr(self.edit.denoise, "lean", 1.0) or 1.0)
+        luma, chroma = (r["luma"], r["chroma"]) if r.get("auto") else (rep["luma"] * lean, rep["chroma"] * lean)
+        for w in (self.dn_l, self.dn_c):
+            w.setEnabled(False)
+        self.dn_l.set_value(float(luma), emit=False)
+        self.dn_c.set_value(float(chroma), emit=False)
+        if abs(self.dn_s.value() - lean) > 1e-6:   # Strength shows the lean kept with this photo's edit
+            self.dn_s.set_value(lean, emit=False)
+        kind = rep.get("kind")
+        measured = kind == "referee"
+        col = T.CYAN if measured else T.AMBER
+        if kind == "blend":
+            text = f"Auto: {100 * rep['luma']:.0f}% of the learned network's cleaning"
+        else:
+            text = f"Auto: luminance {luma:.2f}, colour {chroma:.2f}"
+        if rep.get("kept") is not None and abs(lean - 1.0) < 1e-3:
+            text += f" · keeps about {100 * rep['kept']:.0f}% of the finest detail"
+        if measured:
+            text += " · measured by the two halves of this Dual Pixel photo"
+            if rep.get("noise_ratio"):
+                d = 100.0 * (float(rep["noise_ratio"]) - 1.0)
+                text += (f" (its noise matches the camera's profile within {abs(d):.0f}%)" if abs(d) < 8 else
+                         f" (its noise is {abs(d):.0f}% {'above' if d > 0 else 'below'} the camera's profile)")
+        else:
+            text += " · estimated from this photo"
+        if abs(lean - 1.0) >= 1e-3:
+            text += f" · leaned to {100 * lean:.0f}% by the Strength slider"
+        self.dn_auto_chip.setText(text + (". " + note if note else ""))
+        self.dn_auto_chip.setStyleSheet(f"color:{col}; border-color:{T.alpha(col, 0.4)};")
+
+    def _dn_cal_refresh(self):
+        """What this camera's calibration took out of the photo before Clean (cyan: measured on this body)."""
+        if self.image is None or self._is_scan():
+            self.dn_cal_chip.setText("Calibration: -")
+            self.dn_cal_chip.setStyleSheet("")
+            return
+        if not self.dn_cal.isChecked():
+            self.dn_cal_chip.setText("Calibration: not used")
+            self.dn_cal_chip.setStyleSheet("")
+            return
+        rep = getattr(self.image, "calibration_report", None)
+        if not rep:
+            self.dn_cal_chip.setText("Calibration: nothing measured for this camera at this ISO yet (Cameras page: "
+                                     "drop its lens-cap frames, then Deep calibration)")
+            self.dn_cal_chip.setStyleSheet("")
+            return
+        bits = []
+        if "hot pixels" in rep.get("used", ()):
+            bits.append(f"{rep.get('hot', 0):,} hot and {rep.get('warm', 0):,} warm photosites healed "
+                        f"(of {rep.get('mapped', 0):,} on this camera's map)")
+        if "fixed pattern" in rep.get("used", ()):
+            bits.append(f"fixed banding taken out (rows {rep.get('rows_dn', 0):.2f}, columns "
+                        f"{rep.get('cols_dn', 0):.2f} raw levels)")
+        if "black" in rep.get("used", ()):
+            bits.append(f"black level corrected by up to {max(abs(v) for v in rep['black']):.2f} raw levels")
+        self.dn_cal_chip.setText("Calibration: " + "; ".join(bits))
+        self.dn_cal_chip.setStyleSheet(f"color:{T.CYAN}; border-color:{T.alpha(T.CYAN, 0.4)};")
+
+    def _dn_show_removed(self):
+        if self.image is None or self._is_scan():
+            self.status.emit("Open a raw photo first: this view is for raw files.")
+            return
+        from .removed import RemovedDialog
+        edit = self.edit_from_controls()
+        if not edit.denoise.enabled:
+            edit.denoise.enabled = True            # the question is what Clean WOULD remove: answer it either way
+        self._removed_dialog = RemovedDialog(self.image, edit, self)
+        self._removed_dialog.show()
 
     def _dn_guard_refresh(self, r):
         """The detail guard's number, and which network cleaned the photo when the learned method is chosen."""
@@ -5277,6 +5465,9 @@ class DevelopPage(QWidget):
         for w in self.clean_group.findChildren(QWidget):
             if w is not self.clean_scan_note and w.parent() is self.clean_group.body:
                 w.setEnabled(not (scan and w in raw_only))
+        self._dn_auto_ui()
+        self._dn_auto_refresh()
+        self._dn_cal_refresh()
         self.clean_scan_note.setVisible(scan)
         if scan:
             self.noise_chip.setText("Noise: measured in this picture when Clean is on")
@@ -6882,6 +7073,24 @@ class HelpPage(InfoPage):
                              ("Make it good", "Noise clean-up for the photo's ISO, Fix lens, and gentle "
                                               "capture sharpening (not for character lenses). It never changes "
                                               "brightness."),
+                             ("Clean (noise)", "Develop > Clean removes noise from the raw data, before colour is "
+                                               "made. Auto lets each photo choose its own strength, detail first: "
+                                               "it works once the camera is calibrated on the Cameras page "
+                                               "(lens-cap frames, then flat pairs), and a Dual Pixel photo is "
+                                               "judged by its own two halves. The chips say what happened: what "
+                                               "Auto chose and how much fine detail that keeps, what the camera's "
+                                               "calibration took out (hot pixels, fixed banding), what the detail "
+                                               "guard gave back. Show what Clean removed is the proof: if what was "
+                                               "taken out looks like television static, only noise was removed. "
+                                               "The full guide is docs\\CLEAN.md in the Studio's folder."),
+                             ("Teaching Clean your camera", "Cameras page, in this order: drop lens-cap frames "
+                                                            "(any ISO, any number), drop flat pairs, press Deep "
+                                                            "calibration on the camera's card. That alone turns on "
+                                                            "Auto and the calibration in Clean. Optional: choose "
+                                                            "about 200 varied clean photos and train the camera's "
+                                                            "own network overnight (method 'learned'). The card "
+                                                            "lists what Clean takes from the calibration and what "
+                                                            "it leaves alone, with the reason."),
                              ("Shape and detail", "C draws a crop, Enter finishes it. Microcontrast lifts the "
                                                   "shades of shadow; judge sharpening at 100% (click the photo)."),
                              ("Composition", "O cycles the overlays (thirds, golden ratio, golden spiral, triangles, "

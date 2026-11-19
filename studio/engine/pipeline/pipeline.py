@@ -69,6 +69,8 @@ class Image:
         self._warp = None
         self._memo: dict = {}
         self.denoise_report: dict | None = None    # last whole-frame denoise: photosites kept by the safeguard
+        self.calibration_report: dict | None = None   # last whole-frame render: what the calibration took out
+        self.auto_report: dict | None = None       # Clean's automatic strength for this photo (clean_auto)
         self.scratch_report: dict | None = None    # last whole-frame dust and scratch pass: marks found
         self.colour_report: dict | None = None     # the colourizer's last run (time, map size)
 
@@ -312,6 +314,201 @@ def _crop_box(image: Image, region):
     return cx + x, cy + y, w, h
 
 
+def prepared_mosaic(image: Image, edit: Edit, box: tuple) -> np.ndarray:
+    """A region of the mosaic as Clean receives it: normalised, row banding out, the camera's calibration out.
+    ``box``: (x0, y0, w, h) in visible-area coordinates, x0 and y0 even."""
+    x0, y0, w, h = box
+    mos = lin.normalise(image.raw, image.levels(edit.use_optical_black), (x0, y0, w, h))
+    rb = None
+    if edit.banding:
+        from ..raw.banding import remove_rows
+        rb = image.row_banding(edit.use_optical_black)
+        if rb is not None and rb.weight > 0.01:
+            remove_rows(mos, rb, y0)
+    if getattr(edit, "calibrated", False):
+        from ..raw import calibrated as CAL
+        CAL.apply(mos, image, x0, y0, rb.weight if (rb is not None and rb.weight > 0.01) else None,
+                  edit.use_optical_black)
+    return mos
+
+
+def clean_auto(image: Image, edit: Edit) -> dict | None:
+    """Clean's strength for this photo, chosen from the photo, detail first: {luma, chroma, kept, kind, note, ...}.
+    Worked out once per photo and method on five pieces of the frame, so a zoomed view and the export agree.
+
+    ``kind``: "referee" = judged by the two halves of a Dual Pixel photo (raw/referee.py: measured);
+    "strength" = Stein's estimate on the single photo (raw/auto_strength.py: estimated); "blend" = the same for
+    the learned network. None when neither can be trusted here (the reason is in ``image.auto_report["note"]``):
+    Clean then uses its sliders."""
+    from ..raw import auto_strength as AS
+    from ..raw import denoise as DN
+    dn = edit.denoise
+    key = ("auto", dn.method, bool(edit.calibrated), bool(edit.banding), bool(edit.use_optical_black))
+    with image._lock:
+        if key in image._memo:
+            out, note = image._memo[key]
+            image.auto_report = dict(out or {}, note=note)    # (the report follows the method now in use)
+            return out
+    out, note = None, ""
+    raw = image.raw
+    try:
+        from ..calib.profile import find_profile
+        prof = find_profile(image.meta.make, image.meta.model)
+        e = prof.entry_for(image.meta.iso) if prof is not None else None
+        # how much the camera's read noise is shared between neighbours at this ISO (the light's own noise is not)
+        corr_read = max(float(e.neighbour_corr), 0.0) if e is not None and e.neighbour_corr is not None else 0.0
+        corr, shared = 0.0, False
+        size = 2 * AS.PIECE
+        boxes = []
+        for fy, fx in ((0.5, 0.5), (0.27, 0.27), (0.27, 0.73), (0.73, 0.27), (0.73, 0.73)):
+            y0 = int(np.clip(fy * raw.height - size / 2, 0, max(raw.height - size, 0))) // 2 * 2
+            x0 = int(np.clip(fx * raw.width - size / 2, 0, max(raw.width - size, 0))) // 2 * 2
+            boxes.append((x0, y0, min(size, raw.width - x0) // 2 * 2, min(size, raw.height - y0) // 2 * 2))
+        net = None
+        if dn.method == "learned":
+            from ..raw import learned as LN
+            net = LN.for_camera((image.meta.make, image.meta.model))
+        method = "hybrid" if dn.method == "learned" else dn.method
+        if net is None:                                       # a Dual Pixel photo is judged by its own two halves
+            from ..raw import referee as REF
+            ref = REF.judge_photo(image, edit, boxes, method)
+            if ref and "luma" in ref:
+                out = ref
+            elif ref:
+                note = ref["note"]
+        model = image.noise_model(edit.use_optical_black)
+        measured = getattr(model, "source", "") in ("calibrated", "shared")
+        mosaics = []
+        if out is None and measured:
+            for box in boxes:
+                mos = prepared_mosaic(image, edit, box)
+                if float(np.mean(mos > 0.8)) <= 0.2:          # (mostly blown out: the noise model does not hold)
+                    mosaics.append(mos)
+            corr = corr_read * AS.read_share(mosaics, model)  # this photo's noise shares by this much
+            shared = corr > AS.MAX_NEIGHBOUR
+        if out is None and shared:
+            note = (note + " " if note else "") + (
+                f"Automatic strength is not used for this photo: it is very dark, and at ISO "
+                f"{image.meta.iso:g} this camera's own noise is shared between neighbouring photosites too much "
+                f"for the single-photo estimate. The sliders decide.")
+        elif out is None and not measured:
+            # Stein's estimates stand on knowing the noise. Estimated from the photo it is not firm enough: with
+            # the noise put 30% too low, a smooth photo is left four fifths as noisy as it came (measured).
+            note = (note + " " if note else "") + (
+                "Auto needs this camera's noise to be measured, and here it is only estimated from the photo. "
+                "Calibrate the camera on the Cameras page (lens-cap frames, then flat pairs) and Auto will choose "
+                "for every photo. Until then the sliders decide.")
+        elif out is None:
+            roles = DN.plane_roles(raw.cfa_rgb)
+            ys, cs, fours = [], [], []
+            for mos in mosaics:
+                pl = {n: DN.anscombe(mos[i::2, j::2], float(model.a[i, j]), float(model.b[i, j]))
+                      for n, (i, j) in roles.items()}
+                Y, C1, C2, _ = DN.to_yc(pl["R"], pl["G1"], pl["G2"], pl["B"])
+                ys.append(Y), cs.append(C1), cs.append(C2)
+                fours.append(np.stack([pl["R"], pl["G1"], pl["G2"], pl["B"]]))
+            if not ys:
+                note = "Automatic strength found no usable part of this photo (it is mostly blown out)."
+            elif net is not None:
+                c = AS.choose_blend(net.run, fours, corr=corr)
+                out = dict(luma=c["strength"], chroma=c["strength"], luma_table=c["table"], chroma_table=[],
+                           kept=c["kept"], kind="blend", pieces=len(ys))
+            else:
+                fn, fc = DN.method_fns(method)
+                slow = method in ("mppca", "collab")
+                lu = AS.choose(fn, ys[:3] if slow else ys, 4, AS.CANDIDATES_SLOW if slow else AS.CANDIDATES,
+                               corr=corr)
+                ch = AS.choose(fc, cs, 6, AS.CANDIDATES, corr=corr)
+                out = dict(luma=lu["strength"], chroma=ch["strength"], kept=lu["kept"], shared_noise=round(corr, 3),
+                           luma_table=lu["table"], chroma_table=ch["table"], kept_table=lu["kept_table"],
+                           kind="strength", pieces=len(ys))
+        if out is not None:
+            log.info("clean auto (%s, %s): luminance %.2f, colour %.2f from %d pieces, fine detail kept %s",
+                     dn.method, out["kind"], out["luma"], out["chroma"], out.get("pieces", 0),
+                     "n/a" if out.get("kept") is None else f"{100 * out['kept']:.0f}%")
+        if e is not None and getattr(e, "pushed", False):
+            note = (note + " " if note else "") + (
+                f"ISO {image.meta.iso:g} is a pushed setting on this camera: the camera multiplies the numbers of "
+                f"a lower ISO, so nothing is gained over that ISO brightened afterwards, and highlights are lost.")
+    except Exception:                                         # noqa: BLE001  (never stops a photo opening)
+        slog.log_exception("automatic Clean strength failed; the sliders are used", log)
+        slog.save_error_report("Choosing Clean's strength for a photo")
+        note = "Automatic strength could not be worked out for this photo (an error report was saved)."
+    image.auto_report = dict(out or {}, note=note)
+    with image._lock:
+        image._memo[key] = (out, note)
+    return out
+
+
+def clean_params(image: Image, edit: Edit, guard: bool | None = None) -> tuple:
+    """(what Clean is run with for this photo and edit, the automatic choice or None). One place, so the photo,
+    a zoomed view and the "What Clean removed" view are cleaned exactly alike."""
+    from ..raw.denoise import DenoiseParams
+    dn = edit.denoise
+    luma, chroma = dn.luma, dn.chroma
+    auto = clean_auto(image, edit) if dn.auto else None
+    if auto:                                       # the photo's own choice replaces the sliders
+        lean = float(getattr(dn, "lean", 1.0) or 1.0)
+        top = 1.0 if auto.get("kind") == "blend" else 4.0
+        luma, chroma = min(auto["luma"] * lean, top), min(auto["chroma"] * lean, top)
+    return DenoiseParams(method=dn.method, luma=luma, chroma=chroma, grain=dn.grain,
+                         guard=bool(dn.guard) if guard is None else bool(guard),
+                         camera=(image.meta.make, image.meta.model),
+                         lift=edit.shadow_lift() if dn.lift else 0.0,
+                         lift_mid=float(edit.tone.mid_grey) / 2.0 ** float(edit.exposure_ev),
+                         safeguard=SAFEGUARD_K if dn.safeguard else 0.0), auto
+
+
+REMOVED_PIECE = 512                 # mosaic photosites per side of a piece in the "What Clean removed" view
+REMOVED_SPOTS = (("Centre", 0.5, 0.5), ("Upper left", 0.27, 0.27), ("Upper right", 0.27, 0.73),
+                 ("Lower left", 0.73, 0.27), ("Lower right", 0.73, 0.73))
+
+
+def removed_boxes(image: Image, size: int = REMOVED_PIECE) -> list:
+    """[(name, (x0, y0, w, h))]: the pieces of the frame the view looks at (visible-area coordinates)."""
+    raw, out = image.raw, []
+    for name, fy, fx in REMOVED_SPOTS:
+        y0 = int(np.clip(fy * raw.height - size / 2, 0, max(raw.height - size, 0))) // 2 * 2
+        x0 = int(np.clip(fx * raw.width - size / 2, 0, max(raw.width - size, 0))) // 2 * 2
+        out.append((name, (x0, y0, min(size, raw.width - x0) // 2 * 2, min(size, raw.height - y0) // 2 * 2)))
+    return out
+
+
+def clean_removed(image: Image, edit: Edit, box: tuple, guard: bool | None = None) -> dict:
+    """BUILD_PLAN_NOISE E.4: what Clean takes out of one piece of this photo, to be looked at.
+
+    Luminance before and after, and their difference, in units where the camera's noise is exactly 1 at every
+    brightness. If Clean took only noise, the difference looks like television static with strength near 1 and
+    nothing of the picture in it. ``not_noise`` is the part of the difference the residual test says is picture
+    (raw/guard.structure); ``numbers`` are the test's figures. ``guard``: None = as the edit has it."""
+    from ..raw import denoise as DN
+    from ..raw import guard as GD
+    params, auto = clean_params(image, edit, guard)
+    model = image.noise_model(edit.use_optical_black)
+    mos = prepared_mosaic(image, edit, box)
+    st = {}
+    den = DN.denoise_mosaic(mos, image.raw.cfa_rgb, model, params, stats=st)
+    roles = DN.plane_roles(image.raw.cfa_rgb)
+
+    def lum(m):
+        pl = {n: DN.anscombe(np.maximum(m[i::2, j::2], 0.0), float(model.a[i, j]), float(model.b[i, j]))
+              for n, (i, j) in roles.items()}
+        return DN.to_yc(pl["R"], pl["G1"], pl["G2"], pl["B"])[0]
+    before, after = lum(mos), lum(den)
+    removed = before - after
+    m = 8                                                     # the rim of a piece is cleaned with less to go on
+    inner = removed[m:-m, m:-m]
+    not_noise, _ = GD.structure(removed)
+    wn = GD.whiteness(inner)
+    e_all = float(np.mean(inner * inner)) or 1e-12
+    numbers = dict(strength=round(float(np.sqrt(wn["variance"])), 3), band_energy=wn["band_energy"],
+                   neighbour=round(0.5 * (wn["neighbour_h"] + wn["neighbour_v"]), 4),
+                   not_noise=round(float(np.mean(not_noise[m:-m, m:-m] ** 2)) / e_all, 5),
+                   returned=(st.get("guard") or {}).get("returned"), luma=params.luma, chroma=params.chroma,
+                   auto=bool(auto), guard=bool(params.guard), method=params.method)
+    return dict(before=before, after=after, removed=removed, not_noise=not_noise, numbers=numbers, box=box)
+
+
 def linear_rgb(image: Image, edit: Edit, region=None, half_size: bool = False, cache: bool = True,
                sharpen: bool = True) -> np.ndarray:
     """Stages 1-12 (+ lens falloff and fringing): camera mosaic -> scene-linear ProPhoto RGB (1.0 = sensor clip of
@@ -355,24 +552,31 @@ def linear_rgb(image: Image, edit: Edit, region=None, half_size: bool = False, c
     x1, y1 = min(raw.width, x + w + m), min(raw.height, y + h + m)
     with slog.stage("linearize.normalise", log, w=x1 - x0, h=y1 - y0):
         mos = lin.normalise(raw, lv, (x0, y0, x1 - x0, y1 - y0))
+    rb = None
     if edit.banding:
         from ..raw.banding import remove_rows
         rb = image.row_banding(edit.use_optical_black)
         if rb is not None and rb.weight > 0.01:
             with slog.stage("banding.rows", log, weight=round(rb.weight, 2)):
                 remove_rows(mos, rb, y0)
+    if getattr(edit, "calibrated", False):         # what this camera's dark frames measured: subtracted, not guessed
+        from ..raw import calibrated as CAL
+        with slog.stage("calibrated", log):
+            crep = CAL.apply(mos, image, x0, y0, rb.weight if (rb is not None and rb.weight > 0.01) else None,
+                             edit.use_optical_black)
+        if region is None:
+            image.calibration_report = crep
     if edit.denoise.enabled:
-        from ..raw.denoise import DenoiseParams, denoise_mosaic
+        from ..raw.denoise import denoise_mosaic
         dn = edit.denoise
         model = image.noise_model(edit.use_optical_black)
-        with slog.stage("denoise", log, method=dn.method, luma=dn.luma, chroma=dn.chroma, src=model.source):
+        params, auto = clean_params(image, edit)
+        with slog.stage("denoise", log, method=dn.method, luma=params.luma, chroma=params.chroma, src=model.source):
             st = {}
-            mos = denoise_mosaic(mos, raw.cfa_rgb, model,
-                                 DenoiseParams(method=dn.method, luma=dn.luma, chroma=dn.chroma, grain=dn.grain,
-                                               guard=bool(dn.guard), camera=(image.meta.make, image.meta.model),
-                                               safeguard=SAFEGUARD_K if dn.safeguard else 0.0), stats=st)
+            mos = denoise_mosaic(mos, raw.cfa_rgb, model, params, stats=st)
             if region is None and st:              # whole frame: what the Clean panel reports
-                image.denoise_report = dict(st, half=half_size)
+                image.denoise_report = dict(st, half=half_size, luma=params.luma, chroma=params.chroma,
+                                            auto=bool(auto))
     mult = wb_multipliers(image, edit)
     film_on = _film_on(edit)
     if film_on:                                    # a negative: balance the light through the film neutrally;

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import threading
 from collections import defaultdict
@@ -81,6 +82,35 @@ def _shape(patches: np.ndarray, black: np.ndarray) -> dict:
     return dict(excess_kurtosis=round(float((q ** 4).mean() / v ** 2 - 3.0), 3),
                 neighbour_h=round(float((p[:, :, :-1] * p[:, :, 1:]).mean() / v), 4),
                 neighbour_v=round(float((p[:, :-1] * p[:, 1:]).mean() / v), 4))
+
+
+def _no_parity(x: np.ndarray) -> np.ndarray:
+    """A row (or column) profile with the level of its even and of its odd lines taken out. Those two levels are
+    black-level differences between the colour positions, and the profile's black offset carries them: left in
+    here they would be subtracted twice."""
+    y = np.asarray(x, np.float64).copy()
+    y[0::2] -= np.median(y[0::2])
+    y[1::2] -= np.median(y[1::2])
+    return y
+
+
+def _periodic(lines: list, factor: float = 8.0, top: int = 3) -> list:
+    """Banding that repeats (Bill's cyclostationary question): the spectrum of each frame's row offsets, averaged
+    over the frames so that a line present in every frame stands out whatever its phase. Returns the lines that
+    stand ``factor`` times above the background: [{period_rows, amplitude_dn, times_background}], strongest first.
+    An empty list is an answer too: nothing periodic, the banding is random from row to row."""
+    if len(lines) < 3:
+        return []
+    h = lines[0].size
+    power = np.mean([np.abs(np.fft.rfft(x - x.mean())) ** 2 for x in lines], axis=0)
+    power[0] = 0.0
+    floor = float(np.median(power[1:])) or 1e-12
+    out = []
+    for k in np.argsort(power)[::-1][:top]:
+        if k > 0 and power[k] > factor * floor * (1.0 + 3.0 / math.sqrt(len(lines))):
+            out.append(dict(period_rows=round(h / float(k), 2), amplitude_dn=round(2.0 * math.sqrt(power[k]) / h, 4),
+                            times_background=round(float(power[k] / floor), 1)))
+    return out
 
 
 def deep_calibrate(files: list, progress=None, cancelled=None, workers: int | None = None) -> list:
@@ -149,17 +179,23 @@ def deep_calibrate(files: list, progress=None, cancelled=None, workers: int | No
         for (c, iso), lst in sorted(rows.items()):
             if c != cam or len(lst) < MIN_FIXED or len({r.shape for r in lst}) != 1:
                 continue
-            r, cl = np.mean(lst, axis=0), np.mean(cols[(c, iso)], axis=0)
-            r, cl = r - np.median(r), cl - np.median(cl)
             n = len(lst)
-            one_frame = float(np.mean([np.std(x - np.median(x)) for x in lst]))
-            # the mean of n frames still holds 1/n of the random row noise: take that out of the estimate
-            fixed_rows = float(np.sqrt(max(float(r.var()) - max(one_frame ** 2 - float(r.var()), 0.0) / max(n - 1, 1),
-                                           0.0)))
-            fixed[f"rows_{iso:g}"], fixed[f"cols_{iso:g}"] = r.astype(np.float32), cl.astype(np.float32)
-            fixed_info[f"{iso:g}"] = dict(frames=n, fixed_rows_dn=round(fixed_rows, 4),
-                                          one_frame_rows_dn=round(one_frame, 4),
-                                          fixed_cols_dn=round(float(cl.std()), 4))
+            info_iso = dict(frames=n)
+            for name, group in (("rows", lst), ("cols", cols[(c, iso)])):
+                each = [_no_parity(x) for x in group]
+                mean = np.mean(each, axis=0)
+                var_mean = float(mean.var())
+                one = float(np.mean([x.var() for x in each]))            # one frame: fixed + random
+                rand2 = max(one - var_mean, 0.0) * n / max(n - 1, 1)       # the mean still holds rand2 / n of it
+                fixed2 = max(var_mean - rand2 / n, 0.0)
+                w = fixed2 / var_mean if var_mean > 0 else 0.0           # how much of the measured mean to trust
+                fixed[f"{name}_{iso:g}"] = (mean * w).astype(np.float32)  # stored already weighted (never adds)
+                info_iso[f"fixed_{name}_dn"] = round(math.sqrt(fixed2), 4)
+                info_iso[f"one_frame_{name}_dn"] = round(math.sqrt(one), 4)
+                info_iso[f"{name}_weight"] = round(w, 3)
+                if name == "rows":
+                    info_iso["periodic"] = _periodic([x - mean for x in each])
+            fixed_info[f"{iso:g}"] = info_iso
         folder = os.path.dirname(os.path.abspath(stats[0].path)) if stats else ""
         with open(os.path.join(d, BANK + ".partial"), "wb") as fh:
             np.savez_compressed(fh, **arrays)
@@ -207,10 +243,14 @@ class NoiseBank:
         return self._mem[key], self.groups[key]
 
     def fixed_lines(self, iso: float):
-        """(rows, cols) fixed pattern above black in DN for this ISO, or None."""
+        """(rows, cols): the banding that is the same in every photo at this ISO, in DN above black, already
+        weighted by how well it was measured. None when this ISO has too few frames."""
         if self._fixed is None or f"rows_{float(iso):g}" not in self._fixed.files:
             return None
         return self._fixed[f"rows_{float(iso):g}"], self._fixed[f"cols_{float(iso):g}"]
+
+    def fixed_info(self, iso: float) -> dict:
+        return (self.meta.get("fixed") or {}).get(f"{float(iso):g}", {})
 
 
 _CACHE: dict = {}

@@ -24,6 +24,16 @@ from .noise import NoiseModel
 
 log = slog.get("engine.profile")
 SCHEMA = 1
+HOT_ELECTRONS = 100.0       # a HOT photosite collects at least this many electrons with no light: a bright dot at
+#                             any ISO. In electrons, so the same photosites are "hot" whatever ISO they are seen at
+HOT_FRACTION = 0.01         # ...of the range above black, where the camera's gain is not known (a Quick profile)
+
+
+def hot_limit_dn(range_dn: float, gain_e_per_dn: float | None) -> float:
+    """How far above black (raw levels) a photosite must stand with no light to be called hot."""
+    if gain_e_per_dn:
+        return min(HOT_ELECTRONS / float(gain_e_per_dn), 0.9 * float(range_dn))
+    return HOT_FRACTION * float(range_dn)
 
 
 @dataclass
@@ -45,6 +55,13 @@ class IsoEntry:
     #                                                    paired, read_noise_dn 2x2, row_banding_dn, black_dn}]
     thermal: dict | None = None            # long exposures: {var_dn2_per_s, at_temp_c, doubling_c, points}
     read_noise_paired: bool = False        # read noise from two frames compared (else one frame: includes pattern)
+    black_offset_dn: list | None = None    # 2x2: the picture area's black minus the masked border's (a photo takes
+    #                                        its black from the border; this is what that misses)
+    fixed_pattern_dn: float | None = None  # per-photosite pattern that is the same in every frame (centre crop)
+    neighbour_corr: float | None = None    # how much neighbouring photosites' noise agrees (0 = independent)
+    excess_kurtosis: float | None = None   # tails of the noise (0 = a bell curve)
+    digital_gain: float = 1.0              # > 1: the raw values are stretched in the camera (a pushed ISO)
+    pushed: bool = False                   # this ISO is a lower analogue gain pushed digitally
 
 
 @dataclass
@@ -61,6 +78,17 @@ class CameraProfile:
     origin: str = "local"                  # local (made on this PC) | shared
 
     # ------------------------------------------------------------------------------------------ lookup
+    def gain_at(self, iso: float | None) -> float | None:
+        """Electrons per raw level at this ISO: measured there, or from the sensor's gain x ISO (which is one
+        number for all its real gains) where only other ISOs have flat pairs. None for a Quick profile."""
+        if not iso:
+            return None
+        e = self.entry_for(iso, tol_stops=0.01)
+        if e is not None and e.gain_e_per_dn:
+            return float(e.gain_e_per_dn)
+        gx = [x.gain_e_per_dn * x.iso for x in self.isos if x.gain_e_per_dn and not x.pushed]
+        return float(np.median(gx)) / float(iso) if gx else None
+
     def entry_for(self, iso: float | None, tol_stops: float = 1.0 / 3.0) -> IsoEntry | None:
         if not iso or not self.isos:
             return None
