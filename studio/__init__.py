@@ -9,5 +9,5 @@ Package layout (BUILD_PLAN.md section 2.2):
 """
 from __future__ import annotations
 
-__version__ = "0.1.12"
+__version__ = "0.1.13"
 APP_NAME = "Photographic Studio By Bill"

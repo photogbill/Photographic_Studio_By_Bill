@@ -2,6 +2,14 @@
 
 Newest first. Written by tools/whats_new.py from docs/NEXT_UPDATE.md each time Release.bat makes an update.
 
+## 0.1.13 (2026-11-21)
+
+- New: Focus Stack measures depth. Shoot a focus stack in Dual Pixel RAW and every place is measured two ways (which frame is sharpest, and each frame's own two halves), then fused into one height map. Hand-held is fine: the stack measures its own focus steps, even uneven ones.
+- New: the Depth view in Focus Stack shows that height, coloured by how each place was measured (cyan two ways, amber one way, violet filled in where nothing could be measured), with the places where the two measures disagree in red (something moved, a reflection).
+- New: "Save surface for games" in Focus Stack writes colour, height, normal, confidence and agreement maps and a file saying how they were measured, for game textures and 3D. Ordinary raws give the same files from focus alone. Tick "Make it tileable" for a texture that repeats without a join.
+- New: for other programs, `stack focus FRAMES --make surface` (or `--make depth`, the quick part) and `dualpixel FILE --make surface`, with `--ratio 1:2` for the size in millimetres and `--step-mm` for a focusing rail.
+- Faster: reading a Dual Pixel photo's two halves is much quicker (the shading step on a 45 MP R5 file went from about 39 seconds to under a second).
+
 ## 0.1.12 (2026-11-18)
 
 - New: Clean chooses its own strength for every photo (Develop > Clean > Auto). It works out, from the photo alone, how much noise each strength would leave and how much fine detail it would keep, and takes the gentlest one that does the job. It needs your camera calibrated on the Cameras page (lens-cap frames and flat pairs); until then your sliders decide, and it says so.
