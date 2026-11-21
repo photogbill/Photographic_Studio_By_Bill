@@ -1,6 +1,58 @@
 # Build progress
 
-Updated 2026-11-18 (session 15: Clean rebuilt on the calibration, `BUILD_PLAN_NOISE.md` 0.5 and 0.6; session 14: drop-everything camera calibration; session 13: Infrared and Panorama tabs, `BUILD_PLAN_PANO_IR.md`, flare ghosts and Fill; then Card to Stacks on Bill's card). Plan: BUILD_PLAN.md v2.0.
+Updated 2026-11-21 (session 16: Depth Stack, `BUILD_PLAN_DEPTH_STACK.md`; session 15: Clean rebuilt on the calibration, `BUILD_PLAN_NOISE.md` 0.5 and 0.6; session 14: drop-everything camera calibration; session 13: Infrared and Panorama tabs, `BUILD_PLAN_PANO_IR.md`, flare ghosts and Fill; then Card to Stacks on Bill's card). Plan: BUILD_PLAN.md v2.0.
+
+## Session 16: Depth Stack (2026-11-21, chat session with Bill)
+
+Bill, from the RPG Forge chat: "if you can focus stack dual pixel raws, or add that capability to Studio, we can do
+that as well" (hand-held, no tripod; textures with the Zeiss 50 mm f/2 Makro-Planar). The plan is
+`BUILD_PLAN_DEPTH_STACK.md`; everything in its "What to build" A to F is built.
+
+* **Dual Pixel frames in a focus stack** (`engine/stack/focus.py`): when every frame is a Dual Pixel RAW
+  (`FocusParams.dual_pixel = "auto"`), pass A also measures each frame's offset between its halves
+  (`dualpixel.depth.disparity`, window 16 / step 4 at half size) and lines it up exactly like the frame, on disk as
+  float16 (`an.dp_disp`, `an.dp_conf`). Ordinary raws: nothing changes.
+* **The fusion** (`engine/stack/depthfuse.py`): focus to a fraction of a frame (three-point Gaussian, Nayar and
+  Nakagawa 1994) with a quality that refuses a maximum at an end frame unless it falls away like a real peak; the
+  focus step measured from the stack itself, **per pair of frames** (a hand does not step evenly), s = the median;
+  every nearby frame's vote t_i = q_i - d_i / s; votes and focus weighed by their own measured noise (Dual Pixel's
+  from the step calibration, focus's from how far it strays from Dual Pixel); the agreement map = how far all the
+  votes stray from the answer (focus against Dual Pixel and the frames against each other); measured places keep
+  their measurement, holes are filled from them only (push-pull, then the guided filter in the holes alone, held
+  inside the measured range) and marked filled with confidence 0. Focus alone for ordinary raws; one Dual Pixel photo
+  on its own (`from_dual_pixel`).
+* **Surfaces** (`engine/stack/surface.py`): colour, 16-bit height (white = near), normal (OpenGL or DirectX),
+  confidence, agreement (grey + alpha) and `NAME_surface_Studio.json`; millimetres only when they can be known
+  (`--step-mm`, `--ratio` and the camera's pixel size), otherwise relative and said so; `--tileable` with one set of
+  weights for every file; the five names move together if any is taken.
+* **Command line**: `stack focus FRAMES --make merge,depth,surface`, `dualpixel FILE --make surface`, every setting
+  in `schema` (`stack.surface`). The MCP server picks them up by itself. `docs/CLI.md` has the files and the JSON.
+* **Focus Stack tab**: a **Depth** view (brightness = height, cyan two ways / amber one / violet filled in, red where
+  the measures disagree), the method's best-for and weak-at, Flip near / far, Magnification, Make it tileable, and
+  **Save surface for games**. Preview measures the depth in its own job, so the view is instant. The old "Depth map"
+  view is now called "Sharpest frame map" (it is which frame each place came from).
+* **Faster**: `GainField.plane` works the shading quartic as matrix products (exact; 45 MP: 39 s to under 1 s).
+* Which way is near cannot come from the halves alone (swapping the halves and swapping near and far look the same).
+  Until a camera's reading is checked on a known scene, a stack takes its first frame as near and says so; one photo
+  keeps the Studio's usual reading. **Bill is shooting the check (a tape measure at an angle) and a real Dual Pixel
+  stack**, to go in `test_raws\dual_pixel_stack\`.
+
+Measured (synthetic hand-held Dual Pixel stacks with known depth, disc blur and half-disc halves, R5 noise; details in
+`docs/RESULTS.md`): fused height error 0.047 steps at ISO 100 and 0.063 at ISO 800, against 0.050 / 0.069 for Dual
+Pixel alone, 0.24 for focus alone and 0.39 for Focus Stack's own depth map; the focus step within 1 %; on a rail
+(even steps, where focus is strong) the fusion re-weighs itself and still beats both. Real files: the R5 eagle (one
+Dual Pixel photo) and the nine-frame fly stack (ordinary raws) both run; each found a fault that was then fixed
+(below).
+
+Found on Bill's own files and fixed the same session: (1) unmeasured noise in the sky became black-and-white blobs
+(the weighted guided filter divides by a confidence that can be tiny at the edge of a hole); (2) offsets pinned at
+the end of the search counted as measured; (3) the band along the sky's edge leans (its window is half sky): one
+photo now fills it from inside; (4) out-of-focus background in the fly stack passed as measured (at the end frames,
+and as about 2000 scattered low-quality clumps: a measured region must now be a real region).
+Also fixed while checking: the guided filter copied the picture's texture into the height (a dark knot read as a
+hole), so measured heights no longer go through it.
+
+Tests: `tests/test_depth_stack.py` (19), 2 in `tests/test_cli_tools.py`, 1 in `tests/test_stack_pages.py`.
 
 ## Session 15: Clean, rebuilt on the calibration (2026-11-18, same day, chat session with Bill)
 

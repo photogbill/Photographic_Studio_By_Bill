@@ -24,6 +24,15 @@ Read these before changing anything in this folder:
   per-person settings). **Bill's priorities: the Shape track (face sliders, wide-angle faces, bodies found or
   shown) and Glasses come first.** Sections 0.4 to 0.6 say what is decided, what Bill's portraits are for and
   the patent facts; section M is the order.
+- `BUILD_PLAN_DEPTH_STACK.md`: depth measured two ways in a hand-held focus stack of Dual Pixel RAWs, fused, with an
+  agreement map, and surfaces for games (built, session 16: `engine/stack/depthfuse.py`, `engine/stack/surface.py`,
+  `stack focus --make surface`, the Depth view in Focus Stack). Its "Status" section says what is not checked yet
+  (a real Dual Pixel stack, which way is near on the R5).
+- `BUILD_PLAN_DP3D.md`: **the next build** (Bill, 2026-11-21 afternoon): Dual Pixel 3D. Speed and a cache for Dual
+  Pixel stacks, near/far read from Bill's scenes, macro gains (merge from measured depth, no ghosts, gap map), more game
+  maps (AO, de-lit colour, scale), foliage cards, **our own camera position solver** for hand-held unordered Dual Pixel
+  stacks, meshes, glTF for Blender and Godot 4, and a new 3D Scan sidebar section. Section 0.3 lists Bill's test
+  folder (`D:\dual pixel raw test`, 594 raws) stack by stack; section J is the order.
 - `docs/PROGRESS.md`: where things stand. Keep it current.
 - `docs/CLI.md`: the Studio from the command line for other programs (the RPG Forge, Claude): `studio/cli_tools.py`,
   `studio-cli.bat`. A new tool gets its command there, with a test in `tests/test_cli_tools.py`. The MCP server

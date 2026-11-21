@@ -1015,3 +1015,73 @@ like movement): a suspect is now compared again after blurring it to match each 
 
 **Show what's in focus.** 5 s per stack on 2 cores (the raspberry: 25% of the frame in focus somewhere, 0.5% detail
 no frame got sharp).
+
+## 2026-11-21 (session 16): Depth Stack (focus + Dual Pixel, fused)
+
+Built from `BUILD_PLAN_DEPTH_STACK.md`. Errors are RMS in focus steps (one step = the median step between
+neighbouring frames), over the textured places away from depth edges, plain patches and a patch that moved
+(`tests/depth_synth.half_truth`), at half size.
+
+**The synthetic stack** (`tests/depth_synth.py`): 9 frames, 768 x 1152; two bumps, a ramp and a 1.3-step block on a
+natural-looking texture, one plain patch. A disc blur (not a Gaussian) of radius S / 0.849 per step of defocus; each
+half of a Dual Pixel frame sees a half disc, on opposite sides for the two halves and swapping sides between in front
+of and behind focus, so the offset (centroids 0.849 R apart) = S = 1.6 px per step and grows with the blur as on a
+sensor. Hand-held: shifts, up to 0.9 degree of turn, up to 1.8 % focus breathing, and the planes of focus up to 0.3
+step off even. R5 noise: variance a v + b with (a, b) = (2.1e-5, 1.1e-8) at ISO 100 and (1.7e-4, 9e-8) at ISO 800,
+each half with half the light. The first version of the renderer used a Gaussian blur, even steps and shifted
+copies for the halves: focus alone scored 0.014 there (a three-point Gaussian fit on a Gaussian blur is exact), an
+unfair test, and its half-disc kernels lost their sub-pixel centroid below 1.5 px (fixed: each half disc is moved so
+its centroid is exact).
+
+| Hand-held, 9 frames | fused | Dual Pixel alone (all frames' votes) | one Dual Pixel frame | focus alone (sub-frame) | Focus Stack's depth map |
+|---|---|---|---|---|---|
+| ISO 100 | **0.047** | 0.050 | 0.085 | 0.238 | 0.387 |
+| ISO 800 | **0.063** | 0.069 | 0.119 | 0.238 | 0.375 |
+
+* The focus step s is found within 1 % (1.745 against 1.736 px; 5 % is the test's limit), and each frame's own
+  position within 0.1 step though the steps vary by 39 %. Focus alone cannot see uneven steps, which is most of its
+  error here.
+* On a rail (even steps, no hand) focus is strong (0.025) and the fusion re-weighs itself: fused 0.018 against 0.025
+  and 0.030 (Dual Pixel alone). The weights come from the stack itself: Dual Pixel's noise from the step
+  calibration, focus's from how far it strays from Dual Pixel.
+* A plain patch: its inside (beyond the measuring windows, 24 half-size px) is 100 % "filled", confidence 0, never
+  compared. A patch that moved 1.5 steps back in three frames: median agreement 0.48 step inside against 0.07
+  elsewhere, 37 % of it red (over half a step), none red elsewhere, confidence there 0.41.
+* **Dual Pixel window** (half-size px; RMS fused): hand-held ISO 100 32: 0.040 / 24: 0.046 / 16: 0.044; ISO 800
+  0.050 / 0.055 / 0.061; another seed at ISO 800 0.043 / 0.041 / 0.045; rail 0.028 / 0.026 / 0.018; at 640 x 960
+  hand-held 0.036 / 0.042 / 0.035 and rail 0.031 / 0.027 / 0.018. About even overall, but only 16 kept "fused beats
+  each measure alone" in every case: a 32-px window's error on a curved surface is a bias every frame shares, which
+  the step calibration cannot see, so Dual Pixel was over-trusted and on a rail the fused map lost to focus (0.031
+  against 0.026). With 16 the error is mostly noise, which the calibration does see. **16 / step 4 chosen**; to be
+  checked on Bill's real stack (real halves may be noisier than these).
+* Two things this replaced: an edge-aware (guided) smoothing of the measured height copied the texture into it (the
+  normal map showed the texture's stripes); the measured height now gets only a 1.5-px weighted smoothing (RMS 0.036
+  went to 0.040 on that run: the price of not copying the picture into the height).
+
+**Real files.**
+
+* R5 eagle (`test_raws\dual_pixel\3C9A8002.CR3`, one Dual Pixel photo, 8191 x 5463), `dualpixel --make surface`:
+  88 s and 5.0 GB at the peak on the 2-core build machine. 49 % measured (the trees), 51 % filled (the sky). Three
+  faults found and fixed: unmeasured sky came out as black-and-white blobs (the weighted guided filter divides one
+  filtered map by another, and near the edge of a hole the divisor is tiny: values swung to +-5 px against a measured
+  +-0.5); offsets pinned at the end of the +-8 px search had confidence; the band along the sky's edge leaned (its
+  window is half sky), so one photo now fills places within half a window of an unmeasured area from inside.
+  A distant tree's Dual Pixel relief is small and noisy, as expected at that distance.
+* Fly stack (`test_raws\focus_fly_handheld`, nine ordinary R5 raws, hand-held), `stack focus --make depth`: about
+  3 minutes, 3.5 GB. The fly, the leaves and the stem measured (14 %), the out-of-focus background filled (86 %),
+  smoothly. Found and fixed, in this order: places whose focus lies beyond the stack (the far background, the blurred
+  leaves in front) were sharpest at an end frame and passed as measured (an end frame now counts only when the
+  sharpness falls away from it as steeply as beside a real peak); the hole fill, guided by the picture, could copy
+  the bokeh's brightness into the height (holes are now filled from the measured places alone); and, the real cause
+  of the speckled background, about 2000 scattered clumps of background (quality about 0.21, against 0.76 on the
+  subject) just passed the bar: a measured region now has to be at least 0.02 % of the picture unless it is clearly
+  measured (mean quality 0.45 or more, so one sharp blade of grass stays). Left as it is: bright and dark flecks along
+  the fly's hairs and the leaves' edges, which focus alone cannot check (no second measure); this is what the Dual
+  Pixel half of the build is for, and a fly is not a texture.
+* Not yet: a real hand-held Dual Pixel stack (Bill is shooting one), and the check of which way is near on the R5
+  (a tape measure at an angle). Until then a stack takes its first frame as near and says so.
+
+Speed: the Dual Pixel shading gain is now worked as (powers of v) @ C @ (powers of u): `halves_luma` on the R5 eagle
+went from 39.2 s to about 1 s (same numbers to float32 rounding; `test_shading_gain_fast_path_is_exact`). Each Dual
+Pixel frame in a stack adds the second-frame decode, the shading fit and the offset search (about 22 s a frame on the
+build machine; much less on a real PC).

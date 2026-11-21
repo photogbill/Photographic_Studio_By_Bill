@@ -10,8 +10,9 @@ Made for programs rather than people: the RPG Forge, Claude, and anybody's scrip
     depth        the depth map, surface normals, a coloured view, or depth layers (RGBA) for parallax
     cutout       a subject cut out with a soft edge (RGBA), or its mask alone
     find         what the Studio can find in a picture, as data (faces, people, dust, flare, crops, colour statistics)
-    stack        focus | superres | pano: frames in, one linear result out
-    dualpixel    the files a Dual Pixel RAW can make (depth, halves, highlight recovery, 3-D views)
+    stack        focus | superres | pano: frames in, one linear result out; focus --make surface: the surface
+                 files for games (colour, height, normal, confidence, agreement, JSON)
+    dualpixel    the files a Dual Pixel RAW can make (depth, halves, highlight recovery, 3-D views, a surface)
     schema       every setting, its default and what it does, as JSON (read this first)
     looks        the looks on this PC
     batch        many of the commands above in one run (no start-up cost per picture)
@@ -375,30 +376,9 @@ def render_out(image, edit, spec, scale: float = 1.0) -> np.ndarray:
 
 # ====================================================================================================== files out
 def write_png_any(path: str, arr: np.ndarray, icc_bytes: bytes | None = None, meta: dict | None = None) -> str:
-    """PNG with 1 (grey), 3 (RGB) or 4 (RGBA) channels, 8 or 16 bits, carrying the Studio's mark (so running a
-    command again replaces its own earlier result and nothing else). Written through NAME.partial."""
-    import struct
-    import zlib
-    from .engine.io.export import _png_chunk, xmp_packet
-    a = np.asarray(arr)
-    if a.ndim == 2:
-        a = a[..., None]
-    h, w, c = a.shape
-    ctype = {1: 0, 3: 2, 4: 6}[c]
-    depth = 16 if a.dtype == np.uint16 else 8
-    rows = np.ascontiguousarray(a.astype(">u2" if depth == 16 else np.uint8)).reshape(h, -1).view(np.uint8)
-    raw = np.concatenate([np.zeros((h, 1), np.uint8), rows], axis=1)
-    tmp = path + ".partial"
-    with open(tmp, "wb") as fh:
-        fh.write(b"\x89PNG\r\n\x1a\n")
-        fh.write(_png_chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, depth, ctype, 0, 0, 0)))
-        if icc_bytes and c >= 3:
-            fh.write(_png_chunk(b"iCCP", b"ICC profile\0\0" + zlib.compress(icc_bytes, 9)))
-        fh.write(_png_chunk(b"iTXt", b"XML:com.adobe.xmp\0\0\0\0\0" + xmp_packet(slog.scrub(meta or {}))))
-        fh.write(_png_chunk(b"IDAT", zlib.compress(raw.tobytes(), 6)))
-        fh.write(_png_chunk(b"IEND", b""))
-    os.replace(tmp, path)
-    return path
+    """PNG with 1, 2, 3 or 4 channels, 8 or 16 bits, with the Studio's mark (engine/io/export.write_png_any)."""
+    from .engine.io.export import write_png_any as w
+    return w(path, arr, icc_bytes, meta)
 
 
 def write_rgba(path: str, img_pp: np.ndarray, alpha: np.ndarray, spec, meta: dict | None = None) -> str:
@@ -1051,15 +1031,35 @@ def cmd_stack(a, run: Run) -> None:
 
     out_dir = out_dir_of(a) if a.out else FR.default_out_dir(files[0])[0]
     info: dict = {"kind": a.kind, "frames_given": len(files)}
+    makes = [m.strip().lower() for m in (a.make or "merge").split(",") if m.strip()]
+    bad = [m for m in makes if m not in STACK_MAKES]
+    if bad or not makes:
+        raise Usage(f"stack --make: choose from {', '.join(STACK_MAKES)} (got {a.make!r})")
+    if a.kind != "focus" and makes != ["merge"]:
+        raise Usage("stack --make depth / surface: focus stacks only")
     if a.kind == "focus":
         from .engine.stack import focus as FS
         p = _set_params(FS.FocusParams(), a.set, "Focus Stack")
         if p.method not in FS.METHODS:
             raise Usage(f"focus method: one of {', '.join(FS.METHODS)}")
+        sp = surface_params(a) if ("depth" in makes or "surface" in makes) else None
         an = FS.analyse(files, p, progress)
-        out = free_target(os.path.join(out_dir, FR.result_name(files, "Focus")), None, run.taken)
-        FS.build(an, p, out, progress)
-        info.update(frames=an.n, method=p.method)
+        try:
+            info.update(frames=an.n, method=p.method, dual_pixel=bool(an.dual_pixel))
+            if "merge" in makes:
+                out = free_target(os.path.join(out_dir, FR.result_name(files, "Focus")), None, run.taken)
+                FS.build(an, p, out, progress)
+                run.output(input=files[0], output=out, linear=True, **info)
+                run.note("a stack's result is a linear file (32-bit): finish it with 'edit' (it opens like any photo)")
+            if sp is not None:
+                from .engine.stack import surface as SURF
+                kinds = SURF.KINDS if "surface" in makes else SURF.DEPTH_KINDS
+                r = SURF.stack_surface(an, out_dir, FR.result_base(files), sp, kinds, progress, None, run.taken,
+                                       p.method)
+                surface_outputs(run, files[0], r, info)
+        finally:
+            an.close()
+        return
     elif a.kind == "superres":
         from .engine.stack import superres as SR
         if a.mode not in SR.MODES:
@@ -1087,7 +1087,43 @@ def cmd_stack(a, run: Run) -> None:
 
 
 # ====================================================================================================== dual pixel
-DP_MAKES = ("report", "depth", "half1", "half2", "hdr", "anaglyph", "sbs", "wiggle")
+DP_MAKES = ("report", "depth", "half1", "half2", "hdr", "anaglyph", "sbs", "wiggle", "surface")
+STACK_MAKES = ("merge", "depth", "surface")
+
+
+def surface_params(a):
+    """The surface settings from the command line (checked: a wrong value is a usage error, never ignored)."""
+    from .engine.stack import surface as SURF
+    sp = SURF.SurfaceParams(ratio=getattr(a, "ratio", None) or "", step_mm=float(getattr(a, "step_mm", 0) or 0),
+                            near=getattr(a, "near", "auto") or "auto", normals_y=getattr(a, "normals_y", "up"),
+                            normal_strength=float(getattr(a, "normal_strength", 1.0)),
+                            tileable=bool(getattr(a, "tileable", False)), swap=bool(getattr(a, "swap", False)))
+    try:
+        SURF.parse_ratio(sp.ratio)
+    except ValueError as e:
+        raise Usage(f"--ratio: {e}") from None
+    if sp.step_mm < 0 or sp.step_mm > 100:
+        raise Usage("--step-mm: the distance the focus moved between frames, in mm (for example 0.2)")
+    if not 0.05 <= sp.normal_strength <= 20:
+        raise Usage("--normal-strength: between 0.05 and 20")
+    return sp
+
+
+def surface_outputs(run: Run, src: str, r: dict, info: dict | None = None) -> None:
+    """One result entry per surface file; the JSON's entry carries the summary a program needs first."""
+    doc = r["json"]
+    info = {("stack" if k == "kind" else k): v for k, v in (info or {}).items()}
+    for k, path in r["paths"].items():
+        if k == "json":
+            continue
+        run.output(input=src, output=path, kind=f"surface_{k}", width=doc["size"]["width"],
+                   height=doc["size"]["height"], measured=k != "colour", **info)
+    if "json" in r["paths"]:
+        run.output(input=src, output=r["paths"]["json"], kind="surface_json", method=doc["method"],
+                   height_units=doc["height"]["units"], near_end=doc["height"]["near_end"],
+                   coverage=doc["coverage"], files=doc["files"])
+    for t in doc.get("notes", []):
+        run.note(t)
 
 
 def cmd_dualpixel(a, run: Run) -> None:
@@ -1106,6 +1142,7 @@ def cmd_dualpixel(a, run: Run) -> None:
             if not f.lower().endswith(".dng") and not DD.is_dual_pixel(f):
                 run.problem(f"{os.path.basename(f)}: {DD.NOT_DUAL} {DD.HOW_TO}", f)
                 continue
+            sp = surface_params(a) if "surface" in makes else None
             dp = DD.open_dual(f)
             gains = DD.shading(dp)
             la, lb = DEP.halves_luma(dp, gains)
@@ -1152,6 +1189,13 @@ def cmd_dualpixel(a, run: Run) -> None:
                 elif m == "wiggle":
                     run.output(input=f, output=V.wigglegram(dp, gains, tgt("wiggle"), boost=a.boost, disp=ref),
                                kind="dp_wigglegram")
+                elif m == "surface":
+                    from .engine.stack import surface as SURF
+                    r = SURF.dual_surface(dp, out_dir, os.path.splitext(os.path.basename(f))[0], sp, SURF.KINDS,
+                                          run.taken, {"la": la, "lb": lb, "disp": disp, "conf": conf})
+                    surface_outputs(run, f, r)
+        except Usage:
+            raise
         except Exception as e:                            # noqa: BLE001
             run.problem(f"{os.path.basename(f)}: {e}", f, e)
 
@@ -1190,7 +1234,7 @@ def schema() -> dict:
     from .engine.io.export import FORMATS, OUTPUT_SHARPEN
     from .engine.local import colourize, colourmatch, depth, halftone, masks, relight, scratches, stains
     from .engine.pipeline.edit import Edit
-    from .engine.stack import focus, pano, project, superres
+    from .engine.stack import depthfuse, focus, pano, project, superres, surface
     e = Edit()
     nested = _nested_types()
     top = _field_docs(Edit)
@@ -1243,7 +1287,21 @@ def schema() -> dict:
             "colour_match_stats": list(colourmatch.STATS),
         },
         "stack": {
-            "focus": {"settings": plain(focus.FocusParams().to_dict()), "methods": plain(focus.METHOD_INFO)},
+            "focus": {"settings": plain(focus.FocusParams().to_dict()), "methods": plain(focus.METHOD_INFO),
+                      "settings_about": _field_docs(focus.FocusParams)},
+            "surface": {
+                "about": "Depth measured two ways in a focus stack of Dual Pixel RAWs (which frame is sharpest, and "
+                         "each frame's own Dual Pixel offset), fused into one height map with a map of where the two "
+                         "agree; focus alone for ordinary raws; one Dual Pixel photo on its own. Made by: stack focus "
+                         "FRAMES --make surface (or depth), dualpixel FILE --make surface.",
+                "settings": {k: {"default": v, "about": _field_docs(surface.SurfaceParams).get(k, "")}
+                             for k, v in surface.SurfaceParams().to_dict().items()},
+                "methods": plain(depthfuse.METHOD_INFO),
+                "files": surface.names("NAME"),
+                "depth_files": surface.names("NAME", surface.DEPTH_KINDS),
+                "colours": {"cyan": "measured both ways", "amber": "measured one way",
+                            "violet": "filled in from the neighbours (confidence 0)",
+                            "red": "the measures disagree (more than half a focus step)"}},
             "superres": {"settings": plain(superres.SuperParams().to_dict()), "modes": plain(superres.MODE_INFO),
                          "merges": plain(superres.MERGE_INFO)},
             "pano": {"settings": plain(dataclasses.asdict(pano.PanoParams())),
@@ -1345,8 +1403,9 @@ HELP = {
     "depth": "depth map, normal map, coloured view, or depth layers (RGBA) for parallax",
     "cutout": "cut a subject out with a soft edge (RGBA), or write its mask",
     "find": "what the Studio finds in a picture, as data",
-    "stack": "focus | superres | pano: frames in, one linear result out",
-    "dualpixel": "what a Dual Pixel RAW can make: depth, halves, highlight recovery, 3-D views",
+    "stack": "focus | superres | pano: frames in, one linear result out; focus --make surface: colour, height, "
+             "normal, confidence and agreement maps for games",
+    "dualpixel": "what a Dual Pixel RAW can make: depth, halves, highlight recovery, 3-D views, a surface for games",
     "schema": "every setting, default, choice and command, as JSON (read this first)",
     "looks": "the looks on this PC",
     "batch": "run many of these commands from a jobs file, in one start",
@@ -1405,6 +1464,24 @@ def _parents():
     out.add_argument("--preview", type=int, default=None, metavar="N",
                      help="a quick look: sRGB JPEG, long edge N pixels, named NAME_Preview_Studio.jpg")
     return common, inp, ed, out
+
+
+def _surface_args(p, stack: bool) -> None:
+    """The settings of --make surface / depth (engine/stack/surface.SurfaceParams)."""
+    p.add_argument("--ratio", default=None, metavar="M", help="surface: magnification as shot, e.g. 1:2 or 1:1 (gives "
+                   "the size of a pixel on the subject in mm)")
+    if stack:
+        p.add_argument("--step-mm", type=float, default=0.0, help="surface: how far the focus moved between frames, "
+                       "in mm (a rail): the height is then in mm")
+        p.add_argument("--near", default="auto", choices=["auto", "first", "last"],
+                       help="surface: which end of the stack is nearest (auto: measured when the camera's Dual Pixel "
+                            "reading is known, else the first frame)")
+    p.add_argument("--normals-y", default="up", choices=["up", "down"], help="surface: normal map green = up "
+                   "(OpenGL, Godot, Blender) or down (DirectX)")
+    p.add_argument("--normal-strength", type=float, default=1.0, help="surface: steepness of the normal map when "
+                   "the height is relative (1 = the steep tenth tilts about 45 degrees)")
+    p.add_argument("--tileable", action="store_true", help="surface: offset by half and heal the seams of every "
+                   "file the same way (a repeating texture)")
 
 
 def add_parsers(sub) -> None:
@@ -1525,6 +1602,10 @@ def add_parsers(sub) -> None:
                    help="a setting of that tool ('schema' lists them under stack)")
     p.add_argument("--mode", default="handheld", help="superres: handheld, clean, moon or sky")
     p.add_argument("--factor", type=float, default=1.0, help="pano: build smaller (0.25 = quarter size)")
+    p.add_argument("--make", default="merge", help="focus: comma list of merge (the linear result), depth (height, "
+                   "confidence, agreement + JSON: fast) and surface (colour, height, normal, confidence, agreement "
+                   "+ JSON, for games); default merge")
+    _surface_args(p, stack=True)
 
     p = sub.add_parser("dualpixel", parents=[inp, common], help=HELP["dualpixel"])
     p.add_argument("--make", default="report,depth", help="comma list of: " + ", ".join(DP_MAKES))
@@ -1533,6 +1614,7 @@ def add_parsers(sub) -> None:
     p.add_argument("--strength", type=float, default=1.0, help="hdr: highlight recovery strength")
     p.add_argument("--view-scale", type=float, default=0.5, help="anaglyph / sbs size")
     p.add_argument("--boost", type=float, default=1.0, help="wiggle: exaggerate the 3-D")
+    _surface_args(p, stack=False)
 
     p = sub.add_parser("schema", parents=[common], help=HELP["schema"])
     p.add_argument("setting", nargs="?", default=None, help="one setting or group, e.g. light or light.shadows")

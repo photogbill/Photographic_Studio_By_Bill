@@ -23,6 +23,23 @@ log = slog.get("engine.dualpixel.depth")
 
 IN_FOCUS_PX = 0.15                  # |offset| under this (full-size pixels), with confidence: in focus
 
+# Which way is near. The two halves cannot tell it by themselves: swapping the halves and swapping in front of /
+# behind focus give exactly the same pictures, so the sign has to be read once per camera from a scene whose near
+# end is known (a tape measure lying at an angle, focused in the middle). Camera model -> the sign of the offset of
+# a place IN FRONT OF the plane of focus. Until a camera is in this table the Studio's usual reading is used
+# (negative = in front, as views.depth_png has always drawn it) and every result says it is not yet checked.
+NEAR_SIGN: dict = {}
+DEFAULT_NEAR_SIGN = -1
+
+
+def near_sign(model: str) -> tuple[int, bool]:
+    """(sign of the offset in front of focus, measured on a known scene for this camera?)."""
+    key = " ".join(str(model or "").split()).lower()
+    for k, v in NEAR_SIGN.items():
+        if k.lower() == key:
+            return int(v), True
+    return DEFAULT_NEAR_SIGN, False
+
 
 def halves_luma(dp, gains) -> tuple[np.ndarray, np.ndarray]:
     """Shading-corrected, white-balanced 2 x 2 luminance of each half (half size). Clipped A+B photosites are

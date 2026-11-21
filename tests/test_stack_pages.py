@@ -304,3 +304,41 @@ def test_card_to_stacks_page_lists_puts_back_and_rejudges():
     page.clear()
     assert page.tree.topLevelItemCount() == 0 and page.centre.currentIndex() == 0
     page.close()
+
+
+def test_focus_page_depth_view_and_save_surface(monkeypatch):
+    """The Depth view (coloured by how each place was measured) and "Save surface for games" on a synthetic
+    hand-held stack of Dual Pixel RAWs (BUILD_PLAN_DEPTH_STACK F)."""
+    import depth_synth as DS
+    app, M = _app()
+    frames, halves, _ = DS.make_stack(n=6, h=384, w=576)
+    paths = DS.install(monkeypatch, frames, halves, "page_depth")
+    page = M.FocusStackPage(M.Settings())
+    page.resize(1280, 720)
+    page.show()
+    page.set_frames(paths)
+    app.processEvents()
+    page.out_dir = str(OUT / "depth")
+    assert not page.surface_b.isEnabled()                   # nothing measured yet
+    page.preview()
+    _wait(app, page)
+    assert page.analysis is not None and page.analysis.dual_pixel
+    page.view_pick.setCurrentText("Depth")
+    app.processEvents()
+    assert page.result.view.chip.startswith("Depth · measured two ways")
+    assert "Measured two ways" in page.report.text() and "Focus and Dual Pixel" in page.depth_method.text()
+    page.depth_flip.setChecked(True)
+    app.processEvents()
+    assert page.surface_params().near in ("first", "last")
+    page.depth_ratio.setCurrentText("1:2")
+    assert page.surface_b.isEnabled()
+    page.save_surface()
+    _wait(app, page)
+    files = page.last_surface
+    assert set(files) == {"colour", "height", "normal", "confidence", "agreement", "json"}
+    assert all(os.path.exists(p) for p in files.values())
+    import json
+    doc = json.load(open(files["json"], encoding="utf-8"))
+    assert doc["height"]["near_end"].startswith("set by you") and doc["lateral"]["mm_per_pixel"]
+    page._drop_analysis()
+    page.close()

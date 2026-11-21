@@ -57,6 +57,8 @@ HONEST = ("Works on a subject that held still. Something that moved between fram
 WHAT_TO_SHOOT = ("A focus bracket: same framing, same exposure, focus stepped from near to far. Tripod or rail. "
                  "5 to 100 frames.")
 MAX_GAIN_STOPS = 0.3
+DP_TILE, DP_STEP = 16, 4     # Dual Pixel offsets in a stack: much finer than one photo's (48 / 16): the frames
+                             # average the noise, and a small window follows a curved surface (docs/RESULTS.md)
 PICK_LEVELS = 99             # pyramid: sizes (from the finest) where the strongest detail is picked; coarser
                              # ones come from the depth result (all sizes pick: best on the synthetic tests)
 RESIDUAL_WARN_PX = 1.5
@@ -78,11 +80,13 @@ class FocusParams:
     order: str = "auto"          # auto (by magnification, else capture order) | capture | reverse
     local: bool = True           # local flow after the global line-up (hand-held stacks; harmless on a tripod)
     retouch: list = field(default_factory=list)   # [{"frame": i, "points": [[u, v], ...], "radius": r}] (0..1)
+    dual_pixel: str = "auto"     # auto: when every frame is a Dual Pixel RAW, each frame's two halves are measured
+                                 # too and depth is measured two ways (Depth view, surfaces); off: never
 
     def analysis_key(self) -> tuple:
         """Settings that change the analysis (anything else only changes the merge)."""
         return (self.denoise_first, self.align, self.equalise, round(float(self.radius), 3), self.order,
-                bool(self.local))
+                bool(self.local), self.dual_pixel)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -134,6 +138,11 @@ class FocusAnalysis:
     cropped_share: float = 0.0
     ref_noise: tuple = (0.0, 0.0)
     _depth: dict = field(default_factory=dict)
+    dual_pixel: bool = False     # every frame's Dual Pixel offsets were measured (dp_disp, dp_conf)
+    dp_disp: np.ndarray | None = None   # memmap (N, bh, bw) float16: offset between the halves, full-size px of the
+                                        # reference, lined up like the frames (depthfuse.py)
+    dp_conf: np.ndarray | None = None   # memmap (N, bh, bw) float16: 0..1
+    dp_notes: list = field(default_factory=list)
 
     @property
     def n(self) -> int:
@@ -317,6 +326,7 @@ def analyse(paths, params: FocusParams | None = None, progress=None, cancel=None
         raise F.StackProblem(" ".join(msgs))
     usable = [f for f in infos if f.ok]
     dropped = [FrameReport(f.name, f.path, False, "dropped", f.problem) for f in infos if not f.ok]
+    use_dp = params.dual_pixel != "off" and len(usable) >= 2 and all(F.is_dual(f.path) for f in usable)
     if params.order == "reverse":
         usable = usable[::-1]
     n = len(usable)
@@ -396,6 +406,9 @@ def analyse(paths, params: FocusParams | None = None, progress=None, cancel=None
         # ---- warp each half-size frame into the reference's frame, gains, sharpness
         energy = scratch.array("energy", (n, bh, bw), np.float16)
         aligned = scratch.array("aligned", (n, bh, bw, 3), np.float16)
+        dpd = scratch.array("dp_disp", (n, bh, bw), np.float16) if use_dp else None
+        dpc = scratch.array("dp_conf", (n, bh, bw), np.float16) if use_dp else None
+        dp_notes: list = []
         smax = np.zeros((bh, bw), np.float32)
         ssec = np.zeros((bh, bw), np.float32)
         idx = np.zeros((bh, bw), np.int16)
@@ -440,6 +453,9 @@ def analyse(paths, params: FocusParams | None = None, progress=None, cancel=None
                 noise_e = nf
                 guide = np.sqrt(np.clip(L / max(float(np.percentile(L, 99.5)), 1e-6), 0, 1)).astype(np.float32)
             energy[j] = S.astype(np.float16)
+            if use_dp:
+                _tick(progress, 0.5 + 0.45 * (step + 0.5) / n, f"Dual Pixel halves: frame {step + 1} of {n}")
+                _dual_offsets(keep[j], t_half[j], f_half[j], box_h, (bh, bw), shape_h, dpd, dpc, j, dp_notes)
             better = S > smax
             ssec = np.where(better, smax, np.maximum(ssec, S))
             idx = np.where(better, np.int16(j), idx)
@@ -465,6 +481,10 @@ def analyse(paths, params: FocusParams | None = None, progress=None, cancel=None
         scratch.drop(raw_mm)
         reports = [r for _, r in sorted(reports, key=lambda t: t[0])] + dropped
         notes = list(msgs)
+        if use_dp:
+            dpd.flush()
+            dpc.flush()
+            notes.append("Every frame is a Dual Pixel RAW: depth is measured two ways (Depth view).")
         if cropped > 0.005:
             notes.append(f"The edges move between frames: {100 * cropped:.1f}% of the frame is cropped so every "
                          f"place has every frame.")
@@ -472,7 +492,8 @@ def analyse(paths, params: FocusParams | None = None, progress=None, cancel=None
                            f_half=f_half, f_full=f_full, gains=gains, box_full=box, box_half=box_h, shape_full=shape_f, flip=flip,
                            edit=edit.to_dict(), meta=meta, params=FocusParams.from_dict(params.to_dict()),
                            aligned=aligned, energy=energy, smax=smax, ssec=ssec, idx=idx, noise_e=noise_e,
-                           guide=guide, scratch=scratch, notes=notes, cropped_share=cropped, ref_noise=ref_noise)
+                           guide=guide, scratch=scratch, notes=notes, cropped_share=cropped, ref_noise=ref_noise,
+                           dual_pixel=bool(use_dp), dp_disp=dpd, dp_conf=dpc, dp_notes=dp_notes)
         _tick(progress, 1.0, "Analysis done")
         log.info("focus analysis: %d frames, order %s, box %s, cropped %.1f%%, gains %s", n,
                  "by magnification" if perm != list(range(n)) else "capture", box, 100 * cropped,
@@ -481,6 +502,36 @@ def analyse(paths, params: FocusParams | None = None, progress=None, cancel=None
     except BaseException:
         scratch.close()
         raise
+
+
+def _dual_offsets(fi, t_half, f_half, box_h, shape_box, shape_h, dpd, dpc, j: int, notes: list):
+    """Frame j's Dual Pixel offset and confidence, measured on its own halves and lined up exactly like the frame
+    (the offsets turned into the reference's pixels: divided by the frame's magnification). A frame whose halves
+    cannot be read gives nothing (confidence 0) and a note; a fault of the Studio also writes an error report."""
+    from ..dualpixel import depth as DEP
+    try:
+        la, lb = F.dual_halves(fi.path)
+        if la.shape != tuple(shape_h):
+            raise F.StackProblem(f"its halves are {la.shape[1]} x {la.shape[0]}, the frame {shape_h[1]} x "
+                                 f"{shape_h[0]}")
+        d, c = DEP.disparity(la, lb, DP_TILE, DP_STEP)
+        del la, lb
+        T = _with_origin(t_half, box_h[0], box_h[2])
+        fl = _flow_in_box(f_half, box_h[0], box_h[2])
+        dw = A.warp(d, T, shape_box, order=1, flw=fl) / np.float32(max(t_half.scale(), 1e-6))
+        cw = A.warp(c, T, shape_box, order=1, flw=fl)
+        dpd[j] = dw.astype(np.float16)
+        dpc[j] = np.clip(cw, 0.0, 1.0).astype(np.float16)
+    except Exception as e:                           # noqa: BLE001  (one frame without offsets: the rest still work)
+        dpd[j] = np.float16(0)
+        dpc[j] = np.float16(0)
+        notes.append(f"{fi.name}: its Dual Pixel halves could not be measured ({_short(e)}); depth there comes from "
+                     f"the other frames.")
+        if not (slog.expected_problem(e) or isinstance(e, F.StackProblem)):
+            slog.log_exception(f"Dual Pixel halves of {fi.name}", log)
+            slog.save_error_report(f"Focus Stack: measuring the Dual Pixel halves of {fi.name}")
+        else:
+            log.info("focus: dual pixel halves of %s not measured (%s)", fi.name, e)
 
 
 def _trimmed(v: np.ndarray) -> float:

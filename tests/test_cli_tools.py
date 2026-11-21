@@ -230,3 +230,67 @@ def test_clean_auto_and_the_new_methods_from_the_command_line(tmp_path, capsys):
     code3, sch = _run(["schema"], capsys)
     from studio.engine.raw.denoise import METHOD_INFO
     assert code3 == 0 and set(sch["data"]["choices"]["denoise.method"]) == set(METHOD_INFO)
+
+
+def test_stack_focus_surface_files_and_json_contract(tmp_path, capsys, monkeypatch):
+    """`stack focus FRAMES --make surface`: the five PNGs and the JSON under the names the RPG Forge relies on
+    (BUILD_PLAN_DEPTH_STACK D), the JSON's keys, its own files replaced on a second run, --make depth, and wrong
+    values said plainly (exit code 2)."""
+    import depth_synth as DS
+    frames, halves, _ = DS.make_stack(n=6, h=384, w=576)
+    paths = DS.install(monkeypatch, frames, halves, "cli_surface")
+    out = tmp_path / "s"
+    args = ["stack", "focus", *paths, "--make", "surface", "--out", out, "--ratio", "1:2", "--set", "order=capture"]
+    code, res = _run(args, capsys)
+    assert code == 0, res["problems"]
+    kinds = {o["kind"]: o for o in res["outputs"]}
+    assert set(kinds) == {"surface_colour", "surface_height", "surface_normal", "surface_confidence",
+                          "surface_agreement", "surface_json"}
+    base = "3C9A9000_to_3C9A9005"
+    for k in ("colour", "height", "normal", "confidence", "agreement"):
+        assert os.path.basename(kinds[f"surface_{k}"]["output"]) == f"{base}_{k}_Studio.png"
+    assert os.path.basename(kinds["surface_json"]["output"]) == f"{base}_surface_Studio.json"
+    modes = {k: Image.open(kinds[f"surface_{k}"]["output"]).mode for k in ("colour", "height", "normal",
+                                                                          "confidence", "agreement")}
+    assert modes == {"colour": "RGB", "height": "I;16", "normal": "RGB", "confidence": "L", "agreement": "LA"}
+    sizes = {Image.open(kinds[f"surface_{k}"]["output"]).size for k in ("colour", "height", "normal")}
+    assert len(sizes) == 1                                          # one geometry for every file
+    doc = json.load(open(kinds["surface_json"]["output"], encoding="utf-8"))
+    for key in ("studio_surface", "written_by", "method", "source", "camera", "size", "files", "height", "lateral",
+                "displacement", "normal", "dual_pixel", "coverage", "agreement", "tileable", "settings", "notes"):
+        assert key in doc, key
+    assert doc["method"] == "focus+dual_pixel" and doc["source"]["frames_used"] == 6
+    assert doc["files"]["height"] == f"{base}_height_Studio.png" and doc["height"]["white"] == "near"
+    assert doc["height"]["units"] == "relative" and doc["lateral"]["mm_per_pixel"] > 0
+    assert abs(doc["dual_pixel"]["step_px"]) > 0.5 and len(doc["dual_pixel"]["frame_positions_steps"]) == 6
+    assert abs(sum(doc["coverage"][k] for k in ("measured_both", "measured_one", "filled")) - 1) < 1e-3
+    assert kinds["surface_json"]["method"] == "focus+dual_pixel"
+    code2, res2 = _run(args, capsys)
+    assert code2 == 0 and sorted(o["output"] for o in res2["outputs"]) == sorted(o["output"] for o in res["outputs"])
+    code3, res3 = _run(["stack", "focus", *paths, "--make", "depth", "--out", tmp_path / "d"], capsys)
+    assert code3 == 0 and {o["kind"] for o in res3["outputs"]} == {"surface_height", "surface_confidence",
+                                                                  "surface_agreement", "surface_json"}
+    code4, res4 = _run(["stack", "focus", *paths, "--make", "surface", "--ratio", "banana"], capsys)
+    assert code4 == 2 and "--ratio" in res4["problems"][0]["text"]
+    code5, res5 = _run(["stack", "superres", *paths, "--make", "surface"], capsys)
+    assert code5 == 2 and "focus" in res5["problems"][0]["text"]
+    code6, res6 = _run(["stack", "focus", *paths, "--make", "sruface"], capsys)
+    assert code6 == 2 and "surface" in res6["problems"][0]["text"]
+
+
+def test_dualpixel_surface_from_the_command_line(tmp_path, capsys, monkeypatch):
+    import test_dualpixel as TD
+    from studio.engine.dualpixel import decode as DD
+    TD.OUT.mkdir(parents=True, exist_ok=True)
+    dp, _ = TD.make_dual()
+    src = tmp_path / "IMG_DUAL.CR3"
+    src.write_bytes(b"")
+    monkeypatch.setattr(DD, "is_dual_pixel", lambda p: True)
+    monkeypatch.setattr(DD, "open_dual", lambda p: dp)
+    code, res = _run(["dualpixel", src, "--make", "surface", "--out", tmp_path / "o", "--normals-y", "down"], capsys)
+    assert code == 0, res["problems"]
+    kinds = {o["kind"]: o["output"] for o in res["outputs"]}
+    assert os.path.basename(kinds["surface_height"]) == "IMG_DUAL_height_Studio.png"
+    doc = json.load(open(kinds["surface_json"], encoding="utf-8"))
+    assert doc["method"] == "dual_pixel" and doc["normal"]["convention"].startswith("DirectX")
+    assert not doc["height"]["near_measured"] and "not yet checked" in doc["height"]["near_end"]

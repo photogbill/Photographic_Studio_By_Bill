@@ -171,6 +171,34 @@ def open_frame(path: str):
     return api.open(path)
 
 
+def is_dual(path: str) -> bool:
+    """True when the frame is a Dual Pixel RAW (a CR3 is told from its box structure alone, cheaply; a CR2 needs
+    one decode). Anything else, or anything unreadable: False (the frame is then used as an ordinary frame)."""
+    if not str(path).lower().endswith((".cr3", ".cr2")):
+        return False
+    from ..dualpixel.decode import is_dual_pixel
+    try:
+        return bool(is_dual_pixel(path))
+    except Exception as e:                           # noqa: BLE001  (not readable as Dual Pixel: an ordinary frame)
+        log.info("is_dual %s: %s", os.path.basename(path), e)
+        return False
+
+
+def dual_halves(path: str) -> tuple[np.ndarray, np.ndarray]:
+    """The two halves' luminance of a Dual Pixel RAW frame (half size, camera-crop frame, shading corrected: the
+    same frame as scene_rgb(path, edit, half=True)). Both frames are decoded and let go at once."""
+    from ..dualpixel import decode as DD, depth as DEP
+    dp = DD.open_dual(path)
+    try:
+        return DEP.halves_luma(dp, DD.shading(dp))
+    finally:
+        try:
+            dp.image.drop_cache()
+        except Exception:                            # noqa: BLE001  (only a cache)
+            pass
+        del dp
+
+
 @dataclass
 class RawInfo:
     """What the drizzle needs from a frame besides its mosaic."""
@@ -285,8 +313,12 @@ def default_out_dir(first_source: str) -> tuple[str, str]:
     return str(alt), f"The photos' folder cannot be written; the result goes to {alt}."
 
 
+def result_base(paths_: list) -> str:
+    """'<first stem>_to_<last stem>' (one frame: '<stem>'): the start of a stack result's name."""
+    stems = [os.path.splitext(os.path.basename(p))[0] for p in paths_]
+    return stems[0] if len(stems) == 1 or stems[0] == stems[-1] else f"{stems[0]}_to_{stems[-1]}"
+
+
 def result_name(paths_: list, tag: str, ext: str = ".tif") -> str:
     """'<first stem>_to_<last stem>_<tag>_Studio.tif' (one frame: '<stem>_<tag>_Studio.tif')."""
-    stems = [os.path.splitext(os.path.basename(p))[0] for p in paths_]
-    base = stems[0] if len(stems) == 1 or stems[0] == stems[-1] else f"{stems[0]}_to_{stems[-1]}"
-    return f"{base}_{tag}_Studio{ext}"
+    return f"{result_base(paths_)}_{tag}_Studio{ext}"

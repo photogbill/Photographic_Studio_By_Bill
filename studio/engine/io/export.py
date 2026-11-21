@@ -161,6 +161,30 @@ def _png_chunk(tag: bytes, data: bytes) -> bytes:
     return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
 
 
+def write_png_any(path: str, arr: np.ndarray, icc_bytes: bytes | None = None, meta: dict | None = None) -> str:
+    """PNG with 1 (grey), 2 (grey + alpha), 3 (RGB) or 4 (RGBA) channels, 8 or 16 bits, carrying the Studio's mark
+    (so running a command again replaces its own earlier result and nothing else). Written through NAME.partial."""
+    a = np.asarray(arr)
+    if a.ndim == 2:
+        a = a[..., None]
+    h, w, c = a.shape
+    ctype = {1: 0, 2: 4, 3: 2, 4: 6}[c]
+    depth = 16 if a.dtype == np.uint16 else 8
+    rows = np.ascontiguousarray(a.astype(">u2" if depth == 16 else np.uint8)).reshape(h, -1).view(np.uint8)
+    raw = np.concatenate([np.zeros((h, 1), np.uint8), rows], axis=1)
+    tmp = path + ".partial"
+    with open(tmp, "wb") as fh:
+        fh.write(b"\x89PNG\r\n\x1a\n")
+        fh.write(_png_chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, depth, ctype, 0, 0, 0)))
+        if icc_bytes and c >= 3:
+            fh.write(_png_chunk(b"iCCP", b"ICC profile\0\0" + zlib.compress(icc_bytes, 9)))
+        fh.write(_png_chunk(b"iTXt", b"XML:com.adobe.xmp\0\0\0\0\0" + xmp_packet(slog.scrub(meta or {}))))
+        fh.write(_png_chunk(b"IDAT", zlib.compress(raw.tobytes(), 6)))
+        fh.write(_png_chunk(b"IEND", b""))
+    os.replace(tmp, path)
+    return path
+
+
 def write_png(path: str, arr: np.ndarray, icc_bytes: bytes, profile_name: str = "ICC profile",
               meta: dict | None = None):
     """8- or 16-bit RGB PNG with an embedded ICC profile (iCCP). Our own writer: Pillow cannot write
@@ -225,6 +249,13 @@ def is_own_export(path: str) -> bool:
             from PIL import Image
             with Image.open(path) as im:
                 return str(im.getexif().get(305) or "").startswith(OWN_MARK)
+        if low.endswith(".json"):                 # a data file the Studio wrote beside its pictures (surfaces)
+            import json
+            if os.path.getsize(path) > (8 << 20):
+                return False
+            with open(path, encoding="utf-8") as fh:
+                d = json.load(fh)
+            return isinstance(d, dict) and str(d.get("written_by", "")).startswith(OWN_MARK)
         if low.endswith(".png"):
             with open(path, "rb") as fh:
                 if fh.read(8) != b"\x89PNG\r\n\x1a\n":
