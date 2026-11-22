@@ -740,3 +740,159 @@ M7 after Bill has tested. `docs/PROGRESS.md` gets a line per milestone, `docs/NE
    else ask once in Settings.
 4. **Next shoot**: "For the next object, would you shoot 12-16 stacks all the way round and a few from lower down?"
    Recommendation: yes, after M5, guided by the Coach's printout.
+
+---
+
+## Status (session 17, 2026-11-21 afternoon)
+
+Built: **M0 to M4** (with the app pages for them), tested on synthetic data with known truth (`tests/test_dp3d.py`,
+`tests/test_scan_pages.py`); real checks on Bill's frames for M0 and M1 (docs/RESULTS.md, session 17). Where it
+differs from the words above, and why:
+
+* **A.1** Built as written. R5 locked -1 from stacks #38, #25, #9 (#14 abstains: shot nearly straight down, so the
+  orientation tag cannot say which edge is nearer). The end frames of each stack abstain (Bill rocks focus past both
+  ends). `nearcheck.py`; the profile is `dpprofile.py` (numbers only: near sign, shading per lens setting, room for the
+  C.6 d scale).
+* **A.2** The Makro-Planar ZE records no focus distance on the R5 (checked). Read for lenses that do (ExifTool's
+  ShotInfo scaling, unverified on such a lens); used as an amber starting scale through the thin-lens formula.
+* **A.3** Decode once, second frame from memory, shading once (refit when the level ratio drifts > 2%; kept in the
+  profile per lens setting), a rewritten offset search (3.8x; the first implementation kept as
+  `depth.disparity_reference` for the tests), frames in parallel by **threads** (not processes: a process pool
+  re-launches the program in the MSI install, whose Python is a stub). 2.4x per frame one at a time in the 2-core
+  workspace; the parallel gain is Bill's PC's to measure (`DP Benchmark.bat`). A.3.4 (predicted search) not built:
+  with grid-only window sums a shift costs the same wherever it is needed. A.3.6 (GPU) not built, as planned.
+* **A.4** As written, plus the full-size colour merge kept per merge setting (it is the slow part of a surface). The
+  cache folder is created at its final name and counts once `meta.json` is written (Windows cannot rename a folder
+  whose files are open as memory maps).
+* **A.5** `batch.py` and `stacks`. Grouping stacks by object is left to the solver (E.2): every stack is its own
+  group until then (`StackInfo.group` is null). Output: a `Studio surfaces` folder beside the photos.
+* **A.6** As written (neighbouring Dual Pixel frames paired across the ordinary ones; positions shared out).
+* **B.1** As written; "Auto" resolves to "measured" on Dual Pixel stacks (`FocusParams.auto_measured`).
+* **B.2** As written; the mask is 1 over the flagged regions and feathers outside them (the one-frame buffer is grown
+  into that band, so the edge never blends with nothing). On the synthetic moving patch the agreement map flags about
+  a third of the patch: only that part is taken from one frame.
+* **B.3** Half the depth of field from optics when Dual Pixel gives the step (0.849 / |s| steps for a 1 px blur
+  radius); from the sharpness falloff otherwise.
+* **B.7** `NAME.depth.npz` beside the result; Develop's depth (masks, haze, relight) uses it automatically
+  (`pipeline.measured_depth`, cyan). Depth of field (B.6) not built (M7).
+* **C** C.1-C.5, C.6 a-c, C.7, C.9 built. **C.8 decals not built** (the atlas exists; the cut-out of pieces standing
+  out of a texture is the next small step). C.6 d (Dual Pixel scale calibration) is M7. Godot's height-map flip set
+  from the class reference (false), not checked by rendering.
+* **D** D.1-D.4 built; thickness is a constant (amber) until a back-lit frame is detected; pivot = the lowest point of
+  the leaf (a click is not wired yet). Checked on Bill's bramble stack #20: subjects are made only of places sharp in
+  some frame or measured both ways (`depthmask.strict_label`), and only small holes are filled, after the first run
+  joined leaves to bokeh (docs/RESULTS.md). A stack whose Dual Pixel steps spread over 100% falls back to focus.
+* **F** F.1, F.2, F.3 built; **not yet imported into Blender or Godot on Bill's PC** (the Blender connection's
+  background mode has no Blender path; the Godot connection would add files to the game). First run:
+  `studio-cli blender <NAME_surface_Studio.json>` or 3D Scan > Open in Blender. F.4 notes in every JSON.
+* **G** `stacks`, `foliage`, `blender`, `cutout --depth-measured`, `dualpixel --make near-check`, `--maps`, `--size`,
+  `--scale`, `--tileable cut|blend`, `--workers`, `--background`, `--no-cache`. `model` and `profile-dp` not built
+  (M5-M7). The Forge's part is written in docs/CLI.md for its builder.
+* **H** H.1 and H.2 (3D Scan > Sets, with Make them all, Open in Blender), H.6 partly (Depth view gaps, measured
+  merge, moving parts, every game map; Dual Pixel Lab teach near; not yet: Sharpen gaps, Recover highlights, Depth
+  of field, Cut out by measured depth button, Calibrate Dual Pixel scale). H.3-H.5 wait for M5-M6.
+
+### Status, session 18 (2026-11-21 evening): M5 and M6 built; M7 not yet
+
+Built and tested on synthetic views with known truth (`tests/scan_synth.py`, `tests/test_scan.py`: a textured, bumpy
+log on textured ground, hand-held views with their own Dual Pixel depth affine in 1/z with an unknown scale and offset
+per view). Where it differs from sections E-H, and why:
+
+* **E.2** SIFT as planned (`engine/scan/sift.py`, RootSIFT). Plain SIFT stopped near 40 degrees on the orbit (the side
+  of the log is squeezed about 2x between views 45 degrees apart: 1 good match of 10), so **affine simulation (ASIFT,
+  Morel and Yu 2009)** was added: each picture also described as if seen tilted (tilts up to 2.8, 17 simulations);
+  views 67 degrees apart went from 0 to 258 good matches. It is slow, so it runs only for views plain matching could
+  not join to two others; the plain features stay the first block, so earlier matches stay valid. Depth-assisted
+  guided matching (the last bullet of E.2) was not needed and is not built.
+* **E.3** The essential matrix by 8-point RANSAC went wrong on curved patches seen from two sides (several motions fit
+  the matches about equally, 50-70 degrees off): fixed by scoring hypotheses by the points in front of both cameras,
+  local optimisation with 20-point samples from the inliers (LO-RANSAC, Chum 2003), and refining the leading
+  candidates by their Sampson cost (MSAC). Even so, on wide pairs the depth path is the reliable one: when the two
+  disagree, depth wins unless the matches have clearly more inliers. Planar: the homography explains 95 % of what the
+  other models do.
+* **E.4-E.5** As planned, with the bundle adjustment our own **Levenberg-Marquardt with analytic derivatives and the
+  Schur complement** (`engine/scan/ba.py`): scipy's least squares with numerical derivatives stopped a few degrees from
+  the truth on five views 72 degrees apart (the true poses fitted the matches at 0.17 px, its answer at 0.59 px). The
+  pixel and depth noise are measured from the data (the depth had out-voted the pixels tenfold with a fixed 1 px).
+  With fewer than 8 views the lens distortion is held at 0.
+* **Focus breathing** (Bill, 18:58): a macro lens focused close is longer than marked (v = f (1 + m): 1.5x at 1:2), so
+  each view's focal length is solved with a wide prior (35 %) when the lens records no distance, tied between stacks of
+  the same lens (3 %), and the starting focal is found from the matches (the factor that lets the essential matrix
+  explain the most matches). With a recorded distance the start is f (1 + m) and the prior 5 %.
+* **E.6** As planned (`dense.py`): Dual Pixel depth to distance, a 21-hypothesis plane sweep round it (+-10 %) against
+  the 2-3 best neighbours, NCC 7 x 7, fused by noise with an agreement map (red kept out of the mesh).
+* **E.7** Scale from the lenses' recorded focus distance (amber) or relative; the coin and the Dual Pixel calibration
+  (C.6 d) are not wired into models yet (C.6 d is M7).
+* **E.8** TSDF + visual hull as planned (`fusion.py`); **surface nets** (Gibson 1998) in place of marching cubes (no
+  256-case table, watertight, fewer slivers: a sphere's radius recovered to 0.02 voxel); Taubin smoothing; texture by
+  the view seeing each face most squarely, charts smoothed by iterated conditional modes on a Potts energy (Besag 1986:
+  57 000 speckle charts became 883), gains per chart over the seams; **simplification by quadric clustering** (Lindstrom
+  2000, the Garland-Heckbert quadrics on a grid) in place of edge-by-edge collapse (array operations only; crack-free
+  across seams); normal maps baked per LOD from the full mesh; collision is left to the importer (the JSON says so).
+  Ground cut: RANSAC plane on the lowest tenth.
+* **E.9** RealityScan cross-check: dropped by Bill (21:07).
+* **E.10, H.3, H.4** The model view under the Sets list (`app/scanmodel.py`: a software turntable, colour or how-made,
+  quality in plain words, the coach), "Make a 3D model" for the ticked stacks. The coach divides the surface by the
+  direction it faces and says which side was never measured and how many stacks to add (hand-held steps).
+* **Blender dataset** (Bill, 18:18: "only if they are of high enough quality"): `engine/scan/dataset.py`, behind a
+  quality gate (3 views and 60 % placed, 1.5 px, 35 % measured, 25 % disagreement); cameras in Blender's convention
+  (matrix_world) and OpenCV's, checked against each other in the tests; depth as float32 .npy.
+* **G** `model` command (`NAME_model_Studio.json` "studio_model": 1, `NAME_cameras_Studio.json`, `NAME_model_job.json`);
+  `schema` lists `contracts`. For the Forge: `stacks --run surface` also makes ESTIMATED surfaces (amber) from ordinary
+  single photos and bursts, so every texture folder gets the same files.
+
+Synthetic results (docs/RESULTS.md, session 18): 16 views 22 degrees apart: all placed, rotation within 0.23 degree,
+position within 1.2 % of the cameras' spread (median 0.4 %; the worst view's focal length came out 2.5 % long: the
+plan's 1 % of the object's size is met by the median, not by that view); with a stray view of a wall: 16 placed within 0.12 degree, the stray named; **5 views 72
+degrees apart: all placed within 0.6 degree with the depth, 2 of 5 without it**; breathing (files 520 px, truth
+627-675 px): all 8 placed within 0.5 degree, mean focal within 1 %; the mesh within 1 % of the object's size where
+measured, the unseen underside violet.
+
+**Not built yet (M7 and checks):** B.4 sharpen the gaps, B.5 highlights in a stack, B.6 depth of field after the fact,
+C.6 d the Dual Pixel scale calibration and the self-distance scale (designed in Bill's answers below), E.9, the
+Calibrate / Cut out by measured depth buttons; **models from Bill's real sets (the log #28-#34, the angel #4-#7, the
+gnome #52-#56) not run in the workspace** (each stack's analysis takes minutes here; the model command and the 3D Scan
+button are what to run on his PC first), the Blender and Godot imports. Next session: M7, then the real model checks.
+
+### Bill's decisions, 2026-11-21 21:07
+
+* **RealityScan is dropped** (E.9 and the Forge's hand-off): "it requires an epic account and most people I help won't
+  want that. Lets improve our own stuff inhouse instead."
+* **No per-lens distance calibration** (C.6 d's tape-measure frame, the self-distance scale for ring focusing): "The
+  real world distance scale is unrealistic, i have over 100 lenses." Models are in relative units unless a lens
+  records its focus distance (amber) or the photographer gives the object's length (`--length-m`); the shape, texture
+  and cameras do not depend on it.
+* **Build what the Forge needs to use the Studio**, tested on the shoot-2 data: `intake FOLDER` (one call per folder:
+  objects become models, the rest textures; `NAME_intake_Studio.json`, "studio_intake": 1).
+
+### Bill's answers to section L (2026-11-21, 16:28)
+
+1. **Scale: no coins.** "I rarely have a coin with me ... with my back, I often have trouble getting that low without
+   pain." Scale instead "by going off of the focus distance, which can indicate how far I am from an object and
+   considering the maximum edge to edge view of the lens in question for that focal length". Built (C.6 c): when the
+   lens records its focus distance, the magnification (thin lens) and the sensor size give the view edge to edge and
+   the size of a pixel (amber: the lens's distance is coarse; `scale.view_mm` in the JSON). **The Makro-Planar ZE has
+   contacts but does not record a distance on the R5** (A.2), so for it and for contactless lenses another way is
+   needed ("perhaps you can come up with another solution?"). Proposed for the next build (replaces the coin in
+   C.6 b-d and E.7): **the stack measures its own distance.** Every focus step's change in 1 / distance follows from
+   the Dual Pixel step s and the lens (offset = 0.849 x (f / N) / 2 x v / pixel x (1/z - 1/z_focus)), and the line-up
+   measures how much the picture's magnification changes per step; together they give the distance (focusing by
+   moving the body: z = (change in magnification per step) / (change in 1/z per step); focusing with the ring: a
+   lens-dependent version). First try on bark #17: magnification 0.77% per step, Dual Pixel 4.2e-5 per mm per step
+   with the full-aperture baseline: about 18 cm if Bill moved his body; the real Dual Pixel baseline is narrower than
+   the full aperture, so one calibration per lens and aperture is needed: one frame of a tape measure lying on a
+   table, shot standing up (Bill was going to shoot it anyway), remembered in the camera's Dual Pixel profile. The coin
+   finder stays in the command line for anyone who has one in the frame.
+   Bill, 16:43, on how he focuses a stack: "I do either. Sometimes with some lenses I turn the focus ring. Sometimes I
+   rock back and forth. Others, with some vintage medium format and large format lenses, I have to use bellows to
+   focus anyways, so the lens focuses through movement. With the makro planar I used the focus ring." So the
+   self-distance method needs all three cases: **body rocking** (the camera moves: magnification change per step =
+   distance x change in 1/z per step), **bellows / extension** (the whole lens moves away from the sensor: the
+   unit-focus formula, exact for bellows), and **the focus ring** (lens-dependent: unit focus for simple designs, a
+   floating or internal focus changes the focal length; the one-time tape-measure frame per lens calibrates it). The
+   Studio tells body rocking from the other two by the parallax it causes (near and far parts of the frame shift
+   against each other between frames; turning a ring or racking bellows only rescales about the centre) and says
+   which it found; a lens profile can say ring or bellows. Bill's shoot 2 (Makro-Planar): ring.
+2. **3D Scan section: yes** ("each area gets its own section"). Built (H.1, H.2).
+3. **Blender from the Forge's setting: yes.** Built (`engine/io/blender.py`, Help > Blender to override).
+4. Not asked yet (after M5).

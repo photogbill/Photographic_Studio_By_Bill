@@ -74,6 +74,11 @@ class FocusStackPage(StackPage):
         self.halo.toggled.connect(lambda *_: self._remerge())
         self.denoise = g.add(self.tick("Clean each frame first", False, "Runs Clean (the denoiser) on every frame "
                                        "before merging. Slower; the weighted methods already average noise down."))
+        self.moving = g.add(self.tick("Moving parts from one frame", True, "Where the two depth measures "
+                                      "disagree (a leaf moved between frames), that place comes from the one frame "
+                                      "that has it sharpest instead of a blend of frames (a double leaf). Dual Pixel "
+                                      "stacks only."))
+        self.moving.toggled.connect(lambda *_: self._remerge())
         g = self.group("View")
         self.view_pick = g.add(QComboBox())
         self.view_pick.addItems(VIEWS)
@@ -95,10 +100,19 @@ class FocusStackPage(StackPage):
                                              "something moved, a reflection, a bad frame. Never averaged away."))
         self.depth_overlay.toggled.connect(lambda *_: self._depth_view_if_shown())
         self.depth_flip = g.add(self.tick("Flip near / far", False,
-                                          "The Studio takes the first frame as the nearest until your camera's Dual "
-                                          "Pixel reading is checked on a known scene. Tick this if the surface "
-                                          "comes out inside out."))
+                                          "With Dual Pixel frames from a camera the Studio knows (the R5 is), near "
+                                          "is measured. Otherwise the first frame is taken as the nearest (teach it "
+                                          "in Dual Pixel Lab). Tick this if the surface comes out inside out."))
         self.depth_flip.toggled.connect(lambda *_: self._depth_view_if_shown())
+        self.depth_gaps = g.add(self.tick("Show focus gaps (amber stripes)", True,
+                                          "Where the focus jumped further than the lens's depth of field between two "
+                                          "frames, places at that depth were sharp in no frame. The note below says "
+                                          "where to rock slower next time."))
+        self.depth_gaps.toggled.connect(lambda *_: self._depth_view_if_shown())
+        self.depth_all = g.add(self.tick("Every game map", False,
+                                         "As well as colour, height, normal, confidence and agreement: ambient "
+                                         "occlusion, cavity and curvature from the measured height; de-lit colour "
+                                         "and fine relief (estimated, amber); an ORM map for Godot."))
         self.depth_ratio = QComboBox()
         self.depth_ratio.addItems(RATIOS)
         self.depth_ratio.setToolTip("The magnification you shot at (1:2 = half life size): gives the texture's size "
@@ -132,7 +146,7 @@ class FocusStackPage(StackPage):
         from ..engine.stack import surface as SURF
         ratio = self.depth_ratio.currentText()
         return SURF.SurfaceParams(ratio="" if ratio == RATIOS[0] else ratio, tileable=self.depth_tile.isChecked(),
-                                  near=self._near_setting())
+                                  near=self._near_setting(), maps="all" if self.depth_all.isChecked() else "")
 
     def _near_setting(self) -> str:
         """auto, or (Flip ticked) the opposite end from what auto decides."""
@@ -154,7 +168,8 @@ class FocusStackPage(StackPage):
         return FS.FocusParams(method=self.method.key() or "auto", denoise_first=self.denoise.isChecked(),
                               align=self.align.key() or "similarity", equalise=self.equalise.isChecked(),
                               radius=self.radius.value(), smooth=self.smooth.value(),
-                              halo_guard=self.halo.isChecked(), order="capture", local=self.local.isChecked())
+                              halo_guard=self.halo.isChecked(), order="capture", local=self.local.isChecked(),
+                              moving_single=self.moving.isChecked())
 
     # ------------------------------------------------------------------------------------ frames
     def frames_changed(self):
@@ -193,7 +208,7 @@ class FocusStackPage(StackPage):
 
         def work(progress, cancel):
             from ..engine.stack import depthfuse as DF
-            an = old if (old is not None and not need) else FS.analyse(paths, p_an, progress, cancel)
+            an = old if (old is not None and not need) else FS.analyse(paths, p_an, progress, cancel, cache=True)
             try:
                 img = FS.preview(an, p, progress, cancel)
                 progress(0.99, "Measuring depth")
@@ -244,7 +259,8 @@ class FocusStackPage(StackPage):
         if res is not None:
             from ..engine.stack import surface as SURF
             self._set_depth_method(res.method)
-            self.depth_text.setText(SURF.summary(res) + ("\n" + "\n".join(res.notes) if res.notes else ""))
+            self.depth_text.setText(SURF.summary(res) + ("\n" + "\n".join(res.notes) if res.notes else "") +
+                                    ("\n" + "\n".join(res.coach) if res.coach else ""))
             chips.append(("depth: two ways", T.CYAN) if res.method == "focus+dual_pixel" else
                          ("depth: focus only", T.AMBER))
         self.set_chips(chips)
@@ -284,7 +300,7 @@ class FocusStackPage(StackPage):
                 return
             near_high, how, measured, _ = SURF.decide_near(res, str(an.meta.get("model") or ""),
                                                            self.surface_params())
-            m = SURF.depth_view(res, near_high, an.flip, self.depth_overlay.isChecked())
+            m = SURF.depth_view(res, near_high, an.flip, self.depth_overlay.isChecked(), self.depth_gaps.isChecked())
             two = res.method == "focus+dual_pixel"
             self.result.set_images(qimage_rgb8(m), ref, chip_text="Depth · measured two ways (bright = near)" if two
                                    else "Depth · from focus alone (bright = near)",
@@ -317,7 +333,8 @@ class FocusStackPage(StackPage):
         p_an.order = "capture"
 
         def work(progress, cancel):
-            an = old if old is not None else FS.analyse(paths, p_an, lambda f, m: progress(0.4 * f, m), cancel)
+            an = old if old is not None else FS.analyse(paths, p_an, lambda f, m: progress(0.4 * f, m), cancel,
+                                                        cache=True)
             try:
                 path = FS.build(an, p, out, lambda f, m: progress(0.4 + 0.6 * f, m), cancel)
             except BaseException:
@@ -357,7 +374,7 @@ class FocusStackPage(StackPage):
         base = result_base(paths)
 
         def work(progress, cancel):
-            return SURF.stack_surface(an, out_dir, base, sp, SURF.KINDS, progress, cancel, None, method)
+            return SURF.stack_surface(an, out_dir, base, sp, SURF.kinds_from(sp), progress, cancel, None, method)
 
         def done(r):
             files = r["paths"]

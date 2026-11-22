@@ -93,7 +93,8 @@ def _blur(img: np.ndarray, k: np.ndarray) -> np.ndarray:
     return fftconvolve(img, k, mode="same").astype(np.float32)
 
 
-def make_stack(n=9, h=768, w=1152, iso="iso100", handheld=True, uneven=True, moved=None, flat=True, seed=0):
+def make_stack(n=9, h=768, w=1152, iso="iso100", handheld=True, uneven=True, moved=None, flat=True, seed=0,
+               bright_step=False):
     """(frames (full size RGB), halves [(la, lb) half size], truth). ``moved``: {frame: dz} - the moving patch's
     depth is off by dz in those frames only. Truth "t" is in the Studio's units: steps from frame 0's plane, one
     step = the median step between neighbouring frames."""
@@ -105,6 +106,9 @@ def make_stack(n=9, h=768, w=1152, iso="iso100", handheld=True, uneven=True, mov
     flat_sl = (slice(int(0.12 * Hh), int(0.3 * Hh)), slice(int(0.66 * Ww), int(0.9 * Ww)))
     if flat:
         tex[flat_sl] = np.array([0.42, 0.38, 0.33], np.float32)
+    if bright_step:                  # the raised block (nearer, a step edge) bright with a little texture of its own
+        st = (slice(int(0.58 * Hh), int(0.86 * Hh)), slice(int(0.06 * Ww), int(0.3 * Ww)))
+        tex[st] = 0.85 + 0.08 * (tex[st] - tex[st].mean())
     move_sl = (slice(int(0.42 * Hh), int(0.56 * Hh)), slice(int(0.4 * Ww), int(0.52 * Ww)))
     planes = np.arange(n, dtype=np.float64)
     if uneven:
@@ -189,7 +193,7 @@ def install(monkeypatch, frames, halves, tag, names=None, dual=True):
         paths.append(p)
         key = os.path.normcase(os.path.abspath(p))
         table[key] = fr
-        if halves is not None:
+        if halves is not None and halves[i] is not None:     # None: an ordinary frame in a mixed stack
             htable[key] = halves[i]
 
     def scene_rgb(path, edit, half, region=None):
@@ -213,7 +217,12 @@ def install(monkeypatch, frames, halves, tag, names=None, dual=True):
     monkeypatch.setattr(F, "open_frame", open_frame)
     monkeypatch.setattr(F, "is_dual", lambda p: bool(dual and halves is not None and
                                                      os.path.normcase(os.path.abspath(p)) in htable))
+    def develop_and_halves(path, edit, state=None):
+        la, lb = dual_halves(path)
+        return scene_rgb(path, edit, True), la, lb
+
     monkeypatch.setattr(F, "dual_halves", dual_halves)
+    monkeypatch.setattr(F, "develop_and_halves", develop_and_halves)
     return paths
 
 

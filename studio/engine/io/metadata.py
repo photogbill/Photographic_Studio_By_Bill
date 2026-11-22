@@ -55,6 +55,9 @@ class Metadata:
     sensor_info: dict = field(default_factory=dict)    # Canon SensorInfo borders (geometry, not identity)
     manual_lens: bool = False
     focus_mode: str = ""                  # Canon CameraSettings FocusMode: one-shot | servo | ai-focus | manual | ""
+    focus_distance_m: float | None = None       # recorded by the lens (Canon ShotInfo FocusDistanceUpper/Lower):
+    focus_distance_upper_m: float | None = None  # coarse, a starting scale only (BUILD_PLAN_DP3D A.2), never a
+    focus_distance_lower_m: float | None = None  # measurement of height. None = not recorded (most adapted lenses)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -120,6 +123,24 @@ def canon_focus_mode(camset) -> str:
     return ""
 
 
+def canon_focus_distance(shotinfo) -> tuple[float | None, float | None]:
+    """(upper, lower) focus distance in metres from Canon ShotInfo indices 19 and 20 (ExifTool's Canon ShotInfo
+    table: FocusDistanceUpper / Lower, value / 100 m; 0 = not recorded, 65535 = infinity). Checked absent on Bill's
+    R5 with the Makro-Planar 2/50 ZE (both 0, and nothing else in the maker notes changes with focus across a
+    stack, 2026-11-21); the scaling is ExifTool's, not yet checked on a lens that reports a distance."""
+    if not (isinstance(shotinfo, tuple) and len(shotinfo) > 20):
+        return None, None
+    out = []
+    for v in (shotinfo[19], shotinfo[20]):
+        if not isinstance(v, int) or v <= 0:
+            out.append(None)
+        elif (v & 0xFFFF) == 0xFFFF:
+            out.append(float("inf"))
+        else:
+            out.append((v & 0xFFFF) / 100.0)
+    return out[0], out[1]
+
+
 def canon_temperature(shotinfo) -> float | None:
     """Canon ShotInfo index 12 is CameraTemperature (+128 offset) on bodies that record it."""
     if isinstance(shotinfo, tuple) and len(shotinfo) > 12:
@@ -180,6 +201,12 @@ def read_metadata(path: str, libraw_iso: float | None = None, head_bytes: int = 
         si = mn.get(C_SHOTINFO)
         cands["canon_shotinfo"] = canon_shotinfo_iso(si)
         md.camera_temperature_c = canon_temperature(si)
+        up, lo = canon_focus_distance(si)
+        md.focus_distance_upper_m, md.focus_distance_lower_m = up, lo
+        if up is not None and lo is not None and math.isfinite(up) and math.isfinite(lo):
+            md.focus_distance_m = 0.5 * (up + lo)
+        elif up is not None or lo is not None:
+            md.focus_distance_m = lo if lo is not None and math.isfinite(lo) else up
         md.focus_mode = canon_focus_mode(mn.get(C_CAMSET))
         sens = mn.get(C_SENSORINFO)
         if isinstance(sens, tuple) and len(sens) >= 13:

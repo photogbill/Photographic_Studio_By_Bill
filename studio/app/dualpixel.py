@@ -87,6 +87,14 @@ class DualPixelPage(StackPage):
         db = QPushButton("Export depth map (16-bit PNG)")
         db.clicked.connect(self.export_depth)
         g.add(db)
+        g = self.group("Teach the Studio which way is near", "The two halves cannot tell near from far on their own. "
+                       "Pick photos of ground receding at an angle (a path, a lawn, a table top: the bottom of the "
+                       "frame nearer), ideally from three or more different scenes. Each votes; the answer is saved "
+                       "for your camera once three scenes agree and none disagrees.")
+        self.near_text = g.add(label(self._near_state(), "dim", wrap=True))
+        nb = QPushButton("Teach the Studio which way is near...")
+        nb.clicked.connect(self.teach_near)
+        g.add(nb)
         g = self.group("Noise vs detail")
         self.nvd_text = g.add(label("Real detail is the same in both halves; noise is not. Cyan in the Noise vs "
                                     "detail view is real detail, dark is noise.", "dim", wrap=True))
@@ -111,6 +119,40 @@ class DualPixelPage(StackPage):
         self.actions.addWidget(hbox((self.open_b, 1), self.folder_b, stretch=False))
         self.where = label("", "dim", wrap=True)
         self.actions.addWidget(self.where)
+
+    def _near_state(self, model: str = "") -> str:
+        from ..engine.dualpixel import depth as DEP
+        m = model or (str(self.dp.image.meta.model) if self.dp is not None else "Canon EOS R5")
+        sign, known, tier, how = DEP.near_source(m)
+        if not known:
+            return f"{m}: not taught yet (the usual reading is used, and every depth says so)."
+        where = {"measured": "taught on your own frames (cyan)", "shared": "from a shared profile (violet)",
+                 "table": "checked on receding scenes when the Studio was built"}.get(tier, tier)
+        return f"{m}: known, {where}."
+
+    def teach_near(self):
+        from PySide6.QtWidgets import QFileDialog
+        if self.jobbar.busy:
+            return
+        files, _ = QFileDialog.getOpenFileNames(self, "Photos of ground receding at an angle (Dual Pixel RAW)", "",
+                                                "Dual Pixel RAW (*.CR3 *.cr3 *.CR2 *.cr2)")
+        if not files:
+            return
+
+        def work(progress, cancel):
+            from ..engine.dualpixel import nearcheck as NC
+            res = NC.run(NC.groups_by_time(files), progress, cancel)
+            res["saved"] = NC.save_to_profile(res)
+            return res
+
+        def done(res):
+            dec = res["decision"]
+            self.near_text.setText(dec["sentence"] + (" Saved for your camera." if res.get("saved") else "") +
+                                   "\n" + self._near_state(res.get("camera") or ""))
+            self.jobbar.say(dec["sentence"], T.CYAN if dec["locked"] else T.AMBER)
+
+        self.jobbar.start(work, done, lambda e, c: self.failed("Which way is near", e, c),
+                          text="Reading the halves of each photo...")
 
     # ------------------------------------------------------------------------------------ opening
     def add_files(self, files: list, replace: bool = True):

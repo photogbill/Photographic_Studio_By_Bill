@@ -209,8 +209,8 @@ def test_library_sends_to_the_tabs(monkeypatch):
     monkeypatch.setattr(w.cardstacks, "set_sources", lambda items: got.append(("card", items)))
     w.library.send_to.emit("cardstacks", ["h.cr3", "i.cr3", "j.cr3"])
     assert w.nav.currentRow() == M.ROW["Card to Stacks"] and got[-1] == ("card", ["h.cr3", "i.cr3", "j.cr3"])
-    assert [n for _, n in M.NAV][:8] == ["Library", "Develop", "Dual Pixel Lab", "Focus Stack", "Card to Stacks",
-                                         "Super-Res Stack", "Infrared", "Panorama"]
+    assert [n for _, n in M.NAV][:9] == ["Library", "Develop", "Dual Pixel Lab", "Focus Stack", "Card to Stacks",
+                                         "3D Scan", "Super-Res Stack", "Infrared", "Panorama"]
     w.close()
 
 

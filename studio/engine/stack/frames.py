@@ -199,6 +199,117 @@ def dual_halves(path: str) -> tuple[np.ndarray, np.ndarray]:
         del dp
 
 
+DRIFT = 0.02                 # a frame whose halves' level ratio strays this far from the reference's: its own shading
+
+
+class DualState:
+    """The shading shared by a stack's Dual Pixel frames (BUILD_PLAN_DP3D A.3.3): same lens, same aperture, so
+    each half's shading is fitted once (on the first frame developed, the stack's reference) and reused; a frame
+    whose two frames' level ratio drifts more than 2 % from the reference's (focus breathing moves the exit pupil)
+    gets its own fit. ``gains`` may come from the camera's Dual Pixel profile (fitted on an earlier stack with the
+    same lens setting: cyan, measured)."""
+
+    def __init__(self, gains=None, level_ratio: float | None = None, source: str = ""):
+        import threading
+        self.gains = gains
+        self.level_ratio = level_ratio
+        self.source = source
+        self.refits: list = []
+        self.ratios: list = []
+        self.fitted_here = False
+        self.from_profile = gains is not None
+        self._lock = threading.Lock()
+
+    def gains_for(self, dp):
+        from ..dualpixel import decode as DD
+        with self._lock:
+            self.ratios.append(float(dp.level_ratio))
+            ref, g = self.level_ratio, self.gains
+        if g is not None and ref and abs(dp.level_ratio / ref - 1.0) <= DRIFT and g[0].shape == dp.shape:
+            return g
+        fit = DD.shading(dp)
+        with self._lock:
+            if self.gains is None or self.gains[0].shape != dp.shape or (self.from_profile and not self.fitted_here):
+                # the stack's own reference: the first fit, or the first fit after a profile's shading did not
+                # match this stack (another shoot's focus distance): the rest of the stack reuses this one
+                self.gains, self.level_ratio = fit, float(dp.level_ratio)
+                self.source = f"fitted on {os.path.basename(dp.path)}"
+                self.fitted_here = True
+            else:
+                self.refits.append(os.path.basename(dp.path))
+        return fit
+
+
+def develop_and_halves(path: str, edit, state: DualState | None = None) -> tuple:
+    """(half-size developed frame, half 1 luminance, half 2 luminance) of a Dual Pixel RAW from ONE decode of the
+    photo (BUILD_PLAN_DP3D A.3.1): the A+B frame is opened once, developed at half size exactly like scene_rgb, and
+    the same opened photo gives the halves (the second frame read from memory, A.3.2). The numbers are those of
+    scene_rgb + dual_halves (tested). ``state`` shares one shading fit across a stack (A.3.3)."""
+    from .. import api
+    from ..dualpixel import decode as DD, depth as DEP
+    from ..pipeline.pipeline import linear_rgb
+    img = api.open(path)
+    try:
+        rgb = np.ascontiguousarray(linear_rgb(img, edit, None, half_size=True, cache=False), np.float32)
+        dp = DD.open_dual(path, image=img)
+        g = state.gains_for(dp) if state is not None else DD.shading(dp)
+        la, lb = DEP.halves_luma(dp, g)
+        del dp
+        return rgb, la, lb
+    finally:
+        try:
+            img.drop_cache()
+        except Exception:                            # noqa: BLE001  (only a cache)
+            pass
+        del img
+
+
+def free_ram_gb() -> float | None:
+    """Memory free for new work, GB (Windows: GlobalMemoryStatusEx; Linux: MemAvailable), or None if unknown."""
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            class MS(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+            m = MS()
+            m.dwLength = ctypes.sizeof(MS)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m)):
+                return m.ullAvailPhys / 1e9
+            return None
+        with open("/proc/meminfo", encoding="ascii") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) / 1e6
+    except (OSError, ValueError, AttributeError):
+        return None
+    return None
+
+
+def stack_workers(per_worker_gb: float = 6.0, limit: int | None = None) -> int:
+    """How many frames to develop at once (BUILD_PLAN_DP3D A.3.5): a third of the cores, and no more than the free
+    memory allows at ``per_worker_gb`` each (a 45 MP Dual Pixel frame peaks near 3 GB; 6 leaves room for the
+    rest). Bill's PC (14 cores, 64 GB): 4. ``limit`` (the command line's --workers) caps it."""
+    cores = os.cpu_count() or 1
+    free = free_ram_gb()
+    n = max(1, cores // 3)
+    if free is not None:
+        n = min(n, max(1, int(free // per_worker_gb)))
+    if limit:
+        n = min(n, max(1, int(limit)))
+    env = os.environ.get("STUDIO_STACK_WORKERS")
+    if env:
+        try:
+            n = max(1, int(env))
+        except ValueError:
+            pass
+    return int(n)
+
+
 @dataclass
 class RawInfo:
     """What the drizzle needs from a frame besides its mosaic."""

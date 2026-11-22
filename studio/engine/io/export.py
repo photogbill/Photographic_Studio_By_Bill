@@ -256,6 +256,24 @@ def is_own_export(path: str) -> bool:
             with open(path, encoding="utf-8") as fh:
                 d = json.load(fh)
             return isinstance(d, dict) and str(d.get("written_by", "")).startswith(OWN_MARK)
+        if low.endswith(".glb"):                  # glTF binary: the asset's generator (gltf.write_glb)
+            with open(path, "rb") as fh:
+                head = fh.read(20)
+                if len(head) < 20 or head[:4] != b"glTF":
+                    return False
+                n = struct.unpack("<I", head[12:16])[0]
+                if n > (8 << 20):
+                    return False
+                import json
+                d = json.loads(fh.read(n).decode("utf-8"))
+            return str(d.get("asset", {}).get("generator", "")).startswith(OWN_MARK)
+        if low.endswith((".obj", ".mtl", ".ply")):  # text headers: "# Photographic Studio By Bill" / "comment ..."
+            with open(path, "rb") as fh:
+                return OWN_MARK.encode() in fh.read(256)
+        if low.endswith(".npy"):                  # NumPy arrays the Studio writes inside its own dataset folders
+            mark = os.path.join(os.path.dirname(path), "..", "dataset.json")
+            mark2 = os.path.join(os.path.dirname(path), "dataset.json")
+            return any(os.path.isfile(m) and is_own_export(m) for m in (mark, mark2))
         if low.endswith(".png"):
             with open(path, "rb") as fh:
                 if fh.read(8) != b"\x89PNG\r\n\x1a\n":

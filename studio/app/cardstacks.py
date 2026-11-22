@@ -211,7 +211,13 @@ class CardStacksPage(QWidget):
         self.folder_b = QPushButton("Folder...")
         self.folder_b.setToolTip("Where results are saved (beside each stack's frames unless you pick a folder)")
         self.folder_b.clicked.connect(self.choose_out)
+        self.surf_b = QPushButton("Make surfaces for every stack")
+        self.surf_b.setToolTip("Game surfaces (colour, measured height, normal, confidence, agreement and a JSON) for "
+                               "every stack, into a 'Studio surfaces' folder beside the frames. Carries on where it "
+                               "stopped if you press it again. More options in 3D Scan.")
+        self.surf_b.clicked.connect(self.make_surfaces)
         self.actions.addWidget(hbox(self.one_b, (self.all_b, 1), stretch=False))
+        self.actions.addWidget(self.surf_b)
         self.actions.addWidget(hbox((self.open_b, 1), self.folder_b, stretch=False))
         self.where = label("Saves beside each stack's frames.", "dim", wrap=True)
         self.actions.addWidget(self.where)
@@ -565,6 +571,32 @@ class CardStacksPage(QWidget):
                 self.tree.setCurrentItem(it)
                 return
 
+    def make_surfaces(self):
+        """Every ready stack through the surface job (BUILD_PLAN_DP3D A.5), resumable."""
+        from ..engine.stack import batch as B
+        ready = [g for g in self.stacks() if self._ready(g)]
+        if not ready or self.jobbar.busy:
+            return
+        infos = []
+        for g in ready:
+            used = [f.path for f in g.used]
+            infos.append(B.StackInfo(f"{g.frames[0].name} to {g.frames[-1].name}", "focus", used))
+        first = os.path.dirname(infos[0].paths[0])
+        out_dir = self.out_dir or os.path.join(first, B.DEFAULT_SUBFOLDER)
+
+        def work(progress, cancel):
+            return B.run(infos, ["surface"], out_dir, None, None, progress, cancel, resume=True)
+
+        def done(doc):
+            st = B.summary(doc)
+            self.jobbar.say(("Stopped: press it again to carry on. " if doc.get("state") == "stopped" else
+                             "Surfaces done: ") + ", ".join(f"{v} {k}" for k, v in st.items()) + f". In {out_dir}",
+                            T.GREEN if not st.get("failed") else T.AMBER)
+            self._refresh()
+        self.jobbar.start(work, done, lambda e, c: self.jobbar.say("Stopped." if c else f"Problem: {e}", T.AMBER),
+                          keep=True, text="Making surfaces...")
+        self._refresh()
+
     # ------------------------------------------------------------------------------------ state
     def _refresh(self):
         busy = self.jobbar.busy
@@ -572,6 +604,8 @@ class CardStacksPage(QWidget):
         self.find_b.setEnabled(bool(self.sources) and not busy)
         ready = [g for g in self.stacks() if self._ready(g)]
         self.all_b.setEnabled(bool(ready) and not busy)
+        if hasattr(self, "surf_b"):
+            self.surf_b.setEnabled(bool(ready) and not busy)
         g, _ = self._item_frame(self.tree.currentItem())
         self.one_b.setEnabled(g is not None and self._ready(g) and not busy)
         self.open_b.setEnabled(g is not None and bool(self.results.get(id(g))))

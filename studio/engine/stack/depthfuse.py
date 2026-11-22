@@ -52,6 +52,8 @@ DISAGREE_STEPS = 0.5        # agreement map: votes straying farther than this (s
 COMPARE_DP = 1.0            # without focus, Dual Pixel votes worth this much (about two frames) can be compared
 HALF_CONF_STEPS = 0.25      # confidence 0.5 = an expected error of a quarter of a step
 MIN_PAIR_SAMPLES = 400      # places a pair of frames needs in common to measure its own step
+MAX_STEP_SPREAD = 1.0       # the pairs' own steps straying more than this (a share of s) from each other: the Dual
+                            # Pixel step cannot be trusted (too few places measured in both frames of each pair)
 LABEL_FILLED, LABEL_ONE, LABEL_BOTH = 0, 1, 2
 
 METHOD_INFO = {
@@ -73,6 +75,14 @@ METHOD_INFO = {
         "does": "The signed offset between the photo's two halves.",
         "best": "one Dual Pixel photo, near its plane of focus",
         "weak": "shallow: only a few pixels of offset either side of focus are trustworthy; plain areas filled in"},
+    "estimated": {
+        "name": "Estimated from one ordinary photo",
+        "does": "Nothing is measured: dark is taken as deep at several sizes (the guess texture tools make), after "
+                "the broad light is taken off.",
+        "best": "flat textures shot straight on in soft, even light (bark, stone, plaster) when there is no focus "
+                "stack or Dual Pixel photo",
+        "weak": "colour and shadow are mistaken for shape (a dark stain becomes a pit, a pale stone a bump); the "
+                "broad shape of the surface is lost; every map made from it is amber"},
 }
 
 
@@ -87,8 +97,8 @@ class DepthResult:
     focus_depth: np.ndarray | None       # focus alone (steps), before smoothing
     focus_quality: np.ndarray | None     # 0..1
     dp_depth: np.ndarray | None          # Dual Pixel alone (steps), NaN where it has nothing to say
-    method: str                          # focus+dual_pixel | focus | dual_pixel
-    units: str                           # steps | frames | dual pixel px
+    method: str                          # focus+dual_pixel | focus | dual_pixel | estimated
+    units: str                           # steps | frames | dual pixel px | estimated
     positions: list = field(default_factory=list)
     step_px: float | None = None         # s: offset change per focus step, full-size px, signed
     step_spread: float | None = None     # spread of the pairs' own steps, as a share of s
@@ -96,16 +106,24 @@ class DepthResult:
     sigma_dp: float | None = None        # measured Dual Pixel noise of one frame's vote, steps (at typical conf)
     sigma_focus: float | None = None     # measured focus noise, steps (at typical quality)
     notes: list = field(default_factory=list)
+    dof_half: float | None = None        # half a frame's depth of field, steps (sharpness above half its peak)
+    gap: np.ndarray | None = None        # bool: measured places sharp in no frame (BUILD_PLAN_DP3D B.3)
+    coach: list = field(default_factory=list)   # plain sentences: where the focus jumped, what to do next time
 
     def shares(self) -> dict:
         lab = self.label
         n = float(lab.size) or 1.0
         ag = self.agreement
         cmp_ = np.isfinite(ag)
-        return {"measured_both": round(float((lab == LABEL_BOTH).sum()) / n, 4),
-                "measured_one": round(float((lab == LABEL_ONE).sum()) / n, 4),
-                "filled": round(float((lab == LABEL_FILLED).sum()) / n, 4),
-                "disagree": round(float((cmp_ & (np.nan_to_num(ag) > DISAGREE_STEPS)).sum()) / n, 4)}
+        if self.method == "estimated":           # one ordinary photo: nothing measured, everything estimated
+            return {"measured_both": 0.0, "measured_one": 0.0, "filled": 0.0, "disagree": 0.0, "estimated": 1.0}
+        out = {"measured_both": round(float((lab == LABEL_BOTH).sum()) / n, 4),
+               "measured_one": round(float((lab == LABEL_ONE).sum()) / n, 4),
+               "filled": round(float((lab == LABEL_FILLED).sum()) / n, 4),
+               "disagree": round(float((cmp_ & (np.nan_to_num(ag) > DISAGREE_STEPS)).sum()) / n, 4)}
+        if self.gap is not None:
+            out["gap"] = round(float(self.gap.sum()) / n, 4)
+        return out
 
     def agreement_stats(self) -> dict:
         ag = self.agreement[np.isfinite(self.agreement)]
@@ -160,32 +178,37 @@ def focus_peak(energy, idx: np.ndarray, noise_e: np.ndarray, presence: np.ndarra
 
 # ------------------------------------------------------------------------------------------ the focus step
 def calibrate_steps(D, C, n: int, k: np.ndarray | None = None, kq: np.ndarray | None = None,
-                    limit: float = DP_LIMIT_PX) -> dict:
+                    limit: float = DP_LIMIT_PX, have: list | None = None) -> dict:
     """The offset change from each frame to the next (one focus step, full-size px), from places confidently
     measured in both and within the trustworthy range; where focus knows the place it must lie near that pair.
-    Returns {"s", "pairs": [{pair, step_px, spread_px, samples}], "sigma_pair_px", "spread", "conf_mean"}; s is
-    None when too few places could be measured."""
+    ``have``: the frames that have Dual Pixel offsets (a mixed stack, BUILD_PLAN_DP3D A.6: neighbouring Dual Pixel
+    frames are paired across the ordinary ones between them, and the change is shared out over the frames it
+    spans). Returns {"s", "pairs": [{pair, to, span, step_px, spread_px, samples}], "sigma_pair_px", "spread",
+    "conf_mean"}; s is None when too few places could be measured. step_px is per frame of the span."""
     rng = np.random.default_rng(7)
+    have = list(range(n)) if have is None else list(have)
     pairs, pooled, resid, confs = [], [], [], []
-    for i in range(n - 1):
-        d0, d1 = np.asarray(D[i], np.float32), np.asarray(D[i + 1], np.float32)
-        c0, c1 = np.asarray(C[i], np.float32), np.asarray(C[i + 1], np.float32)
+    for a, b in zip(have[:-1], have[1:]):
+        span = b - a
+        d0, d1 = np.asarray(D[a], np.float32), np.asarray(D[b], np.float32)
+        c0, c1 = np.asarray(C[a], np.float32), np.asarray(C[b], np.float32)
         m = (c0 > DP_CONF_MIN) & (c1 > DP_CONF_MIN) & (np.abs(d0) < limit) & (np.abs(d1) < limit)
         if k is not None:
             known = kq >= FOCUS_MIN if kq is not None else np.ones(k.shape, bool)
-            m &= ~known | ((k > i - 1.0) & (k < i + 2.0))
+            m &= ~known | ((k > a - 1.0) & (k < b + 1.0))
         diff = (d1 - d0)[m]
         cm = np.minimum(c0, c1)[m]
         if diff.size > 200_000:
             sel = rng.choice(diff.size, 200_000, replace=False)
             diff, cm = diff[sel], cm[sel]
+        entry = {"pair": a, "to": b, "span": span}
         if diff.size < MIN_PAIR_SAMPLES:
-            pairs.append({"pair": i, "step_px": None, "spread_px": None, "samples": int(diff.size)})
+            pairs.append(dict(entry, step_px=None, spread_px=None, samples=int(diff.size)))
             continue
         med = float(np.median(diff))
         mad = float(1.4826 * np.median(np.abs(diff - med)))
-        pairs.append({"pair": i, "step_px": med, "spread_px": mad, "samples": int(diff.size)})
-        pooled.append(diff)
+        pairs.append(dict(entry, step_px=med / span, spread_px=mad, samples=int(diff.size)))
+        pooled.append(diff / span)
         resid.append(diff - med)
         confs.append(cm)
     if not pooled:
@@ -208,26 +231,45 @@ def calibrate_steps(D, C, n: int, k: np.ndarray | None = None, kq: np.ndarray | 
 
 def positions_from(cal: dict, n: int) -> tuple[list, list]:
     """(q, notes): each frame's plane of focus in steps (q_0 = 0) from the pairs' own steps; a pair that could not
-    be measured takes the stack's median step."""
+    be measured takes the stack's median step. Frames without Dual Pixel (a mixed stack) sit evenly between the
+    Dual Pixel frames either side of them, one step per frame beyond the last."""
     s = cal["s"]
-    q = [0.0]
+    pairs = cal["pairs"]
+    q: list = [None] * n
+    first = pairs[0]["pair"] if pairs else 0
+    q[first] = 0.0
     notes = []
     missing, back = [], []
-    for p in cal["pairs"]:
+    for p in pairs:
+        a = p["pair"]
+        b = p.get("to", a + 1)
+        span = p.get("span", b - a)
         st = p["step_px"]
         if st is None:
             st = s
-            missing.append(p["pair"])
+            missing.append(a)
         elif np.sign(st) != np.sign(s):
-            back.append(p["pair"])
-        q.append(q[-1] + st / s)
+            back.append(a)
+        q[b] = q[a] + span * st / s
+        for j in range(a + 1, b):                    # ordinary frames between two Dual Pixel frames
+            q[j] = q[a] + (j - a) * (q[b] - q[a]) / span
+    known = [i for i in range(n) if q[i] is not None]
+    for i in range(n):
+        if q[i] is None:
+            if i < known[0]:
+                q[i] = q[known[0]] - (known[0] - i)
+            else:
+                q[i] = q[known[-1]] + (i - known[-1])
+    if q[0] != 0.0:                                  # positions count from the first frame
+        q0 = q[0]
+        q = [x - q0 for x in q]
     if missing:
         notes.append(f"Dual Pixel could not measure the step between {len(missing)} pair(s) of frames (too little "
                      f"texture in focus in both): the stack's typical step was used there.")
     if back:
         notes.append("The focus went back on itself between frames " + ", ".join(f"{i + 1} and {i + 2}" for i in
                      back[:4]) + (" ..." if len(back) > 4 else "") + ": those frames are out of focus order.")
-    return q, notes
+    return [float(x) for x in q], notes
 
 
 # ------------------------------------------------------------------------------------------ Dual Pixel votes
@@ -359,11 +401,18 @@ def fuse_maps(energy, idx, noise_e, presence, guide, D=None, C=None, smooth: flo
                            focus_depth=k, focus_quality=kq, dp_depth=None, method="focus", units="frames",
                            positions=[float(i) for i in range(n)], notes=notes)
 
-    cal = calibrate_steps(D, C, n, k, kq)
+    have = [i for i in range(n) if float(np.asarray(C[i], np.float32).max()) > 0.0]
+    cal = calibrate_steps(D, C, n, k, kq, have=have if len(have) < n else None)
     s = cal["s"]
+    if s is not None and (cal["spread"] or 0.0) > MAX_STEP_SPREAD:
+        notes.append(f"Dual Pixel: the step between frames came out too uneven to trust ({100 * cal['spread']:.0f}% "
+                     f"spread: too few places sharp in both frames of each pair), so depth comes from focus alone.")
+        s = None
+        cal = dict(cal, s=None)
     if s is None:
-        notes.append("Dual Pixel: too little texture in focus to measure the step between frames, so depth comes "
-                     "from focus alone.")
+        if not notes:
+            notes.append("Dual Pixel: too little texture in focus to measure the step between frames, so depth "
+                         "comes from focus alone.")
         r = fuse_maps(energy, idx, noise_e, presence, guide, None, None, smooth)
         r.notes = notes + r.notes
         r.pair_steps = cal["pairs"]
@@ -442,6 +491,84 @@ def fuse_maps(energy, idx, noise_e, presence, guide, D=None, C=None, smooth: flo
                        step_spread=cal["spread"], pair_steps=st, sigma_dp=sig_d, sigma_focus=sig_k, notes=notes)
 
 
+# ------------------------------------------------------------------------------------------ gaps (B.3)
+HALF_PEAK = float(np.sqrt(2.0 * np.log(2.0)))   # a Gaussian falls to half its peak at 1.18 sigma
+HALF_DISC_SEP = 8.0 / (3.0 * np.pi)              # the two half discs' centroids are 0.849 R apart (R: blur radius)
+SHARP_BLUR_PX = 1.0                              # sharp at the pixel level: a blur disc of radius 1 full-size pixel
+
+
+def focus_width(energy, idx: np.ndarray, noise_e: np.ndarray, kq: np.ndarray, q_min: float = 0.5) -> float | None:
+    """How fast sharpness falls away from a place's best frame, in frames: the median sigma of the three-point
+    Gaussian fit (focus_peak) over places with a clear focus. None when too few places have one."""
+    n = int(energy.shape[0])
+    if n < 3:
+        return None
+    idx = np.asarray(idx).astype(np.int32)
+    inner = (idx > 0) & (idx < n - 1) & (np.asarray(kq) >= q_min)
+    if inner.sum() < 200:
+        return None
+    floor = (0.25 * np.asarray(noise_e, np.float32) + np.float32(1e-12))
+    nan = np.float32(np.nan)
+    e = {o: np.full(idx.shape, nan, np.float32) for o in (-1, 0, 1)}
+    for j in range(n):
+        ej = np.asarray(energy[j], np.float32) + floor
+        for o in (-1, 0, 1):
+            m = inner & (idx == (j - o))
+            if m.any():
+                e[o][m] = ej[m]
+    den = np.log(e[-1]) - 2.0 * np.log(e[0]) + np.log(e[1])
+    ok = inner & np.isfinite(den) & (den < -1e-4)
+    if ok.sum() < 200:
+        return None
+    sig = np.sqrt(-1.0 / den[ok])                    # log of a Gaussian: second difference -1 / sigma^2
+    return float(np.median(sig))
+
+
+def gaps(depth: np.ndarray, label: np.ndarray, positions: list, dof_half: float) -> tuple[np.ndarray, list]:
+    """(gap map, coach sentences). A measured place farther than half a depth of field from every frame's plane
+    was sharp in no frame: a gap. The coach names the pairs of frames the focus jumped between."""
+    q = np.asarray(positions, np.float32)
+    dist = np.full(depth.shape, np.inf, np.float32)
+    for x in q:
+        dist = np.minimum(dist, np.abs(depth - x))
+    gap = (label > LABEL_FILLED) & (dist > np.float32(dof_half))
+    coach = []
+    jumps = [(i, float(q[i + 1] - q[i])) for i in range(len(q) - 1) if abs(q[i + 1] - q[i]) > 2.0 * dof_half]
+    for i, j in jumps[:4]:
+        lo, hi = min(q[i], q[i + 1]), max(q[i], q[i + 1])
+        share = float((gap & (depth > lo) & (depth < hi)).mean())
+        if share < 0.002:
+            continue
+        coach.append(f"Between frames {i + 1} and {i + 2} the focus jumped {abs(j):.1f} steps: places at that depth "
+                     f"(about {100 * share:.0f}% of the picture) are a little soft. Rock a little slower there next "
+                     f"time.")
+    if len(jumps) > 4:
+        coach.append(f"The focus jumped in {len(jumps)} places in all.")
+    return gap, coach
+
+
+def _add_gaps(res: DepthResult, energy, idx, noise_e):
+    """Fill in res.dof_half, res.gap and res.coach (B.3). With Dual Pixel the depth of field comes from optics: one
+    step moves the offset by s, so the blur disc grows by s / 0.849 pixels of radius per step (the half discs'
+    centroids are 0.849 R apart), and a place is sharp within SHARP_BLUR_PX of radius. Without Dual Pixel, from how
+    fast sharpness falls away from a place's best frame (half its peak)."""
+    if not res.positions or len(res.positions) < 2:
+        return res
+    if res.step_px:
+        res.dof_half = float(SHARP_BLUR_PX * HALF_DISC_SEP / abs(res.step_px))
+    else:
+        sig = focus_width(energy, idx, noise_e, res.focus_quality if res.focus_quality is not None else
+                          np.ones_like(res.depth))
+        if sig is None:
+            return res
+        res.dof_half = float(HALF_PEAK * sig)
+    res.gap, res.coach = gaps(res.depth, res.label, res.positions, res.dof_half)
+    if res.method == "focus":
+        res.coach.append("Without Dual Pixel the frames' real focus positions cannot be seen: the steps are taken "
+                         "as even, so gaps from an uneven hand only show where they are large.")
+    return res
+
+
 def fuse(an, smooth: float | None = None) -> DepthResult:
     """The fused depth of a Focus Stack analysis (focus.FocusAnalysis): Dual Pixel offsets used when the analysis
     kept them. Cached on the analysis (the same analysis and smoothness give the same answer)."""
@@ -454,6 +581,10 @@ def fuse(an, smooth: float | None = None) -> DepthResult:
     C = getattr(an, "dp_conf", None)
     res = fuse_maps(an.energy, an.idx, an.noise_e, an.presence(), an.guide, D, C, smooth)
     res.notes = list(getattr(an, "dp_notes", []) or []) + res.notes
+    try:
+        _add_gaps(res, an.energy, an.idx, an.noise_e)
+    except Exception:                                # noqa: BLE001  (the coach is advice; the depth stands)
+        slog.log_exception("focus gaps", log)
     an._depth[key] = res
     return res
 

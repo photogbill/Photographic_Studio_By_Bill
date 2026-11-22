@@ -1,7 +1,7 @@
 """Photographic Studio By Bill - the desktop app (Phase 4 shell, Phase 5 lens and shape, Phase 6 develop panels).
 
 One window, a sidebar of workspaces (section 1, rule 0.3.12): Library, Develop, Dual Pixel Lab, Focus Stack,
-Super-Res Stack, Infrared, Panorama, Lenses, Cameras, Export, Help. The interface talks to the engine only through its API
+Card to Stacks, 3D Scan, Super-Res Stack, Infrared, Panorama, Lenses, Cameras, Export, Help. The interface talks to the engine only through its API
 (studio.engine) and never blocks: every render, thumbnail and export runs in the background.
 """
 from __future__ import annotations
@@ -39,6 +39,7 @@ from .library import LibraryPage  # noqa: F401  (section 24: the Library lives i
 from .dualpixel import DualPixelPage  # noqa: E402  (the three stacking tabs: BUILD_PLAN_TABS)
 from .focusstack import FocusStackPage  # noqa: E402
 from .cardstacks import CardStacksPage  # noqa: E402
+from .scan import ScanPage  # noqa: E402  (3D Scan: BUILD_PLAN_DP3D H)
 from .superres import SuperResPage  # noqa: E402
 from .infrared import InfraredPage  # noqa: E402  (BUILD_PLAN_PANO_IR: the Infrared tab)
 from .panorama import PanoramaPage  # noqa: E402  (BUILD_PLAN_PANO_IR: the Panorama tab)
@@ -3639,9 +3640,12 @@ class DevelopPage(QWidget):
             self.dp_chip.setStyleSheet(f"color:{T.DIM};")
             return
         r = getattr(self.image, "depth_report", None) if self.image is not None else None
-        if r:
-            self.dp_chip.setText(f"Depth: worked out on this PC in {r['ms'] / 1000:.1f} s")
-            self.dp_chip.setStyleSheet(f"color:{T.VIOLET}; border-color:{T.alpha(T.VIOLET, 0.4)};")
+        if r and r.get("source") == "measured":
+            self.dp_chip.setText("Depth: measured by the focus stack (Dual Pixel and focus)")
+            self.dp_chip.setStyleSheet(f"color:{T.CYAN}; border-color:{T.alpha(T.CYAN, 0.4)};")
+        elif r:
+            self.dp_chip.setText(f"Depth: estimated on this PC in {r['ms'] / 1000:.1f} s (Depth Anything)")
+            self.dp_chip.setStyleSheet(f"color:{T.AMBER}; border-color:{T.alpha(T.AMBER, 0.4)};")
         else:
             self.dp_chip.setText("Depth: worked out when first used (a few seconds)")
             self.dp_chip.setStyleSheet(f"color:{T.DIM};")
@@ -4720,8 +4724,10 @@ class DevelopPage(QWidget):
             self._msel = idx
             self._add_shape(shape)
             self.mask_show.setChecked(True)
-            self.status.emit("Depth: the nearest part of the photo is selected (red). Move From and To to choose "
-                             "the distances (0 = farthest, 100 = nearest).")
+            how = ("measured by the focus stack" if shape.get("source") == "measured" else
+                   "estimated from the picture")
+            self.status.emit(f"Depth ({how}): the nearest part of the photo is selected (red). Move From and To to "
+                             f"choose the distances (0 = farthest, 100 = nearest).")
         run_bg(lambda: E.depth_shape(img, e), path, done,
                lambda _, err: (setattr(self.viewer, "busy", False), self.status.emit(f"Depth mask: {err}")))
 
@@ -7206,6 +7212,71 @@ class HelpPage(InfoPage):
         self.body.addLayout(row)
         self.upd_info = label("", "dim", wrap=True)
         self.body.addWidget(self.upd_info)
+        # The analysis cache (BUILD_PLAN_DP3D A.4): stacks analysed once, kept beside the Studio
+        self.body.addSpacing(16)
+        self.body.addWidget(label("Analysis cache", "h2"))
+        self.body.addWidget(label("A focus stack's analysis (the slow part) is kept, so making surfaces, leaves or a "
+                                  "different merge of the same stack later starts at once. It lives in the "
+                                  "analysis_cache folder beside the Studio, never on C:, and the oldest analyses "
+                                  "go first when it reaches its size.", "dim", wrap=True))
+        self.cache_cap = QComboBox()
+        self.CACHE_CAPS = (10, 30, 60, 120, 250)
+        for g_ in self.CACHE_CAPS:
+            self.cache_cap.addItem(f"Keep up to {g_} GB", g_)
+        try:
+            from ..engine.stack import anacache as AC
+            cur = AC.cap_gb()
+        except Exception:                              # noqa: BLE001  (a display only)
+            cur = 60
+        self.cache_cap.setCurrentIndex(min(range(len(self.CACHE_CAPS)), key=lambda i: abs(self.CACHE_CAPS[i] - cur)))
+        self.cache_cap.activated.connect(self._cache_cap)
+        cb = QPushButton("Clear the analysis cache")
+        cb.clicked.connect(self._cache_clear)
+        row = QHBoxLayout()
+        row.addWidget(self.cache_cap)
+        row.addWidget(cb)
+        row.addStretch(1)
+        self.body.addLayout(row)
+        self.cache_info = label("", "dim", wrap=True)
+        self.body.addWidget(self.cache_info)
+        # Blender (BUILD_PLAN_DP3D F.3): where it is, for "Open in Blender"
+        self.body.addSpacing(16)
+        self.body.addWidget(label("Blender", "h2"))
+        self.blender_info = label("", "dim", wrap=True)
+        self.body.addWidget(self.blender_info)
+        bb = QPushButton("Choose blender.exe...")
+        bb.clicked.connect(self._choose_blender)
+        row = QHBoxLayout()
+        row.addWidget(bb)
+        row.addStretch(1)
+        self.body.addLayout(row)
+        self._blender_state()
+
+    def _blender_state(self):
+        try:
+            from ..engine.io import blender as BL
+            exe, how = BL.program()
+        except Exception as e:                         # noqa: BLE001  (a display only)
+            exe, how = "", str(e)
+        self.blender_info.setText(f"Open in Blender uses {exe} ({how})." if exe else how + ".")
+
+    def _choose_blender(self):
+        f, _ = QFileDialog.getOpenFileName(self, "Where is blender.exe?", "", "Blender (blender.exe blender)")
+        if f:
+            Settings().set("blender_program", f)
+            self._blender_state()
+
+    def _cache_cap(self, i):
+        Settings().set("analysis_cache_gb", int(self.CACHE_CAPS[i]))
+        self.cache_info.setText(f"The analysis cache keeps up to {self.CACHE_CAPS[i]} GB.")
+
+    def _cache_clear(self):
+        try:
+            from ..engine.stack import anacache as AC
+            n = AC.clear()
+            self.cache_info.setText(f"Cleared: {n} analysis(es) removed.")
+        except OSError as e:
+            self.cache_info.setText(f"Could not clear it all: {e}")
 
     def set_update_state(self, mode: str, kind: str):
         keys = [k for k, _ in self.UPDATE_MODES]
@@ -7238,7 +7309,7 @@ class HelpPage(InfoPage):
 
 # ============================================================================================ main window
 NAV = [("▦", "Library"), ("◐", "Develop"), ("◫", "Dual Pixel Lab"), ("≋", "Focus Stack"), ("☷", "Card to Stacks"),
-       ("✦", "Super-Res Stack"),
+       ("⬡", "3D Scan"), ("✦", "Super-Res Stack"),
        ("◑", "Infrared"), ("⌒", "Panorama"), ("◎", "Lenses"), ("▣", "Cameras"), ("⇪", "Export"), ("?", "Help")]
 ROW = {name: i for i, (_, name) in enumerate(NAV)}
 
@@ -7298,11 +7369,13 @@ class MainWindow(QMainWindow):
         self.dualpixel = DualPixelPage(self.settings)
         self.focus = FocusStackPage(self.settings)
         self.cardstacks = CardStacksPage(self.settings)
+        self.scan = ScanPage(self.settings)
         self.superres = SuperResPage(self.settings)
         self.infrared = InfraredPage(self.settings)
         self.infrared.sidecar_written.connect(self._ir_sidecar)
         self.panorama = PanoramaPage(self.settings)
-        for pg in (self.dualpixel, self.focus, self.cardstacks, self.superres, self.infrared, self.panorama):
+        for pg in (self.dualpixel, self.focus, self.cardstacks, self.scan, self.superres, self.infrared,
+                   self.panorama):
             pg.open_result.connect(self.open_result)
             pg.result_written.connect(self._stack_written)
             pg.status.connect(lambda t: self.statusBar().showMessage(t, 6000))
@@ -7311,7 +7384,7 @@ class MainWindow(QMainWindow):
         BUS.report_saved.connect(self._report_saved)
         pages = [
             self.library, self.develop,
-            self.dualpixel, self.focus, self.cardstacks, self.superres, self.infrared, self.panorama,
+            self.dualpixel, self.focus, self.cardstacks, self.scan, self.superres, self.infrared, self.panorama,
             self.lenses,
             self.cameras,
             InfoPage("Export", "Select photos in the Library and press Export, or use Export in Develop. 16-bit "

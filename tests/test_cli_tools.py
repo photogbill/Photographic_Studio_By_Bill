@@ -294,3 +294,17 @@ def test_dualpixel_surface_from_the_command_line(tmp_path, capsys, monkeypatch):
     doc = json.load(open(kinds["surface_json"], encoding="utf-8"))
     assert doc["method"] == "dual_pixel" and doc["normal"]["convention"].startswith("DirectX")
     assert not doc["height"]["near_measured"] and "not yet checked" in doc["height"]["near_end"]
+
+
+def test_model_and_intake_say_plainly_what_they_need(tmp_path, capsys):
+    """The 3D Scan commands (their full runs are tested in test_scan.py on synthetic views): a folder with nothing to
+    make, or a single view, is refused with a plain reason and exit code 2."""
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    code, res = _run(["intake", empty], capsys)
+    assert code == 2 and "nothing to make" in res["problems"][0]["text"]
+    code, res = _run(["intake", tmp_path / "missing"], capsys)
+    assert code == 2 and "not a folder" in res["problems"][0]["text"]
+    src = _picture(tmp_path / "a.png")
+    code, res = _run(["model", src], capsys)
+    assert code == 2 and "two views" in res["problems"][0]["text"]

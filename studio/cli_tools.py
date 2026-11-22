@@ -839,7 +839,7 @@ def cutout_shapes(a, img, edit, run: Run) -> list:
         if shp is None:
             raise NotPossible("nobody was found in this picture")
         shapes.append(dict(shp, part=a.person))
-    if a.click:
+    if a.click and not getattr(a, "depth_measured", False):
         def to_s(p):
             xs, ys = engine.view_to_s(img, edit, p[0], p[1])
             return [float(xs), float(ys)]
@@ -852,6 +852,15 @@ def cutout_shapes(a, img, edit, run: Run) -> list:
                 raise NotInstalled(f"the {model} object model is not installed (models/sam: Convert Models.bat); "
                                    f"--model classic needs no model")
         shapes.append(engine.object_mask(img, edit, fg, bg, model=model))
+    if getattr(a, "depth_measured", False):
+        from .engine.stack import depthmask as DM
+        click = _pt(a.click[0]) if a.click else None
+        try:
+            sh = DM.subject_shape(img, edit, click)
+        except ValueError as e:
+            raise NotPossible(str(e)) from None
+        run.note(f"cut out by measured depth: {sh['how']}")
+        shapes.append(sh)
     if a.depth_range:
         lo, hi = _nums(a.depth_range, 2, "--depth-range")
         from .engine.local import depth as dp
@@ -879,8 +888,8 @@ def cutout_shapes(a, img, edit, run: Run) -> list:
         sh.setdefault("op", "add" if not shapes else a.combine)
         shapes.append(sh)
     if not shapes:
-        raise Usage("cutout: say what to cut out: --person, --click U,V, --depth-range LO,HI, --luminance LO,HI, "
-                    "--colour HUE,WIDTH, --skin or --shape JSON")
+        raise Usage("cutout: say what to cut out: --person, --click U,V, --depth-measured, --depth-range LO,HI, "
+                    "--luminance LO,HI, --colour HUE,WIDTH, --skin or --shape JSON")
     return shapes
 
 
@@ -1043,7 +1052,11 @@ def cmd_stack(a, run: Run) -> None:
         if p.method not in FS.METHODS:
             raise Usage(f"focus method: one of {', '.join(FS.METHODS)}")
         sp = surface_params(a) if ("depth" in makes or "surface" in makes) else None
-        an = FS.analyse(files, p, progress)
+        _background(a)
+        an = FS.analyse(files, p, progress, None, cache=not getattr(a, "no_cache", False),
+                        workers=getattr(a, "workers", None))
+        if an.from_cache:
+            run.note("the analysis came from the cache (these frames were analysed before with these settings)")
         try:
             info.update(frames=an.n, method=p.method, dual_pixel=bool(an.dual_pixel))
             if "merge" in makes:
@@ -1053,7 +1066,7 @@ def cmd_stack(a, run: Run) -> None:
                 run.note("a stack's result is a linear file (32-bit): finish it with 'edit' (it opens like any photo)")
             if sp is not None:
                 from .engine.stack import surface as SURF
-                kinds = SURF.KINDS if "surface" in makes else SURF.DEPTH_KINDS
+                kinds = SURF.kinds_from(sp) if "surface" in makes else SURF.DEPTH_KINDS
                 r = SURF.stack_surface(an, out_dir, FR.result_base(files), sp, kinds, progress, None, run.taken,
                                        p.method)
                 surface_outputs(run, files[0], r, info)
@@ -1087,21 +1100,32 @@ def cmd_stack(a, run: Run) -> None:
 
 
 # ====================================================================================================== dual pixel
-DP_MAKES = ("report", "depth", "half1", "half2", "hdr", "anaglyph", "sbs", "wiggle", "surface")
+DP_MAKES = ("report", "depth", "half1", "half2", "hdr", "anaglyph", "sbs", "wiggle", "surface", "near-check")
 STACK_MAKES = ("merge", "depth", "surface")
 
 
 def surface_params(a):
     """The surface settings from the command line (checked: a wrong value is a usage error, never ignored)."""
     from .engine.stack import surface as SURF
+    tl = getattr(a, "tileable", None)
     sp = SURF.SurfaceParams(ratio=getattr(a, "ratio", None) or "", step_mm=float(getattr(a, "step_mm", 0) or 0),
                             near=getattr(a, "near", "auto") or "auto", normals_y=getattr(a, "normals_y", "up"),
                             normal_strength=float(getattr(a, "normal_strength", 1.0)),
-                            tileable=bool(getattr(a, "tileable", False)), swap=bool(getattr(a, "swap", False)))
+                            tileable=bool(tl), tile_method=tl if tl in ("cut", "blend") else "cut",
+                            swap=bool(getattr(a, "swap", False)), size=int(getattr(a, "size", 0) or 0),
+                            scale=getattr(a, "scale_by", None) or "", maps=getattr(a, "maps", None) or "")
     try:
         SURF.parse_ratio(sp.ratio)
     except ValueError as e:
         raise Usage(f"--ratio: {e}") from None
+    try:
+        SURF.kinds_from(sp)
+    except ValueError as e:
+        raise Usage(f"--maps: {e}") from None
+    if sp.size and sp.size not in (256, 512, 1024, 2048, 4096, 8192):
+        raise Usage("--size: a power of two from 256 to 8192 (2048 and 4096 are usual for games)")
+    if sp.scale and not (sp.scale.startswith("coin") or sp.scale.startswith("click:")):
+        raise Usage("--scale: coin, coin:NAME (us_quarter, us_penny, euro_1 ...) or click:U1,V1,U2,V2,MM")
     if sp.step_mm < 0 or sp.step_mm > 100:
         raise Usage("--step-mm: the distance the focus moved between frames, in mm (for example 0.2)")
     if not 0.05 <= sp.normal_strength <= 20:
@@ -1136,6 +1160,11 @@ def cmd_dualpixel(a, run: Run) -> None:
     files = collect(a.inputs, a.recursive)
     if not files:
         raise Usage("dualpixel: no files found")
+    if "near-check" in makes:
+        near_check(files, run)
+        makes = [m for m in makes if m != "near-check"]
+        if not makes:
+            return
     for i, f in enumerate(files, 1):
         run.say(f"[{i}/{len(files)}] {os.path.basename(f)}")
         try:
@@ -1191,11 +1220,334 @@ def cmd_dualpixel(a, run: Run) -> None:
                                kind="dp_wigglegram")
                 elif m == "surface":
                     from .engine.stack import surface as SURF
-                    r = SURF.dual_surface(dp, out_dir, os.path.splitext(os.path.basename(f))[0], sp, SURF.KINDS,
+                    r = SURF.dual_surface(dp, out_dir, os.path.splitext(os.path.basename(f))[0], sp, SURF.kinds_from(sp),
                                           run.taken, {"la": la, "lb": lb, "disp": disp, "conf": conf})
                     surface_outputs(run, f, r)
         except Usage:
             raise
+        except Exception as e:                            # noqa: BLE001
+            run.problem(f"{os.path.basename(f)}: {e}", f, e)
+
+
+def near_check(files: list, run: Run) -> dict:
+    """Which way is near (BUILD_PLAN_DP3D A.1): the files split into stacks by time, every frame of a receding scene
+    votes, and a locked answer is saved to this PC's Dual Pixel profile for the camera."""
+    from .engine.dualpixel import nearcheck as NC
+    groups = NC.groups_by_time(files)
+    run.say(f"      which way is near: {sum(len(v) for v in groups.values())} frame(s) in {len(groups)} scene(s)")
+    res = NC.run(groups, lambda f, m: run.say(f"      {100 * f:3.0f}%  {m}"))
+    dec = res["decision"]
+    saved = NC.save_to_profile(res) if dec["locked"] else None
+    run.output(input=files[0], kind="dp_near_check", camera=res["camera"], sign=dec["sign"], locked=dec["locked"],
+               scenes_for=dec["for"], scenes_against=dec["against"], scenes_abstain=dec["abstain"],
+               text=dec["sentence"], saved_to=saved, stacks=plain(res["stacks"]))
+    run.note(dec["sentence"])
+    if saved:
+        run.note(f"saved to this PC's Dual Pixel profile for the {res['camera']} (measured on your own frames)")
+    return res
+
+
+def _background(a) -> None:
+    """--background: below-normal priority, so a long job from the RPG Forge leaves the PC usable (G.4)."""
+    if not getattr(a, "background", False):
+        return
+    try:
+        if os.name == "nt":
+            import ctypes
+            ctypes.windll.kernel32.SetPriorityClass(ctypes.windll.kernel32.GetCurrentProcess(), 0x00004000)
+        else:
+            os.nice(5)
+    except (OSError, AttributeError) as e:
+        log.info("background priority not set (%s)", e)
+
+
+# ====================================================================================================== stacks
+STACKS_RUN = ("surface", "depth", "foliage", "relief", "model")    # model: use the 'model' command (per object)
+
+
+def cmd_stacks(a, run: Run) -> None:
+    """The stacks in a folder (data), or every stack through jobs (--run surface,depth,...), resumable."""
+    from .engine.stack import batch as B
+    from .engine.stack import focus as FS
+    items = [x.strip().strip('"') for x in a.inputs]
+    for x in items:
+        if not os.path.exists(x):
+            raise Usage(f"stacks: {x} does not exist")
+    jobs = [j.strip().lower() for j in (a.run or "").split(",") if j.strip()]
+    bad = [j for j in jobs if j not in STACKS_RUN]
+    if bad:
+        raise Usage(f"stacks --run: choose from {', '.join(STACKS_RUN)} (got {a.run!r})")
+    last = [""]
+
+    def progress(frac, msg=""):
+        if msg and msg != last[0]:
+            last[0] = msg
+            run.say(f"      {100 * float(frac):3.0f}%  {msg}")
+    run.say("      finding the stacks")
+    stacks = B.find_stacks(items, a.strictness, progress)
+    focus = [s for s in stacks if s.kind == "focus"]
+    single_dp = [s for s in stacks if len(s.paths) == 1 and s.dual_pixel]
+    run.res["data"] = {"stacks": [s.to_dict() for s in stacks], "focus_stacks": len(focus),
+                       "single_dual_pixel": len(single_dp), "bursts": sum(1 for s in stacks if s.kind == "burst"),
+                       "singles": sum(1 for s in stacks if s.kind == "single")}
+    run.note(f"{len(focus)} focus stack(s), {len(single_dp)} single Dual Pixel photo(s), "
+             f"{sum(1 for s in stacks if s.kind == 'burst')} burst(s) in {sum(len(s.paths) for s in stacks)} "
+             f"photo(s) used")
+    if not jobs:
+        for s in stacks:
+            run.output(input=s.paths[0] if s.paths else "", kind="stack", stack=s.name, stack_kind=s.kind,
+                       frames=len(s.paths), dual_pixel=s.dual_pixel, left_out=s.left_out, note=s.note)
+        return
+    _background(a)
+    if a.out:
+        out_dir = out_dir_of(a)
+    else:
+        base = items[0] if os.path.isdir(items[0]) else os.path.dirname(os.path.abspath(items[0]))
+        out_dir = os.path.join(base, B.DEFAULT_SUBFOLDER)
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except OSError:
+            out_dir = str(paths.get("OUTPUTS") / "stacks")
+            run.note(f"the photos' folder cannot be written; results go to {out_dir}")
+    fp = _set_params(FS.FocusParams(), a.set, "Focus Stack")
+    sp = surface_params(a)
+
+    def done(key, it):
+        if it["status"] == "done":
+            for o in it["outputs"]:
+                run.output(input=it["stack"], output=o, kind=f"{it['job']}_file", stack=it["stack"], job=it["job"])
+        elif it["status"] == "failed":
+            run.problem(f"{it['job']} for {it['stack']}: {it.get('error', '')}")
+    doc = B.run(stacks, jobs, out_dir, sp, fp, progress, None, resume=not a.restart,
+                workers=getattr(a, "workers", None), on_done=done)
+    for key, it in doc["items"].items():                     # items already done in an earlier run
+        if it["status"] == "done" and not any(o.get("stack") == it["stack"] and o.get("job") == it["job"]
+                                              for o in run.res["outputs"]):
+            for o in it["outputs"]:
+                run.output(input=it["stack"], output=o, kind=f"{it['job']}_file", stack=it["stack"], job=it["job"],
+                           from_earlier_run=True)
+        elif it["status"] == "skipped":
+            run.note(f"{it['job']} for {it['stack']}: skipped ({it.get('error', '')})")
+    run.res["data"]["job_file"] = os.path.join(out_dir, B.JOB_FILE)
+    run.res["data"]["summary"] = B.summary(doc)
+    run.note("job file: " + os.path.join(out_dir, B.JOB_FILE) + " (a second run carries on where this one stopped)")
+
+
+# ====================================================================================================== foliage
+def cmd_model(a, run: Run) -> None:
+    """A 3-D model of one object from its stacks (hand-held, any order): cameras, points, textured glb, the
+    Blender dataset when good enough (BUILD_PLAN_DP3D E, G.1)."""
+    from .engine.scan import model as MD
+    from .engine.scan import views as VW
+    from .engine.stack import batch as B
+    from .engine.stack import focus as FS
+    from .engine.stack import frames as FR
+    makes = [m.strip().lower() for m in (a.make or "").split(",") if m.strip()]
+    if makes == ["all"]:
+        makes = list(MD.MAKES)
+    bad = [m for m in makes if m not in MD.MAKES]
+    if bad or not makes:
+        raise Usage(f"model --make: choose from {', '.join(MD.MAKES)} (got {a.make!r})")
+    if a.affine not in ("auto", "on", "off"):
+        raise Usage("model --affine: auto, on or off")
+    p = MD.ModelParams(triangles=int(a.triangles), lods=bool(a.lods), ground_cut=bool(a.ground_cut),
+                       affine=a.affine, use_depth=not a.no_depth, gate=not a.no_gate,
+                       atlas=int(a.atlas), known_length_m=float(a.length_m or 0.0))
+    items = [x.strip().strip('"') for x in a.inputs]
+    for x in items:
+        if not os.path.exists(x):
+            raise Usage(f"model: {x} does not exist")
+    results = [x for x in items if os.path.isfile(x) and os.path.exists(FS.depth_sidecar_path(x))]
+    rest = [x for x in items if x not in results]
+    groups = []
+    if rest:
+        groups = [s for s in B.find_stacks(rest, "normal")
+                  if (s.kind == "focus" and len(s.paths) >= 2) or (len(s.paths) == 1 and s.dual_pixel)]
+    if len(results) + len(groups) < 2:
+        raise Usage("model: needs at least two views of the object (focus stacks, Dual Pixel photos, or Focus "
+                    "Stack results with their depth beside them)")
+    _background(a)
+    last = [""]
+
+    def progress(frac, msg=""):
+        if msg and msg != last[0]:
+            last[0] = msg
+            run.say(f"      {100 * float(frac):3.0f}%  {msg}")
+    fp = _set_params(FS.FocusParams(), a.set, "Focus Stack")
+    views = []
+    for r in results:
+        run.say(f"[view] {os.path.basename(r)}")
+        views.append(VW.from_result(r))
+    for g in groups:
+        run.say(f"[view] {g.name}")
+        try:
+            if len(g.paths) == 1:
+                views.append(VW.from_dual(g.paths[0]))
+            else:
+                views.append(VW.from_stack(g.paths, g.base, fp, a.workers, not a.no_cache, progress))
+        except Exception as exc:                     # noqa: BLE001 - one bad stack: the others still make a model
+            run.problem(f"{g.name}: could not be read as a view ({exc})", g.paths[0], exc)
+    if len(views) < 2:
+        raise Usage("model: fewer than two views could be read")
+    first = items[0]
+    base = (os.path.basename(os.path.normpath(first)) if os.path.isdir(first) else
+            FR.result_base([v.path for v in views if v.path] or [first]))
+    out_dir = out_dir_of(a) if a.out else (os.path.join(first, "Studio models") if os.path.isdir(first) else
+                                           os.path.join(os.path.dirname(os.path.abspath(first)), "Studio models"))
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except OSError:
+        out_dir = str(paths.get("OUTPUTS") / "models")
+        run.note(f"the photos' folder cannot be written; results go to {out_dir}")
+    job = os.path.join(out_dir, f"{base}_model_job.json")
+    _write_json(job, {"state": "running", "views": [v.name for v in views]})
+    try:
+        r = MD.build(views, out_dir, base, p, makes, progress, None, run.taken)
+    except ValueError as exc:
+        _write_json(job, {"state": "failed", "error": str(exc), "views": [v.name for v in views]})
+        raise Usage(f"model: {exc}")
+    _write_json(job, {"state": "done", "files": r["json"]["files"], "gate": r["json"]["gate"]})
+    for k, q in r["paths"].items():
+        run.output(input=first, output=q, kind=f"model_{k}", views=r["json"]["views"]["placed"])
+    run.res["data"] = {"model": r["json"]}
+    for line in r["json"]["coach"]["lines"]:
+        run.note(line)
+    for n in r["json"]["notes"]:
+        run.note(n)
+
+
+def cmd_intake(a, run: Run) -> None:
+    """One call per incoming folder: objects become models, other views and photos become textures (measured or
+    estimated), listed in NAME_intake_Studio.json (for the RPG Forge)."""
+    from .engine.scan import intake as IN
+    folder = a.folder.strip().strip('"')
+    if not os.path.isdir(folder):
+        raise Usage(f"intake: {folder} is not a folder")
+    p = IN.IntakeParams(size=int(a.size), tileable=not a.no_tile, leaves=bool(a.leaves),
+                        triangles=int(a.triangles), lods=not a.no_lods, affine=a.affine,
+                        known_length_m=float(a.length_m or 0.0), reliefs=not a.no_reliefs,
+                        relief_depth=float(a.relief_depth or 0.0))
+    out_dir = out_dir_of(a) if a.out else os.path.join(folder, "Studio intake")
+    _background(a)
+    last = [""]
+
+    def progress(frac, msg=""):
+        if msg and msg != last[0]:
+            last[0] = msg
+            run.say(f"      {100 * float(frac):3.0f}%  {msg}")
+    from .engine.stack import focus as FS
+    fp = _set_params(FS.FocusParams(), a.set, "Focus Stack")
+    job = os.path.join(out_dir, "intake_job.json")
+    os.makedirs(out_dir, exist_ok=True)
+    _write_json(job, {"state": "running", "folder": os.path.abspath(folder)})
+    try:
+        doc = IN.run(folder, out_dir, p, progress, None, run.taken, fp)
+    except ValueError as exc:
+        _write_json(job, {"state": "failed", "error": str(exc)})
+        raise Usage(f"intake: {exc}")
+    _write_json(job, {"state": "done", "intake": os.path.basename(doc["path"]), "summary": doc["summary"]})
+    run.output(input=folder, output=doc["path"], kind="intake", **doc["summary"])
+    for asset in doc["assets"]:
+        run.say(f"[{asset['kind']}] {asset['name']}")
+    for x in doc["left_out"]:
+        run.note(f"{x['name']}: {x['reason']}")
+    for n in doc["notes"]:
+        run.note(n)
+    run.res["data"] = {"intake": {k: v for k, v in doc.items() if k != "path"}}
+
+
+def _write_json(path, doc):
+    import json as _j
+    try:
+        tmp = path + ".partial"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            _j.dump(doc, fh, indent=1)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def cmd_foliage(a, run: Run) -> None:
+    """Leaf cards, an atlas and glb files from stacks or Dual Pixel photos, cut out by measured depth (D)."""
+    from .engine.stack import batch as B
+    from .engine.stack import focus as FS
+    from .engine.stack import foliage as FO
+    from .engine.stack import frames as FR
+    makes = [m.strip().lower() for m in (a.make or "").split(",") if m.strip()]
+    bad = [m for m in makes if m not in FO.MAKES]
+    if bad or not makes:
+        raise Usage(f"foliage --make: choose from {', '.join(FO.MAKES)} (got {a.make!r})")
+    if a.size and a.size not in (256, 512, 1024, 2048, 4096, 8192):
+        raise Usage("--size: the atlas, a power of two from 256 to 8192")
+    p = FO.FoliageParams(pick=int(a.pick or 0), atlas_size=int(a.size or 0), ratio=a.ratio or "",
+                         scale=a.scale_by or "", triangles=int(a.triangles))
+    items = [x.strip().strip('"') for x in a.inputs]
+    if any(os.path.isdir(x) for x in items):
+        groups = [s for s in B.find_stacks(items, "normal")
+                  if (s.kind == "focus" and len(s.paths) >= 2) or (len(s.paths) == 1 and s.dual_pixel)]
+    else:
+        files = collect(items, False)
+        if not files:
+            raise Usage("foliage: no files found")
+        groups = [B.StackInfo(FR.result_base(files), "focus" if len(files) > 1 else "single", files,
+                              dual_pixel=1 if len(files) == 1 else 0)]
+    if not groups:
+        raise Usage("foliage: no focus stack or Dual Pixel photo found")
+    _background(a)
+    last = [""]
+
+    def progress(frac, msg=""):
+        if msg and msg != last[0]:
+            last[0] = msg
+            run.say(f"      {100 * float(frac):3.0f}%  {msg}")
+    for g in groups:
+        run.say(f"[{g.name}]")
+        try:
+            out_dir = out_dir_of(a) if a.out else FR.default_out_dir(g.paths[0])[0]
+            if len(g.paths) == 1:
+                cards, meta, src, how = FO.from_dual_photo(g.paths[0], p)
+            else:
+                fp = _set_params(FS.FocusParams(), a.set, "Focus Stack")
+                an = FS.analyse(g.paths, fp, progress, None, cache=not a.no_cache, workers=a.workers)
+                try:
+                    cards, meta, src, how = FO.from_analysis(an, p, progress)
+                finally:
+                    an.close()
+            if not cards:
+                run.problem(f"{g.name}: no leaf was found by measured depth (a leaf against a soft, far "
+                            f"background, shot wide open, works best)")
+                continue
+            r = FO.write(out_dir, g.base, cards, p, makes, meta, src, how, run.taken)
+            for q in r["paths"]:
+                kind = ("foliage_json" if q.endswith(".json") else "foliage_glb" if q.endswith(".glb") else
+                        "foliage_atlas" if "_atlas_" in q else "foliage_card")
+                run.output(input=g.paths[0], output=q, kind=kind, stack=g.name, leaves=len(cards))
+        except Usage:
+            raise
+        except Exception as e:                            # noqa: BLE001
+            run.problem(f"{g.name}: {e}", g.paths[0] if g.paths else None, e)
+
+
+# ====================================================================================================== blender
+def cmd_blender(a, run: Run) -> None:
+    """Build a Blender scene from a surface JSON, a model JSON or a glb (studio/blender/build_material.py), saved as
+    NAME_Studio.blend; --open starts Blender with it instead."""
+    from .engine.io import blender as BL
+    for f in a.inputs:
+        if not os.path.isfile(f):
+            raise Usage(f"blender: {f} does not exist")
+        if not (f.lower().endswith(".json") or f.lower().endswith(".glb")):
+            raise Usage("blender: give NAME_surface_Studio.json, NAME_model_Studio.json or a .glb")
+    exe, how = BL.program()
+    if not exe:
+        raise NotPossible(how)
+    for f in a.inputs:
+        try:
+            r = BL.run(f, a.out, background=not a.open)
+            if a.open:
+                run.output(input=f, kind="blender_opened", blender=exe, found_by=how)
+            else:
+                run.output(input=f, output=r["blend"], kind="blend", built=plain(r["built"]), found_by=how)
         except Exception as e:                            # noqa: BLE001
             run.problem(f"{os.path.basename(f)}: {e}", f, e)
 
@@ -1222,6 +1574,16 @@ def _field_docs(cls) -> dict:
         else:
             cur = None
     return docs
+
+
+def _foliage():
+    from .engine.stack import foliage
+    return foliage
+
+
+def _maps():
+    from .engine.stack import maps
+    return maps
 
 
 def schema() -> dict:
@@ -1299,9 +1661,27 @@ def schema() -> dict:
                 "methods": plain(depthfuse.METHOD_INFO),
                 "files": surface.names("NAME"),
                 "depth_files": surface.names("NAME", surface.DEPTH_KINDS),
-                "colours": {"cyan": "measured both ways", "amber": "measured one way",
+                "colours": {"cyan": "measured both ways", "amber": "measured one way, or estimated (one ordinary "
+                                                                 "photo: method 'estimated')",
                             "violet": "filled in from the neighbours (confidence 0)",
                             "red": "the measures disagree (more than half a focus step)"}},
+            "intake": {"about": "One call per folder (for the RPG Forge): intake FOLDER --out DIR; objects (views the "
+                                "solver places together, at least 3) become models, everything else textures "
+                                "(measured, or estimated from one photo); NAME_intake_Studio.json (studio_intake 1) "
+                                "lists the assets with their files, how they were made and their quality.",
+                       "settings": {k: {"default": v} for k, v in _intake().IntakeParams().to_dict().items()}},
+            "model": {"about": "A 3-D model from one object's hand-held stacks (BUILD_PLAN_DP3D E): model FOLDER "
+                               "--make cameras,points,glb,dataset; NAME_model_Studio.json (studio_model 1) is the "
+                               "contract; the Blender dataset (NAME_dataset_Studio/dataset.json, format "
+                               "studio_blender_dataset 1) only when the quality gate passes.",
+                      "settings": {k: {"default": v} for k, v in _model().ModelParams().to_dict().items()},
+                      "makes": list(_model().MAKES), "gate": dict(_dataset().GATE)},
+            "foliage": {"about": "Leaf cards, an atlas and glb files cut out by measured depth: foliage FRAMES --make "
+                                 "cards,atlas,glb (BUILD_PLAN_DP3D D).",
+                        "settings": {k: {"default": v, "about": _field_docs(_foliage().FoliageParams).get(k, "")}
+                                     for k, v in _foliage().FoliageParams().to_dict().items()},
+                        "makes": list(_foliage().MAKES)},
+            "maps": {k: {"how": v[0], "colour": v[1], "space": v[2]} for k, v in _maps().HOW.items()},
             "superres": {"settings": plain(superres.SuperParams().to_dict()), "modes": plain(superres.MODE_INFO),
                          "merges": plain(superres.MERGE_INFO)},
             "pano": {"settings": plain(dataclasses.asdict(pano.PanoParams())),
@@ -1315,11 +1695,30 @@ def schema() -> dict:
                             "NAME_Layer1of3_Studio.png ...; never the picture's own name"},
         "find": list(FINDERS),
         "commands": {k: v for k, v in HELP.items()},
+        "contracts": {"studio_surface": 2, "studio_foliage": 1, "studio_model": 1, "studio_cameras": 1,
+                      "studio_blender_dataset": 1, "studio_intake": 1, "studio_relief": 1,
+                      "about": "the version of each JSON file the Studio writes; a reader checks the number it "
+                               "knows (later versions keep every key of earlier ones)"},
         "result": {"ok": "true when there are no problems", "outputs": "one entry per file written (or per "
                    "picture examined): input, output, kind, width, height ...", "problems": "[{text, input, "
                    "error_report}]", "notes": "what was measured or decided, in plain words",
                    "exit_codes": {"0": "all worked", "1": "something failed", "2": "the command line was wrong"}},
     }
+
+
+def _model():
+    from .engine.scan import model as MD
+    return MD
+
+
+def _intake():
+    from .engine.scan import intake as IN
+    return IN
+
+
+def _dataset():
+    from .engine.scan import dataset as DS
+    return DS
 
 
 def cmd_schema(a, run: Run) -> None:
@@ -1405,7 +1804,20 @@ HELP = {
     "find": "what the Studio finds in a picture, as data",
     "stack": "focus | superres | pano: frames in, one linear result out; focus --make surface: colour, height, "
              "normal, confidence and agreement maps for games",
-    "dualpixel": "what a Dual Pixel RAW can make: depth, halves, highlight recovery, 3-D views, a surface for games",
+    "dualpixel": "what a Dual Pixel RAW can make: depth, halves, highlight recovery, 3-D views, a surface for games; "
+                 "near-check: which way is near for this camera, voted from receding scenes",
+    "stacks": "the focus stacks in a folder or on a card (data), or every stack through jobs (--run surface,depth): "
+              "resumable, one JSON result with one entry per file",
+    "blender": "a Blender scene (.blend) from a surface or model JSON or a glb: the displaced, textured plane or the "
+               "model with its cameras (Blender's place from the Studio's setting, else the RPG Forge's)",
+    "intake": "one call per folder of photos (for the RPG Forge): stacks that see one object become a 3-D model, "
+              "other stacks and photos become game textures (measured, or estimated from one photo), all listed in "
+              "one JSON",
+    "model": "a 3-D model of one object from its hand-held stacks in any order (our own camera solver with the Dual "
+             "Pixel depth): cameras, points, a textured glb with game LODs, and a Blender dataset when the scan is "
+             "good enough",
+    "foliage": "leaf cards (colour with alpha, albedo, normal), an atlas sheet and glb files for games, cut out by "
+               "measured depth from focus stacks or Dual Pixel photos",
     "schema": "every setting, default, choice and command, as JSON (read this first)",
     "looks": "the looks on this PC",
     "batch": "run many of these commands from a jobs file, in one start",
@@ -1423,7 +1835,7 @@ HANDLERS = {
     "descreen": _edit_cmd("descreen"), "negative": _edit_cmd("negative"), "infrared": _edit_cmd("infrared"),
     "match": _edit_cmd("match"), "look-profile": cmd_look_profile, "depth": cmd_depth, "cutout": cmd_cutout,
     "find": cmd_find, "stack": cmd_stack, "dualpixel": cmd_dualpixel, "schema": cmd_schema, "looks": cmd_looks,
-    "batch": cmd_batch,
+    "batch": cmd_batch, "stacks": cmd_stacks, "foliage": cmd_foliage, "blender": cmd_blender, "model": cmd_model, "intake": cmd_intake,
 }
 COMMANDS = tuple(HANDLERS)
 
@@ -1480,8 +1892,26 @@ def _surface_args(p, stack: bool) -> None:
                    "(OpenGL, Godot, Blender) or down (DirectX)")
     p.add_argument("--normal-strength", type=float, default=1.0, help="surface: steepness of the normal map when "
                    "the height is relative (1 = the steep tenth tilts about 45 degrees)")
-    p.add_argument("--tileable", action="store_true", help="surface: offset by half and heal the seams of every "
-                   "file the same way (a repeating texture)")
+    p.add_argument("--tileable", nargs="?", const="cut", default=None, choices=["cut", "blend"],
+                   help="surface: a repeating texture, the same seams for every file: cut (default: a minimum-error "
+                        "cut through each seam: brick, planks) or blend (even, random textures)")
+    p.add_argument("--maps", default=None, help="surface: which files, comma list of colour, albedo, height, detail, "
+                   "normal, ao, cavity, curvature, orm, roughness, confidence, agreement, gaps, or all (default: "
+                   "colour, height, normal, confidence, agreement)")
+    p.add_argument("--size", type=int, default=0, help="surface: a square game texture of this many pixels (2048, "
+                   "4096 ...) from the measured area's best part (default: as shot)")
+    p.add_argument("--scale", dest="scale_by", default=None, metavar="HOW", help="surface: real size from a coin in "
+                   "the picture (coin or coin:us_quarter / us_penny / euro_1 ...) or two points a known distance "
+                   "apart (click:U1,V1,U2,V2,MM)")
+
+
+def _long_job_args(p) -> None:
+    p.add_argument("--no-cache", action="store_true", help="analyse again even if these frames were analysed "
+                   "before with these settings (the analysis cache, beside the app)")
+    p.add_argument("--workers", type=int, default=None, help="most frames developed at once (default: a third of "
+                   "the cores, as memory allows)")
+    p.add_argument("--background", action="store_true", help="run below normal priority (long jobs from another "
+                   "program)")
 
 
 def add_parsers(sub) -> None:
@@ -1571,6 +2001,8 @@ def add_parsers(sub) -> None:
     p.add_argument("--model", default="classic", choices=["classic", "tiny", "large"],
                    help="for --click: the Studio's own colour-and-edge method, or SAM 2.1")
     p.add_argument("--depth-range", default=None, metavar="LO,HI", help="by distance, as the Studio's depth mask")
+    p.add_argument("--depth-measured", action="store_true", help="the subject by its MEASURED depth (a focus "
+                   "stack's result or a Dual Pixel RAW): the region at --click U,V, or the largest near one")
     p.add_argument("--luminance", default=None, metavar="LO,HI", help="by screen brightness 0..1")
     p.add_argument("--colour", default=None, metavar="HUE,WIDTH", help="by colour: OKLCh hue and width in degrees")
     p.add_argument("--chroma", type=float, default=0.03, help="for --colour: least colourfulness 0..1")
@@ -1606,6 +2038,7 @@ def add_parsers(sub) -> None:
                    "confidence, agreement + JSON: fast) and surface (colour, height, normal, confidence, agreement "
                    "+ JSON, for games); default merge")
     _surface_args(p, stack=True)
+    _long_job_args(p)
 
     p = sub.add_parser("dualpixel", parents=[inp, common], help=HELP["dualpixel"])
     p.add_argument("--make", default="report,depth", help="comma list of: " + ", ".join(DP_MAKES))
@@ -1615,6 +2048,80 @@ def add_parsers(sub) -> None:
     p.add_argument("--view-scale", type=float, default=0.5, help="anaglyph / sbs size")
     p.add_argument("--boost", type=float, default=1.0, help="wiggle: exaggerate the 3-D")
     _surface_args(p, stack=False)
+
+    p = sub.add_parser("stacks", parents=[common], help=HELP["stacks"])
+    p.add_argument("inputs", nargs="+", help="folders (searched down through sub-folders), a card, or files")
+    p.add_argument("--run", default="", help="comma list of jobs for every stack: " + ", ".join(STACKS_RUN) +
+                   " (default: none, only list the stacks)")
+    p.add_argument("--out", default=None, metavar="FOLDER", help="where results go (default: a 'Studio surfaces' "
+                   "folder beside the photos)")
+    p.add_argument("--set", action="append", default=None, metavar="NAME=VALUE",
+                   help="a Focus Stack setting ('schema' lists them under stack.focus)")
+    p.add_argument("--strictness", default="normal", choices=["gentle", "normal", "strict"],
+                   help="how readily Card to Stacks leaves a frame out")
+    p.add_argument("--restart", action="store_true", help="start again instead of carrying on from the job file")
+    _surface_args(p, stack=True)
+    _long_job_args(p)
+
+    p = sub.add_parser("foliage", parents=[common], help=HELP["foliage"])
+    p.add_argument("inputs", nargs="+", help="the frames of one stack, one Dual Pixel photo, or folders of stacks")
+    p.add_argument("--make", default="cards,atlas,glb", help="comma list of: " + ", ".join(
+        ("cards", "atlas", "glb")) + " (default all)")
+    p.add_argument("--out", default=None, metavar="FOLDER", help="default: beside the photos")
+    p.add_argument("--size", type=int, default=0, help="the atlas sheet, a power of two (default: as small as holds "
+                   "the leaves at full size)")
+    p.add_argument("--pick", type=int, default=0, help="keep at most N leaves, largest first (default: all)")
+    p.add_argument("--triangles", type=int, default=600, help="the bent leaf mesh's size (200..800 usual)")
+    p.add_argument("--ratio", default=None, metavar="M", help="magnification as shot (1:2 ...): sizes in mm")
+    p.add_argument("--scale", dest="scale_by", default=None, metavar="HOW", help="coin, coin:NAME or "
+                   "click:U1,V1,U2,V2,MM: sizes in mm")
+    p.add_argument("--set", action="append", default=None, metavar="NAME=VALUE", help="a Focus Stack setting")
+    _long_job_args(p)
+
+    p = sub.add_parser("model", parents=[common], help=HELP["model"])
+    p.add_argument("inputs", nargs="+", help="a folder of one object's stacks (or several folders), or Focus Stack "
+                   "results with their depth beside them, or Dual Pixel photos")
+    p.add_argument("--make", default="cameras,points,glb,dataset", help="comma list of: cameras, points, mesh, glb, "
+                   "obj, dataset (the Blender dataset: only when the scan passes the quality gate), or all")
+    p.add_argument("--out", default=None, metavar="FOLDER", help="default: a 'Studio models' folder beside the photos")
+    p.add_argument("--triangles", type=int, default=30000, help="the game mesh (LOD0) size")
+    p.add_argument("--lods", action="store_true", help="also LOD1 (a quarter) and LOD2 (a fifteenth)")
+    p.add_argument("--ground-cut", action="store_true", help="cut the model at the ground it stands on")
+    p.add_argument("--atlas", type=int, default=4096, help="the texture's largest side")
+    p.add_argument("--affine", default="auto", help="auto | on | off: describe views as if seen tilted, to match "
+                   "views far round the object (auto: only where plain matching cannot join them)")
+    p.add_argument("--no-depth", action="store_true", help="plain structure from motion, no Dual Pixel depth (for "
+                   "comparison)")
+    p.add_argument("--no-gate", action="store_true", help="write the Blender dataset even when the scan is not good "
+                   "enough (the reasons are still written in it)")
+    p.add_argument("--length-m", type=float, default=None, metavar="M", help="the object's longest side in metres, "
+                   "when you know it (else the model is in relative units: the same shape, only the size unknown)")
+    p.add_argument("--set", action="append", default=None, metavar="NAME=VALUE", help="a Focus Stack setting")
+    _long_job_args(p)
+
+    p = sub.add_parser("intake", parents=[common], help=HELP["intake"])
+    p.add_argument("folder", help="one folder of photos (stacks, Dual Pixel photos, ordinary photos, Focus Stack results)")
+    p.add_argument("--out", default=None, metavar="FOLDER", help="default: a 'Studio intake' folder inside it")
+    p.add_argument("--size", type=int, default=2048, help="textures: the game size (square)")
+    p.add_argument("--no-tile", action="store_true", help="textures: do not make them tile")
+    p.add_argument("--leaves", action="store_true", help="also leaf cards from stacks of leaves")
+    p.add_argument("--triangles", type=int, default=30000, help="models: the game mesh size")
+    p.add_argument("--no-lods", action="store_true", help="models: no LOD1 / LOD2")
+    p.add_argument("--affine", default="auto", help="auto | on | off (see 'model')")
+    p.add_argument("--length-m", type=float, default=None, metavar="M", help="models: the object's longest side, "
+                   "when known")
+    p.add_argument("--no-reliefs", action="store_true", help="no front-only relief meshes for the views that do not "
+                   "join an object")
+    p.add_argument("--relief-depth", type=float, default=None, metavar="R", help="reliefs: depth as a share of the "
+                   "subject's width (default: estimated, 0.5)")
+    p.add_argument("--set", action="append", default=None, metavar="NAME=VALUE", help="a Focus Stack setting")
+    _long_job_args(p)
+
+    p = sub.add_parser("blender", parents=[common], help=HELP["blender"])
+    p.add_argument("inputs", nargs="+", help="NAME_surface_Studio.json, NAME_model_Studio.json or a .glb")
+    p.add_argument("--out", default=None, metavar="FOLDER", help="where the .blend goes (default: beside the input)")
+    p.add_argument("--open", action="store_true", help="open Blender with the scene instead of saving it in the "
+                   "background")
 
     p = sub.add_parser("schema", parents=[common], help=HELP["schema"])
     p.add_argument("setting", nargs="?", default=None, help="one setting or group, e.g. light or light.shadows")

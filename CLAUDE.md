@@ -28,11 +28,18 @@ Read these before changing anything in this folder:
   agreement map, and surfaces for games (built, session 16: `engine/stack/depthfuse.py`, `engine/stack/surface.py`,
   `stack focus --make surface`, the Depth view in Focus Stack). Its "Status" section says what is not checked yet
   (a real Dual Pixel stack, which way is near on the R5).
-- `BUILD_PLAN_DP3D.md`: **the next build** (Bill, 2026-11-21 afternoon): Dual Pixel 3D. Speed and a cache for Dual
+- `BUILD_PLAN_DP3D.md`: Dual Pixel 3D (Bill, 2026-11-21 afternoon); **M0 to M6 built in sessions 17-18** (its
+  "Status" sections say what is built, what differs and what is next: M7, then models from Bill's real sets). The
+  camera solver, models and the Blender dataset live in `studio/engine/scan/`; Bill hand-holds 95 % of the time, and
+  macro focus breathing changes each stack's focal length (both are what the solver assumes). Speed and a cache for Dual
   Pixel stacks, near/far read from Bill's scenes, macro gains (merge from measured depth, no ghosts, gap map), more game
   maps (AO, de-lit colour, scale), foliage cards, **our own camera position solver** for hand-held unordered Dual Pixel
   stacks, meshes, glTF for Blender and Godot 4, and a new 3D Scan sidebar section. Section 0.3 lists Bill's test
   folder (`D:\dual pixel raw test`, 594 raws) stack by stack; section J is the order.
+- `BUILD_PLAN_OTHER_BRANDS.md`: what other brands put in their raw files (Bill, 2026-11-21): **the research pass (R)
+  comes first** (sources and questions per brand, producing `docs/RAW_FEATURES.md`), then the build (maker-note
+  readers, focus distance, focus brackets, pixel shift, PDAF pixels, embedded lens corrections, level and AF point).
+  Every brand claim in it is unverified until R checks it.
 - `docs/PROGRESS.md`: where things stand. Keep it current.
 - `docs/CLI.md`: the Studio from the command line for other programs (the RPG Forge, Claude): `studio/cli_tools.py`,
   `studio-cli.bat`. A new tool gets its command there, with a test in `tests/test_cli_tools.py`. The MCP server

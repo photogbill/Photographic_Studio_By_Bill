@@ -69,7 +69,13 @@ The recipe is the Studio's own Edit, as JSON, holding only what differs from the
 | `cutout` | A subject with a soft edge as RGBA (straight alpha), or `--make mask`. Select with `--person [part]`, `--click U,V` / `--avoid U,V` (`--model classic|tiny|large`), `--depth-range`, `--luminance LO,HI`, `--colour HUE,WIDTH`, `--skin`, `--shape JSON`; `--combine`, `--invert`, `--feather`, `--hard 0.5` (firm edge for leaves and fences). |
 | `find --what ...` | Data, no file: `size, info, stats, faces, people, dust, flare, crops, subject, red-eyes, blemishes, hdr, jpeg, infrared, depth`. |
 | `stack focus|superres|pano FRAMES` | A focus bracket, a burst, or a panorama into one linear 32-bit file. Finish it with `edit`. Tool settings with `--set` (listed under `stack` in the schema). Focus only: `--make merge,depth,surface` (default `merge`): the surface files for games, below. |
-| `dualpixel --make report,depth,half1,half2,hdr,anaglyph,sbs,wiggle,surface` | What a Canon Dual Pixel RAW can make. Its depth is measured, not estimated. `surface`: the same five files and JSON as a stack, from the one photo's own offsets. |
+| `dualpixel --make report,depth,half1,half2,hdr,anaglyph,sbs,wiggle,surface,near-check` | What a Canon Dual Pixel RAW can make. Its depth is measured, not estimated. `surface`: the same five files and JSON as a stack, from the one photo's own offsets. |
+| `stacks FOLDER [--run surface,depth,foliage]` | The stacks in a folder or on a card (data), or every stack through jobs; resumable (`stacks_job.json`). See "Dual Pixel 3D". |
+| `foliage FRAMES_OR_FOLDER --make cards,atlas,glb` | Leaf cards, an atlas and glb files cut out by measured depth. |
+| `intake FOLDER --out DIR` | One call per folder (for the RPG Forge): objects become models, other stacks and photos textures; one JSON lists every asset. |
+| `model FOLDER --make cameras,points,glb,dataset` | A 3-D model of one object from its hand-held stacks in any order (the Studio's camera solver with the Dual Pixel depth); a Blender dataset when the scan passes the quality gate. |
+| `blender FILE.json|FILE.glb [--open]` | A Blender scene from a surface, model or glb (`NAME_Studio.blend`). |
+| `cutout --depth-measured [--click U,V]` | The subject by its measured depth (a stack's result or a Dual Pixel RAW). |
 | `schema [NAME]`, `looks` | What exists. |
 | `batch JOBS.json` | Many commands in one start. Each job is a list of arguments, a command-line string, or `{"id", "args"}`; each job's result comes back under `jobs`. `--stop-on-error`. |
 
@@ -98,16 +104,20 @@ Settings (also under `stack.surface` in `schema`):
 * `--ratio M`: the magnification as shot (`1:2`, `1:1`, `0.5`): with the camera's pixel size it gives the size of a
   pixel on the subject (`lateral.mm_per_pixel` in the JSON).
 * `--step-mm X` (stack): how far the focus moved between frames, for a rail. With it the height is in millimetres.
-  Without it the height is **relative**, and the JSON says so. (The camera's recorded focus distance is not read yet.)
+  Without it the height is **relative**, and the JSON says so. (The lens's recorded focus distance is read when the
+  lens records one: the Makro-Planar ZE does not.)
 * `--near auto|first|last` (stack): which end of the stack is nearest. `auto` reads it from the Dual Pixel halves
-  once the camera's reading has been checked on a known scene (`engine/dualpixel/depth.py: NEAR_SIGN`; empty so far),
-  otherwise it takes the first frame in focus order and says so. One photo: `--swap`.
+  when the camera's reading is known: the camera's Dual Pixel profile (`dualpixel --make near-check`, taught on your
+  own frames, cyan) or the Studio's table (the **Canon EOS R5** is in it since 2026-11-21, read from Bill's receding
+  scenes); otherwise it takes the first frame in focus order and says so. One photo: `--swap`.
 * `--normal-strength S`: when the height is relative, how steep the normal map is (1 = the steepest tenth tilts
   about 45 degrees). With mm height and pixel size both known the normals are physical and this is ignored.
-* `--tileable`: offset by half and heal the seams with one set of weights for every file; the normal map is worked
-  out again from the tiled height, wrapping round.
+* `--tileable [cut|blend]`: a repeating texture, one geometry for every file. `cut` (the default): a minimum-error
+  cut through each seam band (structured textures: brick, planks); `blend`: the copies blended (even, random
+  textures). The normal map and the maps computed from the height are worked out again from the tiled height.
+* `--maps LIST` (see the next section) and `--size`, `--scale` (game size, real size).
 
-The JSON (`"studio_surface": 1`): `written_by`, `method` (`focus+dual_pixel`, `focus`, `dual_pixel`), `method_text`,
+The JSON (`"studio_surface": 2` since 2026-11-21; every key of version 1 is kept): `written_by`, `method` (`focus+dual_pixel`, `focus`, `dual_pixel`), `method_text`,
 `best_for`, `weak_at`, `source` (frames, frames used, reference frame, left out), `camera`, `size`, `files`,
 `height` (`white: near`, `units` relative or mm, `how_known`, `depth_units`, `range`, `near_end`, `near_measured`),
 `lateral` (`mm_per_pixel`, `width_mm`, `height_mm`, `how_known`), `displacement.height_range_over_width` (for a
@@ -122,6 +132,196 @@ The command's own `--json` result has one entry per file, `kind` = `surface_colo
 
 How it works and what it is honest about is in `engine/stack/depthfuse.py` (the fusion) and
 `engine/stack/surface.py` (the files); the measurements are in `docs/RESULTS.md` (2026-11-21).
+
+## Dual Pixel 3D (BUILD_PLAN_DP3D, 2026-11-21)
+
+### More maps (`--maps`), game sizes, real size
+
+`--maps` picks the files (default: the five above; `all` = every map but roughness):
+
+| Map | File | How it is made (the JSON's `maps.<name>.how` and colour) |
+|---|---|---|
+| `albedo` | `NAME_albedo_Studio.png` (sRGB) | **estimated** (amber): one light plus ambient fitted to the measured shape and divided out; `light` in the JSON gives the direction found and how well it fitted (`r2`) |
+| `detail` | `NAME_detail_Studio.png` (16-bit, 0.5 = flat) | **estimated** (amber): fine relief from the shading left after de-lighting; never mixed into the height |
+| `ao` | `NAME_ao_Studio.png` | computed from the measured height (horizon-based, 8 directions, reach 1/32 of the long edge) |
+| `cavity` | `NAME_cavity_Studio.png` | computed from the measured height (small crevices darker) |
+| `curvature` | `NAME_curvature_Studio.png` (16-bit, 0.5 = flat) | computed from the measured height (ridges bright) |
+| `orm` | `NAME_orm_Studio.png` | occlusion (R) from the height, roughness (G) the estimate when asked else a constant 0.9, metallic (B) 0: Godot's ORMMaterial3D and glTF's order |
+| `roughness` | `NAME_roughness_Studio.png` | **estimated** (amber) from the colour's local variation: nothing in these photos measures shine; asked for by name only |
+| `gaps` | `NAME_gaps_Studio.png` | measured: places no frame had in focus (the focus coach below) |
+
+* `--size 2048|4096|...`: a square power-of-two texture from the measured area's best part, every map cut and resized
+  the same way (`game_size` in the JSON).
+* `--scale coin` (or `coin:us_quarter`, `us_penny`, `euro_1` ...): a coin found in the picture gives the size of a
+  pixel; `--scale click:U1,V1,U2,V2,MM`: two points (0..1 of the picture) a known distance apart. `scale` in the JSON
+  says which.
+* Version-2 keys: `maps` (each file: `how`, `colour` cyan / amber / violet, `space` srgb / linear), `scale`,
+  `tiling`, `game_size`, `focus` (`dof_half_steps`, `coach`: plain sentences on where the focus jumped), `light`,
+  `godot` (below), and `coverage.gap`.
+
+### Godot 4 (F.4)
+
+The JSON's `godot` block is what an import needs: `normal_map` "OpenGL (no flip)"; `heightmap_flip` **false** (the
+height is white = near = higher; Godot's `heightmap_flip_texture` is for depth maps, where brighter is lower: from the
+Godot 4 class reference, not yet checked by rendering in the game); `textures` (srgb for colour and albedo, linear for
+everything else); `orm`; `repeat` (true when tileable). Getting Studio files into Godot 4: either import the PNGs and
+build a StandardMaterial3D with those settings, or import the `.glb` files (foliage, and models when the solver is
+built) directly: Godot reads glTF's materials, alpha scissor and double-sided flags itself; or go through Blender
+(`blender` below) and export from there.
+
+### Folders of stacks: `stacks`
+
+```
+studio-cli stacks FOLDER [--json]                          the stacks found (data: kinds, frames, Dual Pixel, left out)
+studio-cli stacks FOLDER --run surface,foliage [--out DIR] every focus stack and single Dual Pixel photo through the jobs
+```
+
+Card to Stacks' sorter finds the stacks (bursts and ordinary single photos are listed and skipped, with the reason).
+Each stack is analysed once: the **analysis cache** (`analysis_cache/` beside the app; Help > Analysis cache) keeps
+pass A, and the full-size merge for a setting, so surfaces, then leaves, then a model cost one analysis. Results go to
+a `Studio surfaces` folder beside the photos unless `--out`. **Resumable:** `stacks_job.json` in the output folder
+records every item (`done`, `failed` with the reason, `skipped` with the reason, `pending`); run the same command again
+and it carries on, reporting the earlier files with `"from_earlier_run": true`; `--restart` starts again. The surface
+settings (`--maps`, `--size`, `--tileable`, `--scale`, `--ratio` ...) apply to every stack. `--run model` is listed
+but says it needs the camera solver (not built yet).
+
+Long jobs (G.2, G.4), on `stack`, `stacks` and `foliage`: `--workers N` (frames developed at once; default a third of
+the cores, as memory allows: 4 on Bill's PC), `--background` (below-normal priority), `--no-cache`.
+
+### Leaves: `foliage`
+
+```
+studio-cli foliage FRAMES_OF_ONE_STACK | ONE_DUAL_PIXEL_PHOTO | FOLDERS [--make cards,atlas,glb] [--size 2048]
+                   [--pick N] [--triangles 600] [--ratio 1:2 | --scale coin] [--out DIR]
+```
+
+Each separate leaf is cut out by its measured depth (the bokeh behind measures nothing) and snapped to the colour
+edges. Per leaf: `NAME_leafN_colour_Studio.png` (RGBA, straight alpha, colour bled into the transparent margin so
+mipmaps never darken the edge), `_albedo` (estimated), `_normal` (from the measured relief), `NAME_leafN_Studio.glb`
+(the bent leaf, 200-800 triangles, and the flat card; alpha scissor 0.5, double-sided; `COLOR_0` black at the stem,
+white at the tip, for a wind shader). The atlas: `NAME_foliage_atlas_colour|albedo|normal_Studio.png` (power of two,
+shelf packed, one layout for every map) and `NAME_foliage_atlas_Studio.glb`. `NAME_foliage_Studio.json`
+(`"studio_foliage": 1`): each leaf's size in mm when known, its pivot (the stem: the leaf's lowest point), its atlas
+rectangle in UV, how each map was made (thickness is a constant until a back-lit frame can measure it), Godot notes.
+
+### Cut-outs by measured depth: `cutout --depth-measured`
+
+`cutout PICTURE --depth-measured [--click U,V]`: the subject chosen by its **measured** depth (a focus stack's result
+keeps its depth in `NAME.depth.npz` beside it; a Dual Pixel RAW is measured on the spot): the region clicked, else the
+largest near one; holes it could not measure are filled; the outline follows the colour edges. The usual cutout
+options (`--make rgba|mask|both`, `--feather`, `--hard`) apply.
+
+### Which way is near: `dualpixel FILES --make near-check`
+
+Every frame of a scene with ground receding at an angle votes (the offsets over a receding plane change steadily down
+the upright frame); a scene votes when two thirds of its frames agree; the camera's sign is locked when at least
+three scenes agree and none disagrees, and saved to this PC's Dual Pixel profile for the camera
+(`calibration_local/profiles/<camera>_dualpixel.json`, numbers only). The result entry `dp_near_check` carries the
+votes. The same in Dual Pixel Lab: "Teach the Studio which way is near".
+
+### Blender: `blender`
+
+`studio-cli blender NAME_surface_Studio.json | NAME.glb [--out DIR] [--open]` runs `studio/blender/build_material.py`
+inside Blender: a surface becomes a plane its real size (1 m wide when the size is not known), subdivided and
+displaced by the measured height, with a Principled BSDF (colour or albedo, AO multiplied in, the normal map in OpenGL
+tangent space, the fine relief as a second bump at strength 0); a glb is imported. Saved as `NAME_Studio.blend` beside
+the input (a .blend the Studio did not write is never replaced). Blender's place: the Studio's setting (Help >
+Blender), else the RPG Forge's own (`forge/threed/blender/profiles.json`, read only). `--open` starts Blender with it.
+
+### 3-D models: `model`
+
+```
+studio-cli model FOLDER_OF_ONE_OBJECT | RESULTS... | DUAL_PIXEL_PHOTOS... [--make cameras,points,glb,dataset]
+                 [--triangles 30000] [--lods] [--ground-cut] [--atlas 4096] [--affine auto|on|off] [--out DIR]
+                 [--no-gate] [--no-depth] [--workers N] [--background] [--no-cache]
+```
+
+Every focus stack in the folder (or every Focus Stack result with its `NAME.depth.npz`, or Dual Pixel photo) is one
+view. Hand-held, any order: the Studio's own camera solver places them (features with affine simulation for views far
+round, the pose from the matches and from each view's own Dual Pixel depth, bundle adjustment with depth terms; each
+stack's focal length is solved, since a macro lens moves out to focus). Then each view's depth is measured two ways
+(its Dual Pixel depth and stereo against its neighbours, with an agreement map), fused in a volume closed by the views'
+outlines, and the surface is textured from the view that sees each part most squarely. `--make` (`all` = every one):
+
+* `glb`: `NAME_model_Studio.glb`, the game mesh (`--triangles`; `--lods` adds `NAME_LOD1` and `NAME_LOD2` meshes),
+  colour and baked normal map (OpenGL) embedded, Y up, metres when the scale is known.
+* `mesh`: `NAME_model_full_Studio.glb`, the full-resolution mesh. `obj`: `NAME_model_Studio.obj` + `.mtl` +
+  `NAME_model_colour|normal_Studio.png`.
+* `points`: `NAME_points_Studio.ply` (colour; `how`: 2 triangulated, 1 from one view's depth).
+* `cameras`: `NAME_cameras_Studio.json` ("studio_cameras": 1): every view, placed or not (and why in plain words),
+  how it was placed (`both` cyan, `matches` / `depth` amber), pose (world-to-camera, x right, y down, z forward, in the
+  model frame), focal length in pixels and where it came from, quality.
+* `--length-m M`: the object's longest side in metres, when known (otherwise relative units; the shape is the same).
+* `dataset`: the **Blender dataset** `NAME_dataset_Studio/`, written only when the scan passes the **quality gate**
+  (at least 3 views placed and 60 % of those given, reprojection at most 1.5 px, at least 35 % of the surface
+  measured, the two depth measures disagreeing on at most 25 %); otherwise nothing is written and the reasons are in
+  the JSON's `gate.reasons` (`--no-gate` writes it anyway, reasons included). Its `dataset.json` (format
+  `studio_blender_dataset`, version 1) describes: Blender axes (Z up), units, and per camera `blender`
+  (`matrix_world` camera-to-world, `lens_mm` for a 36 mm sensor width, `shift_x/y`, `resolution`) and `opencv` (R, t,
+  K); per camera `images/VIEW.png`, `depth/VIEW.npy` (float32 distance along the view axis, NaN = not measured),
+  `depth/VIEW_preview.png`, `confidence/VIEW.png`, `agreement/VIEW.png` (cyan both, amber one, red disagree),
+  `masks/VIEW.png`; `points.ply`, `model.glb`. Everything an add-on needs, read with NumPy and the standard library.
+* always: `NAME_model_made_Studio.png` (the texture's "how made" map: cyan measured, violet filled) and
+  `NAME_model_Studio.json` ("studio_model": 1): files, units and scale (`scale.how`, amber when from the lens's
+  focus distance), views placed / not placed with reasons, `quality` (reprojection_px, depth_agreement,
+  measured_share, filled_share, disagree_share), `gate`, `coach` (plain sentences: which side was never measured and
+  how many stacks to add there, the underside, scale), `lods`, `godot` import notes.
+
+Results go to a `Studio models` folder beside the photos unless `--out`; `NAME_model_job.json` there says `running`,
+`done` or `failed` (with the reason) for a program polling it. A set with views of two objects models the larger and
+says so. `--no-depth` is plain structure from motion, kept for comparison (on wide, few-view sets it places fewer
+views: the reason the solver uses the depth).
+
+### One call per folder: `intake` (for the RPG Forge)
+
+```
+studio-cli intake FOLDER [--out DIR] [--size 2048] [--no-tile] [--leaves] [--triangles 30000] [--no-lods]
+                  [--affine auto|on|off] [--length-m M] [--workers N] [--background] [--json]
+```
+
+The Studio decides what each set of photos in the folder is for: every focus stack, Dual Pixel photo and Focus Stack
+result (with its `NAME.depth.npz`) is a possible view, and the camera solver runs on all of them together; views it
+places together (at least 3) are **one object** and become a model (as `model`: glb with LODs, cameras, points, the
+Blender dataset behind its gate); every other view becomes a **measured texture**, every ordinary photo or burst an
+**estimated texture** (amber); `--leaves` adds leaf cards from the remaining stacks. Everything is listed in
+`NAME_intake_Studio.json` (`"studio_intake": 1`): `assets` (each with `kind` model / texture / foliage, `name`,
+`files`, its own JSON, how it was made: `measured`, `colour`, and for models `quality`, `gate`, `units`, `scale`,
+`coach`), `left_out` (with reasons), `summary` (counts), `notes`. `intake_job.json` in the output folder says
+`running`, `done` or `failed`. Default output: a `Studio intake` folder inside the photos' folder; the Forge passes
+its own (`--out <folder>/_intake/studio`), so nothing is written beside the photos.
+
+**Front-only reliefs**: every view that does not join an object also becomes `NAME_relief_Studio.glb` (its measured
+depth as a cut-out, textured relief mesh: the front of the subject as that stack saw it, not a full model),
+`NAME_relief_made_Studio.png` and `NAME_relief_Studio.json` ("studio_relief": 1; `depth.ratio` is the depth against
+the subject's width: estimated 0.5 in amber unless the camera solver measured it, or `--relief-depth`). `--no-reliefs`
+leaves them out. `stacks <folder> --run relief` makes them for every stack.
+
+**Scale**: models are in relative units unless a lens recorded its focus distance (amber) or `--length-m` gives the
+object's longest side. The shape, texture and cameras are the same either way: only the size in metres is unknown.
+
+### For the RPG Forge's builder (G.5; the Studio does not change the Forge)
+
+* **One call per incoming folder:** `studio-cli.bat intake scans\incoming\<date>_<subject> --out
+  scans\incoming\<date>_<subject>\_intake\studio --json`, then shelve every entry of `assets` from
+  `NAME_intake_Studio.json` (textures: their `files` and `NAME_surface_Studio.json`; models: `files.glb`, with
+  `units`, `scale` and `gate`; leaf cards: their glb and atlas). This replaces both of `forge/scans.py`'s present paths:
+  its own guessed maps (the Studio now makes measured maps where the photos allow and estimated ones, labelled, where
+  they do not) and the hand-off to RealityScan (Bill, 2026-11-21: RealityScan needs an Epic account most of the people
+  he helps will not want; the Studio's own solver is the one used and improved). The Forge's "scan" / "texture" guess
+  by frame count is no longer needed: the Studio decides by whether the views see one object.
+* **What the Studio can do now (check it):** `studio-cli.bat schema --json` lists every command and, under
+  `contracts`, the version of each JSON file it writes (`studio_surface` 2, `studio_foliage` 1, `studio_model` 1,
+  `studio_cameras` 1, `studio_blender_dataset` 1, `studio_intake` 1, `studio_relief` 1). A reader checks the number it
+  knows; later versions keep every key.
+* **Single jobs** stay available: `stacks <folder> --run surface --maps all` (textures, now also from ordinary photos:
+  `method` "estimated"), `model <folder>` (one object), `foliage` (leaves).
+* **Raw development**: `edit` takes several raws (or a folder) in one call; one call for the folder is much faster
+  than one per raw (the Studio starts once).
+* Long jobs: poll `intake_job.json` (or `stacks_job.json`, `NAME_model_job.json`) in the output folder; pass
+  `--background` and, while the Forge renders, a small `--workers`. The Studio has no graphics-card path yet, so it
+  never takes the Forge's card lock (`forge/threed/cardlock.py`); when a GPU path is added it must take that lock first.
+* Blender: the Forge's Blender runner can run `studio/blender/build_material.py` with `-- --surface <json> --out <dir>`
+  (it prints `STUDIO_RESULT {json}` on its last line); models' glb files import directly.
 
 ## MCP: an AI model connected directly
 

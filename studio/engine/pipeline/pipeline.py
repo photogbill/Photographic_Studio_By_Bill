@@ -1146,10 +1146,38 @@ def colour_match_apply(edit: Edit, p, base_mult, amount: float = 1.0, image: Ima
     return e
 
 
+def measured_depth(image: Image) -> dict | None:
+    """The depth measured for this picture, when it has one (BUILD_PLAN_DP3D B.7): a focus stack's result keeps its
+    fused depth in NAME.depth.npz beside it, and a Dual Pixel photo can save one. {"depth" (near = 1, 0..1, the
+    picture's frame), "confidence", "label"} or None."""
+    import os
+    path = str(getattr(image.raw, "path", "") or "")
+    if not path:
+        return None
+    p = os.path.splitext(path)[0] + ".depth.npz"
+    with image._lock:
+        hit = image._memo.get(("measured_depth", p))
+    if hit is not None:
+        return hit or None
+    out = {}
+    if os.path.isfile(p):
+        try:
+            with np.load(p) as z:
+                out = {"depth": z["depth"].astype(np.float32), "confidence": z["confidence"].astype(np.float32),
+                       "label": z["label"].astype(np.uint8), "file": p}
+        except (OSError, ValueError, KeyError) as e:
+            log.info("measured depth %s unreadable (%s): the estimated depth is used", p, e)
+            out = {}
+    with image._lock:
+        image._memo[("measured_depth", p)] = out
+    return out or None
+
+
 def depth_map(image: Image, edit: Edit):
-    """Relative depth of the whole photo (local/depth.py; near = 1), once per image and base settings, from the
-    photo as displayed without depth effects: (D, crop width, crop height, milliseconds, haze colour, scene-linear
-    luminance of the copy it was measured on)."""
+    """Relative depth of the whole photo (near = 1), once per image and base settings, from the photo as displayed
+    without depth effects: (D, crop width, crop height, milliseconds, haze colour, scene-linear luminance of the
+    copy it was measured on). A picture with a measured depth (a focus stack's result, B.7) uses it (cyan);
+    otherwise Depth Anything estimates it (local/depth.py, amber)."""
     from ..local import depth as dp
     e = Edit.from_dict(edit.to_dict())
     e.depth = None
@@ -1161,9 +1189,19 @@ def depth_map(image: Image, edit: Edit):
         hit = image._memo.get(key)
     if hit is not None:
         return hit
+    md = measured_depth(image)
     with slog.stage("depth.predict", log):
         base, srgb = _srgb_preview(image, e, 1024)
-        D, ms = dp.predict(srgb)
+        if md is not None:
+            from scipy.ndimage import zoom
+            m = md["depth"]
+            D = zoom(m, (base.shape[0] / m.shape[0], base.shape[1] / m.shape[1]), order=1, mode="nearest",
+                     grid_mode=True)[:base.shape[0], :base.shape[1]].astype(np.float32)
+            if D.shape != base.shape[:2]:
+                D = np.pad(D, ((0, base.shape[0] - D.shape[0]), (0, base.shape[1] - D.shape[1])), mode="edge")
+            ms = 0.0
+        else:
+            D, ms = dp.predict(srgb)
         Y = tone_mod.luminance(np.ascontiguousarray(base)).reshape(base.shape[:2])
         far = D < np.percentile(D, 15)                     # the haze colour: the brightest of the far tenth
         sky = base[far] if far.sum() > 50 else base.reshape(-1, 3)
@@ -1175,8 +1213,8 @@ def depth_map(image: Image, edit: Edit):
     with image._lock:
         image._memo = {kk: v for kk, v in image._memo.items() if kk[0] != "depth"}
         image._memo[key] = res
-    image.depth_report = {"ms": ms, "size": list(D.shape)}
-    log.info("depth: %dx%d map in %.0f ms", D.shape[1], D.shape[0], ms)
+    image.depth_report = {"ms": ms, "size": list(D.shape), "source": "measured" if md is not None else "estimated"}
+    log.info("depth: %dx%d map in %.0f ms (%s)", D.shape[1], D.shape[0], ms, image.depth_report["source"])
     return res
 
 
@@ -1240,8 +1278,10 @@ def depth_shape(image: Image, edit: Edit, lo: float = 0.0, hi: float = 0.4, soft
     distance range (near = 1)."""
     from ..local import masks as mk
     D = depth_map(image, edit)[0]
+    src = (getattr(image, "depth_report", None) or {}).get("source", "estimated")
     return {"type": "depth", "op": "add", "w": int(D.shape[1]), "h": int(D.shape[0]),
-            "data": mk.encode_bitmap(np.round(D * 255).astype(np.uint8)), "lo": lo, "hi": hi, "soft": soft}
+            "data": mk.encode_bitmap(np.round(D * 255).astype(np.uint8)), "lo": lo, "hi": hi, "soft": soft,
+            "source": src}
 
 
 CHANNEL_SOURCES = {"r": "Red", "g": "Green", "b": "Blue", "r-b": "Red minus blue", "r/b": "Red / blue",

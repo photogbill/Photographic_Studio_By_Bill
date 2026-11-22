@@ -1,6 +1,77 @@
 # Build progress
 
-Updated 2026-11-21 (session 16: Depth Stack, `BUILD_PLAN_DEPTH_STACK.md`; session 15: Clean rebuilt on the calibration, `BUILD_PLAN_NOISE.md` 0.5 and 0.6; session 14: drop-everything camera calibration; session 13: Infrared and Panorama tabs, `BUILD_PLAN_PANO_IR.md`, flare ghosts and Fill; then Card to Stacks on Bill's card). Plan: BUILD_PLAN.md v2.0.
+Updated 2026-11-21 (session 18: Dual Pixel 3D M5 and M6, the camera solver, models, the Blender dataset, `BUILD_PLAN_OTHER_BRANDS.md` written; session 17: Dual Pixel 3D M0 to M4, `BUILD_PLAN_DP3D.md`; session 16: Depth Stack, `BUILD_PLAN_DEPTH_STACK.md`; session 15: Clean rebuilt on the calibration, `BUILD_PLAN_NOISE.md` 0.5 and 0.6; session 14: drop-everything camera calibration; session 13: Infrared and Panorama tabs, `BUILD_PLAN_PANO_IR.md`, flare ghosts and Fill; then Card to Stacks on Bill's card). Plan: BUILD_PLAN.md v2.0.
+
+## Session 18: Dual Pixel 3D, M5 and M6 (2026-11-21 evening, chat session with Bill)
+
+`BUILD_PLAN_DP3D.md` "Status, session 18" says what is built and how it differs from the plan. Tests:
+tests/test_scan.py (11, synthetic views with known truth), tests/test_scan_pages.py (the model view), two new tests in
+tests/test_dp3d.py (estimated surfaces). Numbers in docs/RESULTS.md (session 18).
+
+* **For the Forge first** (Bill: "Is there anything we still need to build here, for forge to use it for
+  processing"): ordinary single photos and bursts now give ESTIMATED surfaces (`surface.photo_surface`,
+  `maps.estimated_height`, method "estimated", every map amber); `schema` lists the JSON contracts and their versions;
+  the Forge's part (texture folders, scan folders through `model`, one `edit` call per folder) is in docs/CLI.md.
+* **M5** the camera solver, `engine/scan/`: `sift.py` (SIFT, RootSIFT, affine simulation), `geom.py` (essential matrix
+  with cheirality scoring and LO-RANSAC, PnP, Umeyama, midpoint triangulation), `twoview.py` (pose from the matches
+  and from the depth), `solve.py` (incremental placement, depth points, outlier rounds, focal breathing), `ba.py`
+  (Levenberg-Marquardt, Schur complement, analytic derivatives, depth terms).
+* **M6** `dense.py` (depth two ways and the agreement map), `fusion.py` (TSDF + visual hull), `isosurface.py` (surface
+  nets, Taubin), `texture.py` (views per face, Potts-smoothed charts, atlas, seam gains, how-made map), `decimate.py`
+  (quadric clustering, normal-map baking), `raster.py` (rasteriser, turntable), `coach.py`, `dataset.py` (the Blender
+  dataset and its quality gate, Bill 18:18), `model.py` (the job and its files), `views.py` (views from stacks, results,
+  Dual Pixel photos); the `model` command; 3D Scan > Make a 3D model and the model view (`app/scanmodel.py`).
+* Faults found and fixed on the way: the test scene's repeated textures (the log's two ends looked alike), the
+  essential matrix on curved patches, scipy's bundle adjustment stalling, depth out-voting pixels, a quarter-pixel
+  shift in the feature finder's upsampling, 57 000 speckle texture charts, the "is this our file" check not knowing
+  glb / OBJ / PLY / NPY (a second run would have piled up copies).
+* **Not built**: M7 (B.4, B.5, B.6, C.6 d with the self-distance scale, E.9), and no model was run on Bill's real sets
+  in the workspace (minutes per stack here); see the plan's Status.
+* `BUILD_PLAN_OTHER_BRANDS.md` (Bill, 17:02): the research pass first (sources, questions per brand), then the build.
+* **Later that evening (Bill, 21:07):** RealityScan dropped (needs an Epic account); no per-lens distance calibration
+  (100+ lenses); `intake FOLDER` built for the Forge (objects become models, the rest textures, one
+  `NAME_intake_Studio.json`), `--length-m` for a known size, a length box on the 3D model panel, a plain-words reason
+  when no views can be placed together, and `log.save_error_report` no longer fails when handed an exception. Real
+  test: the angel set (4 stacks about 90 degrees apart) could not be placed (docs/RESULTS.md); the log set's run was
+  stopped at Bill's request (he tests on his PC). Then (Bill, 22:31): **front-only reliefs** (`engine/scan/relief.py`):
+  one view's measured depth as a cut-out textured relief glb, made by intake for every view that joins no object,
+  by `stacks --run relief`, and by 3D Scan's "Front reliefs" tick; tested on synthetic views (tests/test_scan.py).
+
+## Session 17: Dual Pixel 3D, M0 to M4 (2026-11-21 afternoon, chat session with Bill)
+
+The plan is `BUILD_PLAN_DP3D.md` (its "Status" section says what is built and what is not, part by part). Built in the
+order of its section J; each milestone's tests passed before the next began (tests/test_dp3d.py, 40 tests;
+tests/test_scan_pages.py). Numbers in docs/RESULTS.md (session 17).
+
+* **M0** Near / far for the R5 read from Bill's receding scenes and locked (sign -1, three scenes, none against):
+  `engine/dualpixel/nearcheck.py`, `depth.NEAR_SIGN`, `depth.near_source` (the camera's Dual Pixel profile first:
+  `engine/dualpixel/dpprofile.py`, cyan when taught on this PC, violet when shared). `dualpixel --make near-check`
+  and Dual Pixel Lab's "Teach the Studio which way is near". The Makro-Planar ZE records no focus distance
+  (`metadata.focus_distance_m` reads it for lenses that do).
+* **M1** Speed: one decode per Dual Pixel frame (`frames.develop_and_halves`), the second frame from memory, shading
+  fitted once per stack (`frames.DualState`, kept in the camera's Dual Pixel profile per lens setting), the offset
+  search rewritten (`depth.disparity`, window sums at the grid only; `disparity_reference` kept as the yardstick),
+  frames developed several at once (`focus._Developer`, threads: safe in the MSI too). 2.4x per frame one at a time
+  here; `DP Benchmark.bat` measures Bill's PC. The analysis cache (`engine/stack/anacache.py`, `analysis_cache/`,
+  Help > Analysis cache: size and Clear) also keeps the full-size colour merge per setting. Folders of stacks:
+  `engine/stack/batch.py`, the `stacks` command (resumable, `stacks_job.json`). Mixed stacks use the Dual Pixel
+  frames they have (`depthfuse.calibrate_steps(have=...)`).
+* **M2** Merge from measured depth (`focus` method "measured", Auto's choice for Dual Pixel stacks), moving parts
+  from one frame (`focus.moving_frames`, the "Moving parts from one frame" tick), focus gaps and the coach
+  (`depthfuse.gaps`: amber stripes in the Depth view, `coach` sentences), the depth travels with the result
+  (`NAME.depth.npz` beside it, `pipeline.measured_depth`: Develop's depth masks, haze and relight use it, cyan chip).
+* **M3** `engine/stack/maps.py`: AO, cavity, curvature, de-lit colour, fine relief, roughness on request, ORM, seam-cut
+  tiling, coin and click scale, game sizes; `surface.py` writes JSON version 2 (every map's `how`, `godot` notes,
+  `scale`, `focus` coach). Subject masks from measured depth (`engine/stack/depthmask.py`, `cutout --depth-measured`).
+* **M4** `engine/io/gltf.py` (our own .glb writer and reader, OBJ + MTL, PLY), `studio/blender/build_material.py` (runs
+  inside Blender) with `engine/io/blender.py` and the `blender` command (Blender's place from the Forge, read only),
+  foliage (`engine/stack/foliage.py`, `foliage` command: cards, atlas, glb with wind colours and a stem pivot).
+* **App**: a new sidebar section **3D Scan** (`app/scan.py`, Sets page: folder in, Make them all, Open in Blender);
+  Card to Stacks "Make surfaces for every stack"; Focus Stack: Measured depth method, moving parts tick, focus-gap
+  overlay and coach, every game map; Dual Pixel Lab: teach near / far; Help: analysis cache and Blender's place.
+* **Not done** (why in the plan's Status): M5 and M6 (the camera solver, dense depth, meshes, Cameras and Model, Coach
+  pages), M7 (B.4-B.6, C.6 d, E.9, B.8), C.8 decals, the Blender and Godot import checks on Bill's PC, the real
+  foliage / brick / board checks.
 
 ## Session 16: Depth Stack (2026-11-21, chat session with Bill)
 

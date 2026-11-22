@@ -223,6 +223,9 @@ def test_ratio_and_step_give_millimetres(monkeypatch, tmp_path):
 
 def test_flip_near_far_turns_the_height_round(monkeypatch, tmp_path):
     from PIL import Image
+    from studio.engine.dualpixel import depth as DEP
+    monkeypatch.delitem(DEP.NEAR_SIGN, "Canon EOS R5", raising=False)   # a camera not yet checked (the synthetic
+    #                                                                   stack's halves read the other way round)
     an, tr, _ = _analyse(monkeypatch, "flip", n=7, h=512, w=768)
     try:
         a = SURF.stack_surface(an, str(tmp_path / "a"), "f", SURF.SurfaceParams(near="first"), ("height",))

@@ -1085,3 +1085,181 @@ Speed: the Dual Pixel shading gain is now worked as (powers of v) @ C @ (powers 
 went from 39.2 s to about 1 s (same numbers to float32 rounding; `test_shading_gain_fast_path_is_exact`). Each Dual
 Pixel frame in a stack adds the second-frame decode, the shading fit and the offset search (about 22 s a frame on the
 build machine; much less on a real PC).
+
+## 2026-11-21 (session 17): Dual Pixel 3D, M0 to M4 (BUILD_PLAN_DP3D)
+
+Measured in the session's 2-core, 7 GB workspace on copies of Bill's raws (`D:\dual pixel raw test`, never copied
+into the repository). Bill's PC (14 cores, 64 GB) will be faster; `DP Benchmark.bat` measures it there.
+
+### M0: which way is near (A.1), Canon EOS R5
+
+Every frame's offsets turned upright and fitted with a plane (robust); a frame votes when the slope down the frame is
+clear (t >= 8), large enough (>= 0.4 px top to bottom) and steady (|Spearman| of ten row bands >= 0.6). First,
+middle and last frame of each stack of shoot 2 (single-photo window 48 / 16, search +-16 px):
+
+| Stack | Frame votes (slope top to bottom, t, rho) | Stack |
+|---|---|---|
+| #38 3238-3252 leaf litter to the trees | 3238 abstains (0.1% measured: past the near end); **3245: -9.5 px, t 41, rho -0.90**; 3252 abstains (past the far end) | **-1** |
+| #14 3096-3102 blocks on gravel | 3096, 3102 abstain (0.2% measured); 3099: +0.48 px, t 6.8, rho 0.45: abstains (shot nearly straight down: the camera's orientation tag cannot say where "down" is, and the slope is weak) | abstains |
+| #25 3160-3167 | **3160: -16.0 px, t 143, rho -0.95; 3164: -9.8 px, t 103, rho -0.98**; 3167 abstains | **-1** |
+| #9 3058-3064 | **3061: -4.0 px, t 37, rho -0.61**; 3058, 3064 abstain | **-1** |
+
+Three scenes agree, none against: **locked, sign -1** (the offset of a place in front of focus is negative: the
+reading the Studio had always assumed). In `depth.NEAR_SIGN`; a stack's near end is now measured for the R5 whatever
+order the frames were shot in. The end frames of Bill's hand-held stacks abstain because he rocks the focus past both
+ends: they hold almost nothing in focus (confidence too low even with the search widened to +-16 px). The same
+decision with the narrower search (+-8 px). 12 frames, 175 s. The tape-measure frame, when it comes, is one more vote.
+
+### A.2: the lens's focus distance
+
+The Makro-Planar 2/50 ZE does not record one on the R5: Canon ShotInfo FocusDistanceUpper / Lower (indices 19, 20)
+are 0 in every frame, and across stack #38 the only maker-note fields that change are the image ID (0x28, 0x4039), one
+FileInfo value (0x93 index 54: 4720, 4752, 4736, not following focus) and the measured colour (0xaa). Read for lenses
+that do record it (`metadata.focus_distance_m`, ExifTool's scaling, not yet checked on such a lens); scale for these
+files comes from a coin, a click, `--ratio` or a rail.
+
+### M1: speed (A.3)
+
+`tools/dp_bench.py` on bark stack #17 (3119-3122), seconds per frame:
+
+| Frame | Before: develop / second decode + temp copy / shading / offsets = total | Now: develop and halves from one decode / offsets = total |
+|---|---|---|
+| 3119 | 7.2 / 1.8 / 3.0 / 18.9 = 30.9 | 11.3 / 5.3 = 16.6 (the stack's shading is fitted on this frame) |
+| 3120 | 2.3 / 1.5 / 2.8 / 19.5 = 26.1 | 4.4 / 5.4 = 9.9 |
+| 3121 | 2.4 / 1.6 / 2.9 / 20.1 = 27.0 | 4.4 / 5.2 = 9.6 |
+| 3122 | 2.4 / 1.5 / 2.8 / 20.3 = 27.0 | 4.6 / 5.5 = 10.1 |
+
+**2.4x per frame one at a time** (27.8 s to 11.5 s on average; 2.7x after the first frame), short of the plan's 4x for
+one frame at a time. The offset search itself is 3.8x faster (20 s to 5.3 s): window sums taken only at the grid
+points from block sums, whole-pixel shifts as column indices, grid maps brought to full size one axis at a time. The
+plan's 4x is expected with frames in parallel on Bill's PC (4 at once there: a third of 14 cores, 6 GB each); this
+workspace has the memory for one, so the parallel speed could not be measured here: `DP Benchmark.bat` reports it.
+
+Same answers:
+* Fast offsets against the first implementation (same halves): the largest difference anywhere 0.005 px (0.0005 px
+  where confidence > 0.05); confidence identical to 1e-5. Tested on synthetic halves too (within 0.02 px).
+* Second frame read from memory: bit-identical mosaic and black levels to the temporary-copy way.
+* Shading fitted once per stack: the gain fields of two frames of the stack agree within 1% (1st to 99th percentile
+  0.984 to 1.008); offsets where both are sure (confidence > 0.3) typically 0.002 px apart, 99% within 0.03 px (0.02 px
+  at confidence > 0.5). A few places whose correlation has two near-equal peaks flip between them on any change at
+  all (up to 8 px at confidence 0.05): low-confidence places, which the fusion already weighs down. The level ratio
+  across the bark stack: 2.003 to 2.043 (spread 1.95%, inside the 2% that triggers a refit): shading fitted once.
+* Predicted search (A.3.4: searching only near the offset the focus predicts) not built: with window sums at the grid
+  only, the search costs about the same per shift wherever it is needed, and the prediction differs from place to
+  place. Left out; the time went to the parallel frames instead.
+
+### M1: the cache and a real hand-held Dual Pixel stack (bark #17, 6 frames, f/2, ISO 100)
+
+`stack focus <bark> --make surface`: measured two ways 87.8% of the picture, one way 3.6%, filled 8.6% (the bokeh
+beside the trunk), disagree 0.2%. Focus step s = -5.05 px per step, the hand's steps uneven by 13.7% (frame positions
+0, 0.81, 1.81, 2.72, 3.79, 5.14 steps); agreement median 0.09 steps, 90th percentile 0.21. Near end measured from the
+halves (the R5's sign). The height shows the bark's plates and fissures and the trunk's curve (looked at). First run
+570 s (analysis about 130 s, the full-size colour merge the rest); second run **"Analysis from the cache"**, 439 s (the
+colour merge again: it is now kept in the cache too, so a third run skips both).
+
+### M2 to M4 on synthetic data with known truth (tests/test_dp3d.py)
+
+* Measured-depth merge (B.1), a bright raised block over a busy background: error in a band round the depth edge
+  lower than Auto's, error elsewhere within 0.3 dB of it.
+* Moving parts (B.2), the moving-patch stack: the agreement map flags 30%+ of the patch (2% elsewhere); there the
+  result equals the chosen single frame (ghost energy under 5% of the blend's), gradient energy along the region's
+  edge within 1.2x of the plain merge's (no seam).
+* Gaps (B.3), a 9-frame stack with frame 5 removed: half depth of field 0.53 steps (from optics: s / 0.849 px of
+  blur radius per step, sharp within a radius of 1 px); the jump of 2 steps found between frames 4 and 5, the gap's
+  places all at that depth, the coach names the pair.
+* Maps (C.1): AO lower in a pit, open on a bump; a groove reads as cavity; curvature signs right. De-lighting (C.2):
+  albedo error under half the shaded colour's, light direction within 25 degrees. Seam-cut tiling (C.5) on bricks:
+  the repeat's join no stronger than the picture's own neighbouring columns, under a third of the blend's blended
+  pixels. Coin (C.6): radius within 2%, centre within 1%. Subject by measured depth (C.9): the leaf (IoU > 0.9) and not
+  the litter of the same colour; a click picks the litter.
+* glTF (F.1): read back, the schema's required fields and references valid, tangents unit length and in the surface.
+* Foliage (D): two leaves give two cards, the margin bled (no black), the pivot at the stem, a bent mesh of 150-900
+  triangles, atlas rectangles inside the sheet and apart, glb with alpha scissor 0.5 and double-sided.
+* De-lighting on the real bark (2048 wide): the fitted light explains little (r2 0.08): the bark's own colour varies
+  far more than its shading, so its albedo is close to its colour, and the JSON says how well the light fitted.
+
+### Foliage on a real stack: bramble #20 (3134-3139, 6 frames, f/2): two faults found and fixed
+
+* First run (743 s, the full-size merge most of it): 10 cards, but three were mostly **bokeh**: scattered places in
+  the blurred background counted as "measured" (one way), and growing a leaf over its measured neighbours at a
+  similar depth (the fill makes the blur's depth close to the leaf's), then filling every enclosed hole, joined
+  leaves to background blobs; one card was background alone. **Fixed:** a subject (leaf, cut-out) is made only of
+  places that were sharp in some frame (a clear focus peak) or measured both ways (`depthmask.strict_label`, also
+  kept in the result's `NAME.depth.npz` as `label_strict`), and only small holes are filled (a plain patch on a leaf,
+  never a big enclosed piece of background between leaflets: `fill_small_holes`).
+* The stack's Dual Pixel step could not be trusted: only 3-4% of each frame confident (smooth green leaves against
+  bokeh), the pairs' own steps -5.8, 0.0, 0.5, -1.1, -3.7 px (spread 222%), which put the frames at nonsense
+  positions. **Fixed:** a spread over 100% now means "depth from focus alone" with a note (the bark's 14% and the
+  synthetic hand-held 39% are well under it).
+* Second run, from the cache (analysis and colour merge both kept): **57 s**, 11 cards, every one a leaf or a stem
+  (looked at: clean shapes on the checkerboard, a soft brownish rim where the leaf's edge was out of focus in every
+  frame), atlas 4096 (the atlas now stops growing at 4096 and shrinks the cards evenly; `--size` overrides).
+* The shading saved in the profile from the bark stack (same lens, focal length, aperture) did not match this stack
+  (every frame's level ratio drifted over 2%), so each frame was fitted on its own. **Fixed:** when a profile's
+  shading does not match the first frame, that frame's fit becomes the stack's reference and the rest reuse it.
+
+### Not run this session, and why
+
+* **Blender import** (F.1, F.3): the Blender connection's background mode on Bill's PC has no Blender path set
+  (`BLENDER_PATH`), and running the script inside the Blender Bill has open would have changed his scene. The script
+  is written and its imports checked; the first run is `studio-cli blender <surface json>` (or Open in Blender in 3D
+  Scan) on Bill's PC. The test files are in `outputs\_session_dp3d\blender_check\`.
+* **Godot import**: through the Forge's Godot connection it would add files to Bill's game project; left for the
+  Forge's builder (docs/CLI.md, "For the RPG Forge's builder").
+* Foliage, brick, board, asphalt and gravel on Bill's real stacks, and shoot 1 (mixed / high ISO): the session's time
+  went to building; the commands are ready (`stacks "D:\dual pixel raw test" --run surface,foliage`).
+
+
+## Session 18 (2026-11-21 evening): the 3D Scan camera solver and models, on synthetic views with known truth
+
+Scene (`tests/scan_synth.py`): a bumpy, textured log (radius 0.25 m, 1.2 m long) on textured ground, rendered from
+hand-held positions (distance 1.9 m +- 13 %, roll +- 8 degrees, elevation 18-32 degrees, unordered), 480 x 360,
+focal 520 px; each view's fused depth t = a / z + b with its own a and b, blurred like the measuring windows, noise
+0.4 % of its range. Errors after aligning the solution to the truth (rotations by the views' own rotations, positions
+by a similarity on the centres, as a share of the cameras' spread, 1.9 m).
+
+| Case | Placed | Rotation error (max) | Position error (max) | Reprojection | Time (2-core workspace) |
+|---|---|---|---|---|---|
+| 16 views, 22 degrees apart | 16 / 16 | 0.23 deg | 1.2 % (median 0.4 %) | 0.16 px | ~100 s |
+| 16 views + a stray view of a wall | 16 / 17, the stray named | 0.12 deg | 0.6 % | 0.21 px | 162 s (affine for the stray only) |
+| **5 views, 72 degrees apart (shoot 2's case)** | **5 / 5** | **0.58 deg** | **0.9 %** | 0.17 px | 54 s |
+| the same, depth switched off (plain structure from motion) | **2 / 5** | - | - | 0.23 px | 53 s |
+| 8 views with focus breathing (files say 520 px; truth 627-675 px) | 8 / 8 | 0.49 deg | 3.1 % | 0.16 px | 86 s |
+
+On the way (each fault fixed): plain SIFT at 45 degrees on the orbit: 1 good match of 10 (affine simulation: 599
+good at 45, 258 at 67); the 8-point essential matrix 50-70 degrees off on curved patches with ~95 % inliers (the
+true pose fits as well; fixed by cheirality scoring, LO-RANSAC and MSAC, and depth winning on wide pairs); scipy's
+bundle adjustment ending at 0.59 px where the truth fits at 0.17 px (our Levenberg-Marquardt with the Schur complement
+reaches 0.17); the feature finder's upsampling shifted points by a quarter pixel (rotations 1.2 -> 0.37 degree once
+fixed). The 16-view worst position (1.2 % of the cameras' spread, about 2 cm) is one view whose solved focal length came
+out 2.5 % long (533 px for 520), so it sits further back along its view: the price of solving each stack's focal
+length (needed for macro focus breathing); its rotation is right (0.23 degree at worst). Earlier in the session,
+before the focal lengths were freed for breathing, the worst was 0.6 %.
+
+Model (8 views round the log): 8 / 8 placed, 0.14 px; full mesh 234 000 triangles from a 160-voxel volume (voxel 3.4
+mm), game mesh 7 800 (LOD1, LOD2), 883 texture charts (57 000 before the Potts smoothing), 2048 atlas; measured share
+of the surface 61 %: the rest is the underside and the lower sides no camera saw (cameras 18-28 degrees above), filled
+from the outlines and shown violet; the coach says so. Distance of the measured surface from the true log: median
+under 1 % of the log's length (test). Model time 27 s after the solve. Blender dataset written (the gate passed); its
+cameras in Blender's and OpenCV's terms project a point to the same pixel (to 1e-6 px).
+
+Surface nets on a sphere of radius 12.3 voxels: radius 12.282 +- 0.007, closed (Euler 2). Quadric clustering 34 512
+-> 1 962 triangles in 0.2 s, radius kept (30.32 for 30.28), still closed.
+
+Not run: models from Bill's real sets (each stack's analysis takes several minutes in this workspace; the 3D Scan
+button and the `model` command are the first things to run on his PC), the Blender and Godot imports.
+
+### Session 18, real sets (Bill: "We can use the data from that session as our test")
+
+**Angel statue on a stump, shoot 2 stacks #4-#7 (3028-3052), `model` command.** 4 stacks of 5-6 frames used, f/2,
+ISO 100, Makro-Planar 50 mm; seen from the front, front-left, back and right: about 90 degrees apart. Analysis about
+9 minutes per stack in this 2-core workspace (37 minutes in all; then cached). Each view's depth: 78-88 % measured
+both ways (one view only 25 % confident). **No model**: plain SIFT found 27-44 candidate matches per pair, affine
+simulation 135-178, and at most 10 of them agreed on one camera position in any pair (12 needed), with the depth path
+also finding none. The views share little: the statue is smooth and white, the stump's bark is different on each
+side, and the leaf litter round it repeats (leaves look alike, so the candidates were wrong). The subject mask (from
+measured depth) was not found in any view (the stump stands on the ground: no depth step separates it), so the litter
+was matched too. The solver refused rather than make a wrong model, which is right; its message said only "fewer than
+two views could be placed together", so it now names the closest pair, its numbers and what to do (neighbours 20-30
+degrees apart). Lesson for the coach and the shooting advice: 4 views round a smooth object are too few for any
+feature matcher; the depth cannot help without correspondences.

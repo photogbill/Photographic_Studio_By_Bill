@@ -166,7 +166,9 @@ def save_error_report(what: str, trace: str | None = None, extra: str = "") -> P
     try:
         if trace is None:
             trace = traceback.format_exc()
-        trace = trace or "(no error text)"
+        elif isinstance(trace, BaseException):      # an exception given instead of its text: format it
+            trace = "".join(traceback.format_exception(type(trace), trace, trace.__traceback__))
+        trace = str(trace or "(no error text)")
         sig = _signature(trace)
         with _report_lock:
             if sig in _reported:

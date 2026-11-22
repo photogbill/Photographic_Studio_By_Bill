@@ -203,13 +203,13 @@ def cr3_raw_tracks(path: str) -> list:
     return [t for t in out if t[3] > 0.25 * big]
 
 
-def _cr3_second_frame(path: str):
-    """(full sensor mosaic uint16, black per LibRaw channel) of a Dual Pixel CR3's second frame, read through a
-    temporary copy whose main-raw track tables point at the second raw track."""
-    import shutil
-    import uuid
+def _cr3_second_frame(path: str, data: bytes | None = None):
+    """(full sensor mosaic uint16, black per LibRaw channel) of a Dual Pixel CR3's second frame. The file is read
+    into memory once, the main-raw track tables are pointed at the second raw track in that copy, and LibRaw
+    decodes it from memory (BUILD_PLAN_DP3D A.3.2: no 70-120 MB temporary file). A rawpy that cannot read from
+    memory falls back to the temporary copy (said in the log)."""
+    import io
     import rawpy
-    from ... import paths
     tr = cr3_raw_tracks(path)
     if len(tr) < 2:
         raise UnsupportedRaw(f"{os.path.basename(path)}: {NOT_DUAL} {HOW_TO}")
@@ -217,6 +217,30 @@ def _cr3_second_frame(path: str):
     if any(main[k][1] != second[k][1] for k in range(3)):
         raise UnsupportedRaw(f"{os.path.basename(path)}: a Dual Pixel file laid out in a way the Studio does not "
                              f"read yet. Make the two frames with DPRSplit and use 'Use two DPRSplit files'.")
+    if data is None:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    buf = bytearray(data)
+    for k in range(3):
+        blob = bytes(buf[second[k][0]:second[k][0] + second[k][1]])
+        buf[main[k][0]:main[k][0] + main[k][1]] = blob
+    try:
+        with rawpy.imread(io.BytesIO(bytes(buf))) as r:
+            m = np.array(r.raw_image, dtype=np.uint16, copy=True)
+            black = np.array(r.black_level_per_channel, dtype=np.float32)
+        return m, black
+    except (TypeError, AttributeError) as e:         # an old rawpy that only takes a path
+        log.info("rawpy cannot read from memory (%s): the second frame is read through a temporary copy", e)
+        return _cr3_second_frame_via_copy(path, main, second)
+
+
+def _cr3_second_frame_via_copy(path: str, main, second):
+    """The first way of reading the second frame (session 12): a temporary copy whose main-raw track tables point
+    at the second raw track, decoded by LibRaw, then deleted."""
+    import shutil
+    import uuid
+    import rawpy
+    from ... import paths
     d = paths.temp_dir()
     d.mkdir(parents=True, exist_ok=True)
     tmp = os.path.join(str(d), f"dp_{uuid.uuid4().hex[:10]}.CR3")
@@ -257,13 +281,15 @@ def is_dual_pixel(path: str) -> bool:
         return False
 
 
-def open_dual(path: str) -> DualPixel:
+def open_dual(path: str, image=None) -> DualPixel:
     """Both frames of a Dual Pixel RAW file. Raises UnsupportedRaw (NOT_DUAL + how to turn it on) for a normal raw,
-    or the usual UnsupportedRaw for a file the decoder cannot read."""
+    or the usual UnsupportedRaw for a file the decoder cannot read. ``image``: the photo already opened with
+    api.open (a stack develops it first: the A+B frame is then decoded once, BUILD_PLAN_DP3D A.3.1)."""
     import rawpy
     from .. import api
     name = os.path.basename(path)
-    image = api.open(path)                           # raises UnsupportedRaw / FileNotFoundError itself
+    if image is None:
+        image = api.open(path)                       # raises UnsupportedRaw / FileNotFoundError itself
     if name.lower().endswith(".cr3"):
         m1, black = _cr3_second_frame(path)
         if m1.shape != image.raw.mosaic.shape:

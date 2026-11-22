@@ -97,3 +97,39 @@ truth, but the citation details (journal, pages) are **not yet checked** against
 | Which way is near from the two halves | DEPTH_STACK B, C | derived (2026-11-21) | Cannot be told from one camera's halves alone: swapping the halves and swapping in front of / behind focus give the same pair of pictures (a half-disc blur flips with its offset). It is fixed per sensor design, so one known scene per camera settles it (`dualpixel/depth.py: NEAR_SIGN`, empty until Bill's tape-measure frame). The eagle frame does not settle it (distant trees, near and far ambiguous). Magnification across a stack does not settle it either: turning the focus ring and rocking the body change magnification in opposite directions for the same direction of focus. |
 | He, Sun, Tang, guided filter (2010) | DEPTH_STACK B.5 | used elsewhere, not here | Known to copy the guide's texture into what it smooths ("texture copy"); seen here as texture stripes in the height and bokeh blobs in filled areas, so heights do not go through it. |
 
+
+## 2026-11-21 (session 17): Dual Pixel near / far, checked on Bill's scenes
+
+* **Which way is near on the Canon EOS R5: checked on Bill's scenes 2026-11-21.** For a flat surface, inverse distance
+  is an affine function of the image position (pinhole camera), and a Dual Pixel offset is an affine function of
+  inverse distance (zero at the plane of focus; the defocus disc's signed radius is proportional to 1/Z_focus - 1/Z
+  for a thin lens). So over ground receding at an angle the offsets form a plane, and its slope down the upright
+  frame has the sign of the offset of places in front of focus, whatever the focus distance. Stacks #38, #25 and #9
+  of shoot 2 vote -1, #14 abstains (shot nearly straight down: a camera pointing at the ground cannot tell up from
+  down, so its orientation tag says nothing about which edge is nearer). Sign -1 = the reading the Studio had always
+  assumed. Votes in docs/RESULTS.md.
+* **Depth of field from the Dual Pixel step** (B.3): the two half-disc centroids are 0.849 R apart (R the blur disc's
+  radius), so one focus step s (px of offset) grows the blur radius by s / 0.849; with a pixel-level sharpness
+  criterion (blur radius 1 px) half the depth of field is 0.849 / |s| steps. Without Dual Pixel the falloff of
+  sharpness (a Gaussian fit's sigma, half peak at 1.18 sigma) stands in.
+* Godot 4 height maps: StandardMaterial3D reads brighter as higher; `heightmap_flip_texture` is for depth maps
+  (brighter lower). From the class reference; not yet checked by rendering in Bill's game.
+
+## 3D Scan: the methods the camera solver and the models use (session 18)
+
+* SIFT: Lowe, "Distinctive image features from scale-invariant keypoints", IJCV 2004 (patent expired 2020). RootSIFT:
+  Arandjelovic and Zisserman, CVPR 2012.
+* Affine simulation (ASIFT): Morel and Yu, "ASIFT: a new framework for fully affine invariant image comparison",
+  SIAM J. Imaging Sciences 2009. Added because an orbit squeezes the surface about 2x between views 45 degrees apart.
+* Essential matrix: Hartley, "In defense of the eight-point algorithm", PAMI 1997; LO-RANSAC: Chum, Matas and Kittler,
+  DAGM 2003; MSAC: Torr and Zisserman 2000; model selection between homography and essential matrix: Torr (GRIC) 1998.
+* Similarity from point sets: Umeyama, PAMI 1991.
+* Bundle adjustment: Triggs, McLauchlan, Hartley and Fitzgibbon, "Bundle adjustment: a modern synthesis", 1999
+  (Levenberg-Marquardt with the Schur complement).
+* Volumetric fusion: Curless and Levoy, SIGGRAPH 1996; visual hull: Laurentini, PAMI 1994.
+* Surface nets: Gibson, "Constrained elastic surface nets", MICCAI 1998; Taubin smoothing: Taubin, SIGGRAPH 1995.
+* Chart smoothing: iterated conditional modes on a Potts energy, Besag, JRSS-B 1986.
+* Simplification: Lindstrom, "Out-of-core simplification of large polygonal models", SIGGRAPH 2000, with the quadrics
+  of Garland and Heckbert, SIGGRAPH 1997. Tangents: Lengyel 2001.
+* Focus breathing in macro: the picture's focal length is the image distance v = f (1 + m) (thin lens), so a stack at
+  1:2 is about 1.5x the marked focal length.

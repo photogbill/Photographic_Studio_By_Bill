@@ -129,6 +129,7 @@
 /cache/
 /settings/
 /calibration_local/
+/analysis_cache/
 /Photos/
 /photos/
 /.pytest_cache/
