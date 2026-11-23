@@ -18,5 +18,5 @@ import os as _os
 # thread costs little. Anyone who sets OPENBLAS_NUM_THREADS themselves keeps their own value.
 _os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
-__version__ = "0.1.14"
+__version__ = "0.1.15"
 APP_NAME = "Photographic Studio By Bill"

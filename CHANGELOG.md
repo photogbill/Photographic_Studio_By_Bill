@@ -2,6 +2,27 @@
 
 Newest first. Written by tools/whats_new.py from docs/NEXT_UPDATE.md each time Release.bat makes an update.
 
+## 0.1.15 (2026-11-23)
+
+- Fixed: on some Windows PCs the Studio closed without a message while developing any raw (a crash inside the maths library numpy uses); it now runs that library on one thread, which stops it.
+- New: a job queue for long work. Stacks, leaves, models and Blender scenes can be added to a queue and run one after another on their own until all are done, so a connected AI is never cut off half-way through a long stack.
+- New: Make Claude Extension.bat makes an extension file to install in the Claude desktop app, for PCs where Connect Studio to Claude.bat does not get the Studio's tools to show up.
+- Fixed: tileable surfaces no longer show a cross of seams. Before the seams are healed, the lens's vignetting and uneven light are evened out in the colour, and the overall tilt of the surface is taken out of the height.
+- New: body sculpting finds the body for you. Press Find bodies, then Pick a part: point at an arm, forearm, thigh, calf, neck, shoulders, waist or hips and it lights up with its name; click it and set Slim. The outline is drawn toward the part's own centre line and fades out at the joints, so a limb gets narrower without moving, and the background beside it barely shifts. Cyan means the outline was measured from the person; amber means an edge had to be estimated (an arm against the side, loose clothing).
+- New: Both sides does the other arm or leg at the same time; Longer legs stretches from the hips down (at most 6%); side-on photos also offer Tummy (only the front edge moves), and Chest and Seat, which place the Breast and Butt lift shapes for you. Where nothing was found, drag along the limb to define it. Faces and hands are never moved by a body tool.
+- Fixed: the installed Studio (from the MSI) showed "Application has crashed" every time it was closed. Nothing was lost (everything is saved before that point), and the message no longer appears.
+- New: if Lightroom or Photoshop is installed on your PC, the Camera profile list now also offers Lightroom's own profiles for your camera (amber): Adobe Standard, and the "Camera ..." ones that match your camera's picture styles. They are read where Adobe installed them and never copied. Adobe Standard gives Lightroom's colour, which differs most from the Studio's in warm indoor and candle light.
+- New: Tone > "Lightroom-like brightness (estimated)": Adobe's published default curve (or the Lightroom profile's own curve) and Lightroom's hidden brightness lift for your camera, read from Lightroom's profiles on your PC. Marked estimated until it has been checked against Lightroom exports.
+- New: Panorama > Kind > **Flat mosaic**. Walk over a road, path, floor or wall with the camera pointing down, hand-held, and the Studio stitches the views into one picture of the surface, even when your height, tilt and turn changed from shot to shot (it works out where each camera was). Auto tells a panorama from a mosaic by itself and says which it chose.
+- New: a flat mosaic of focus stacks or Dual Pixel RAWs gets its height too. The views' depth is matched to each other, and the size of the bumps and cracks is measured from how they shift between overlapping views, so the height can come out in millimetres (cyan). With the height known, every view is straightened by it (orthorectified), so kerbs and potholes do not double at the seams.
+- New: a flat mosaic writes game surfaces (colour, height, normal, confidence, agreement) plus a misfit map, a coverage map from above, and decal pieces you mark with boxes. Size from a ruler you mark in one frame (exact, cyan) or from the lens's focus distance (estimated, amber). Resolution: 1 mm per pixel for games, 0.5 mm, the views' own detail, or your own.
+- New: the mosaic leaves out things that moved and passing shadows where three or more views saw the place, prefers the nearer, sharper view where views overlap, takes out vignetting and evens out brightness along the strip. A Shooting card button tells you how to shoot one.
+- Faster: matching details between frames (Panorama and the new Flat mosaic) is several times faster, with the same matches.
+- New: better colour in warm light for 1,013 cameras. The Studio now blends each camera's daylight and tungsten colour matrices by the photo's white balance, so candle, tungsten and sunset light no longer drift warm and oversaturated. Daylight photos look the same as before, and photos you already edited keep their colour. Data: Solomatov & Akkaynak, "Spectral Sensitivity Estimation Without a Camera" (2023, CC BY 4.0).
+- New: Camera profile > "Spectral (Solomatov & Akkaynak 2023)": a profile calculated for the exact light of each photo from the camera's colour sensitivities, for very warm or unusual light. A little more saturated than Lightroom.
+- New: "Lightroom-like brightness" now darkens photos taken at extended low ISO (Sony ISO 50/64/80, Canon L, Nikon Lo) the way the camera and Lightroom do.
+- New: photos taken below the camera's lowest native ISO (Sony ISO 50, 64 and 80, Canon L, Nikon Lo) now open darkened the way the camera darkens them, instead of about a stop too bright. Photos you already edited stay as they were.
+
 ## 0.1.14 (2026-11-21)
 
 - New: the Studio now knows which way is near for the Canon EOS R5's Dual Pixel halves (read from three of Bill's own scenes of ground running away from the camera), so depth from an R5 stack no longer has to guess which end is closest.
