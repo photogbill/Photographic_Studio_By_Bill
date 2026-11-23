@@ -270,6 +270,9 @@ _PORTRAIT = {"younger": "younger", "lines": "lines", "under_eyes": "under eyes",
 
 
 def _describe_portrait(old: dict, new: dict) -> str:
+    if (old.get("bodies") or {}).get("people") != (new.get("bodies") or {}).get("people"):
+        n = len((new.get("bodies") or {}).get("people") or [])
+        return f"Bodies: {n} found" if n else "Bodies forgotten"
     fo, fn = old.get("faces") or [], new.get("faces") or []
     if fo != fn:
         if len(fn) != len(fo):
@@ -281,6 +284,8 @@ def _describe_portrait(old: dict, new: dict) -> str:
             k = sn[-1]
             if k.get("kind") == "shape":
                 return f"Sculpt: {SHAPE_NAMES.get(k.get('tool'), 'shape')} added"
+            if k.get("kind") in ("part", "legs"):
+                return f"Sculpt: {str(k.get('name', 'body part')).lower()}"
             return f"Sculpt: {k.get('kind', 'stroke')}"
         if len(sn) < len(so):
             return "Sculpt: removed" if len(sn) else "Sculpting cleared"

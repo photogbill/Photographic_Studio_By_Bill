@@ -48,6 +48,8 @@ Body sculpting is a warp of the S frame, applied after retouching, in the order 
      "e1": [ex, ey] (direction of the long axis, S pixels), "a": half length, "b": half width (fractions of the
      long edge), "up": [ux, uy] (the photo's up, in the S frame), "lift": -100..100, "size": -100..100,
      "slim": -100..100, "enabled": true}
+    {"kind": "part", ...}, {"kind": "legs", ...}   a body part found by Find bodies (local/bodies.py): its outline
+                               drawn toward (or away from) its own centre line, or the legs made longer
 Every warp is capped (a push moves at most 30% of its radius, a lift 14% of the shape, a slim 12% of the width) and
 fades smoothly to nothing, so it stays believable; each is inverted exactly (fixed-point iteration), so pixels are
 sampled, never smeared.
@@ -664,6 +666,14 @@ def warps(p: dict | None, sw: int, sh: int, skin: list | None = None) -> list:
                 a = a if k == "shrink" else -a
                 for x, y in s.get("pts") or []:
                     out.append(("scale", float(x) * sw, float(y) * sh, R, a))
+            elif k == "part":
+                out.extend(_part_warps(s, sw, sh))
+            elif k == "legs":
+                a = min(max(float(s.get("amount", 0)), 0.0), 100.0) / 100.0 * 0.06
+                if a > 1e-5:
+                    h, f = s["h"], s["f"]
+                    out.append(("stretch", float(h[0]) * sw, float(h[1]) * sh, float(f[0]) * sw, float(f[1]) * sh,
+                                max(float(s.get("w", 0.05)) * long, 2.0), a))
             elif k == "shape" and s.get("tool") in SHAPE_TOOLS:
                 vals = [float(s.get(v, 0)) for v in ("lift", "size", "slim")]
                 if not any(abs(v) > 1e-3 for v in vals):
@@ -678,6 +688,47 @@ def warps(p: dict | None, sw: int, sh: int, skin: list | None = None) -> list:
         except (TypeError, ValueError, KeyError):
             continue
     return out
+
+
+def _part_warps(s: dict, sw: int, sh: int) -> list:
+    """The outline warps of one found body part (local/bodies.py), one per side, in S pixels. Slim 100 draws the
+    outline 12% of the way to the centre line; -100 pushes it out as far."""
+    k = min(max(float(s.get("slim", 0)), -100.0), 100.0) / 100.0 * 0.12
+    if abs(k) < 1e-5:
+        return []
+    long = float(max(sw, sh))
+    G = tuple((float(g[0]) * sw, float(g[1]) * sh, max(float(g[2]) * long, 1.0)) for g in s.get("guard") or [])
+    out = []
+    for g in s.get("geo") or []:
+        a, b = g["a"], g["b"]
+        ax, ay, bx, by = float(a[0]) * sw, float(a[1]) * sh, float(b[0]) * sw, float(b[1]) * sh
+        if math.hypot(bx - ax, by - ay) < 2.0:
+            continue
+        out.append(("outline", ax, ay, bx, by, max(float(g["wl"]) * long, 1.0), max(float(g["wr"]) * long, 1.0),
+                    float(g.get("fl", 1.0)), float(g.get("fr", 1.0)), k, float(g.get("t0", 0.2)),
+                    float(g.get("t1", 0.8)), G))
+    return out
+
+
+def _along(t, t0: float, t1: float):
+    """1 on [t0, t1], easing to 0 at t = 0 and t = 1 (the joints), 0 beyond."""
+    up = _smoothstep(t / max(t0, 1e-6))
+    down = _smoothstep((1.0 - t) / max(1.0 - t1, 1e-6))
+    return np.where((t < 0) | (t > 1), 0.0, np.minimum(up, down))
+
+
+def _smoothstep(t):
+    t = np.clip(t, 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _guard(G, X, Y):
+    """0 inside each guard circle (faces, hands: half its radius), easing to 1 by 1.6 radii: gently, so a hand on
+    a hip that is being slimmed bends nothing round it."""
+    f = 1.0
+    for gx, gy, r in G:
+        f = f * _smoothstep((np.hypot(X - gx, Y - gy) - 0.5 * r) / (1.1 * r))
+    return f
 
 
 def chin_skin(rgb: np.ndarray, gx: float, gy: float, q: float, face: Face) -> np.ndarray:
@@ -736,6 +787,35 @@ def _disp(w, X, Y):
             f = f * map_coordinates(M, [(np.asarray(Y) - ky - c0) / q, (np.asarray(X) - kx - c0) / q], order=1,
                                     mode="nearest")
         return f * up[0], f * up[1]
+    if w[0] == "outline":
+        _, ax, ay, bx, by, wl, wr, fl, fr, k, t0, t1, G = w
+        L = math.hypot(bx - ax, by - ay)
+        d0, d1 = (bx - ax) / L, (by - ay) / L
+        n0, n1 = -d1, d0
+        DX, DY = X - ax, Y - ay
+        t = (DX * d0 + DY * d1) / L
+        sd = DX * n0 + DY * n1
+        left = sd >= 0
+        e = np.where(left, wl, wr)
+        fac = np.where(left, fl, fr)
+        a_s = np.abs(sd)
+        F = np.maximum(0.6 * e, 6.0 * abs(k) * e)      # beyond the outline the move fades over this distance
+        M = np.where(a_s <= e, k * a_s, k * e * (1.0 - _smoothstep((a_s - e) / F)))
+        m = _along(t, t0, t1) * fac * M
+        if G:
+            m = m * _guard(G, X, Y)
+        sg = np.where(left, -1.0, 1.0)                # toward the centre line when k > 0
+        return sg * m * n0, sg * m * n1
+    if w[0] == "stretch":
+        _, hx, hy, fx, fy, W, a = w
+        L = math.hypot(fx - hx, fy - hy)
+        d0, d1 = (fx - hx) / L, (fy - hy) / L
+        DX, DY = X - hx, Y - hy
+        t = (DX * d0 + DY * d1) / L
+        s_ = np.abs(-DX * d1 + DY * d0)
+        m = np.where(t <= 0, 0.0, np.where(t <= 1.0, a * L * t, a * L * (1.0 - _smoothstep((t - 1.0) / 0.5))))
+        m = m * (1.0 - _smoothstep((s_ - W) / W))
+        return m * d0, m * d1
     if w[0] == "push":
         _, cx, cy, R, dx, dy = w
         f = _bump(np.hypot(X - cx, Y - cy) / R)
@@ -784,6 +864,24 @@ def _reach(w) -> tuple:
         xs = [cx + a * e1[0] + v * up[0] for a, v in corners]
         ys = [cy + a * e1[1] + v * up[1] for a, v in corners]
         return (min(xs), min(ys), max(xs), max(ys)), m
+    if w[0] == "outline":
+        _, ax, ay, bx, by, wl, wr, fl, fr, k, t0, t1, G = w
+        L = math.hypot(bx - ax, by - ay)
+        d0, d1 = (bx - ax) / L, (by - ay) / L
+        n0, n1 = -d1, d0
+        el = wl + max(0.6 * wl, 6.0 * abs(k) * wl)
+        er = wr + max(0.6 * wr, 6.0 * abs(k) * wr)
+        xs = [ax + n0 * el, ax - n0 * er, bx + n0 * el, bx - n0 * er]
+        ys = [ay + n1 * el, ay - n1 * er, by + n1 * el, by - n1 * er]
+        return (min(xs), min(ys), max(xs), max(ys)), abs(k) * max(wl * fl, wr * fr)
+    if w[0] == "stretch":
+        _, hx, hy, fx, fy, W, a = w
+        L = math.hypot(fx - hx, fy - hy)
+        d0, d1 = (fx - hx) / L, (fy - hy) / L
+        n0, n1 = -d1, d0
+        xs = [hx + n0 * 2 * W, hx - n0 * 2 * W, hx + d0 * 1.5 * L + n0 * 2 * W, hx + d0 * 1.5 * L - n0 * 2 * W]
+        ys = [hy + n1 * 2 * W, hy - n1 * 2 * W, hy + d1 * 1.5 * L + n1 * 2 * W, hy + d1 * 1.5 * L - n1 * 2 * W]
+        return (min(xs), min(ys), max(xs), max(ys)), a * L
     if w[0] in ("push", "scale"):
         cx, cy, R = w[1], w[2], w[3]
         mv = math.hypot(w[4], w[5]) if w[0] == "push" else abs(w[4]) * R * 0.4

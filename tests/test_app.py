@@ -877,3 +877,19 @@ def test_help_page_scrolls_and_shows_every_card_whole():
         assert lb.height() >= lb.heightForWidth(lb.width()) - 1, lb.text()[:40]
     import shiboken6
     shiboken6.delete(h)                              # gone now, not at interpreter exit in an arbitrary order
+
+
+def test_closing_without_a_console_does_not_crash(monkeypatch):
+    """The MSI's Photographic Studio.exe has no console: sys.stdout and sys.stderr are None, and closing the Studio
+    must not fail on them (0.1.14 showed 'Application has crashed' on every close)."""
+    import sys
+    from studio.app import main as M
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+    M._flush_streams()
+
+    class Closed:
+        def flush(self):
+            raise ValueError("I/O operation on closed file")
+    monkeypatch.setattr(sys, "stdout", Closed())
+    M._flush_streams()

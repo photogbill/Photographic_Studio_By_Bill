@@ -337,6 +337,8 @@ class Viewer(QWidget):
     shape_drawn = Signal(float, float, float, float)   # portrait: a new shape from one end to the other
     shape_picked = Signal(int)                   # portrait: shape selected (-1 = none)
     shape_moved = Signal(int, float, float)      # portrait: shape index, moved by (du, dv)
+    body_clicked = Signal(int)                   # portrait: a found body part clicked (index, -1 = none there)
+    body_drawn = Signal(float, float, float, float)   # portrait: a part defined by a drag along a limb
     busy_changed = Signal(bool)                  # work started (True) or finished (False): the panel's chip follows
 
     BUSY_SHOW_S = 0.15                           # quick renders finish before the indicator appears (no flicker)
@@ -390,6 +392,8 @@ class Viewer(QWidget):
         self.shape_tool = None                     # the shape being drawn ("breast", "thigh", ...)
         self.shape_ratio = 0.5                     # its width / length
         self._shdrag = None                        # (index, start uv) while a shape is moved
+        self.body_parts = []                       # found body parts: [{"outline": [(u, v)], "name", "how", "note"}]
+        self.body_hover = -1                       # the part under the pointer
         self.setMinimumSize(400, 300)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
@@ -637,8 +641,10 @@ class Viewer(QWidget):
             self._paint_ghosts(p, r)
         if self.faces and (self.show_faces or self.tool == "eyes"):
             self._paint_faces(p, r)
-        if self.shapes and (self.show_shapes or self.tool in ("shape", "sculpt")):
+        if self.shapes and (self.show_shapes or self.tool in ("shape", "sculpt", "body")):
             self._paint_shapes(p, r)
+        if self.body_parts and self.tool == "body":
+            self._paint_body(p, r)
         if self.tool:
             self._paint_tool(p, r)
         if self.zoomed:
@@ -767,6 +773,45 @@ class Viewer(QWidget):
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawPath(self._shape_path(sh["outline"], r))
 
+    def _paint_body(self, p, r):
+        """Every found part as a faint outline; the one under the pointer filled, with its name. Cyan: both edges
+        measured from the person's outline; amber: an edge estimated."""
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        for k, bp in enumerate(self.body_parts):
+            col = QColor(T.CYAN) if bp.get("how") == "measured" else QColor(T.AMBER)
+            path = self._shape_path(bp["outline"], r)
+            if k == self.body_hover:
+                fill = QColor(col)
+                fill.setAlpha(70)
+                p.setBrush(fill)
+                p.setPen(QPen(col, 2.2))
+            else:
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.setPen(QPen(col, 1.0, Qt.PenStyle.DotLine))
+            p.drawPath(path)
+        if 0 <= self.body_hover < len(self.body_parts) and self._mouse is not None:
+            bp = self.body_parts[self.body_hover]
+            col = T.CYAN if bp.get("how") == "measured" else T.AMBER
+            txt = bp["name"] + ("" if bp.get("how") == "measured" else "  (edge estimated)")
+            if bp.get("note"):
+                txt += "  " + bp["note"]
+            c = self._px(self._mouse, r)
+            self._tag(p, QPointF(c.x() + 16, c.y() - 26), txt, colour=col)
+
+    def _body_at(self, uv):
+        """The smallest found part under ``uv``, or -1."""
+        r = self.photo_rect()
+        here = self._px(uv, r)
+        best, area = -1, None
+        for k, bp in enumerate(self.body_parts):
+            path = self._shape_path(bp["outline"], r)
+            if path.contains(here):
+                b = path.boundingRect()
+                a = b.width() * b.height()
+                if area is None or a < area:
+                    best, area = k, a
+        return best
+
     def _shape_at(self, uv):
         r = self.photo_rect()
         here = self._px(uv, r)
@@ -786,8 +831,10 @@ class Viewer(QWidget):
 
     def _paint_tool(self, p, r):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        if self.tool in ("eyes", "sculpt", "shape"):
-            tips = {"eyes": "Click the centre of each eye (either order).  Esc: cancel",
+        if self.tool in ("eyes", "sculpt", "shape", "body"):
+            tips = {"body": "Point at a part to see its name; click to select it.  Nothing found there? Drag along "
+                            "the limb.  Esc: done",
+                    "eyes": "Click the centre of each eye (either order).  Esc: cancel",
                     "sculpt": "Drag to push (Shrink / Grow: click or drag over the area).  Esc: done",
                     "shape": "Drag from one end of the area to the other; drag a shape to move it.  Esc: done"}
             self._tag(p, QPointF(r.left() + 12, r.bottom() - 34), tips[self.tool], colour=T.CYAN)
@@ -812,6 +859,9 @@ class Viewer(QWidget):
                     p.drawEllipse(c, rad, rad)
                     p.setPen(QPen(QColor(T.TEXT), 1, Qt.PenStyle.DotLine))
                     p.drawEllipse(c, rad * 0.5, rad * 0.5)
+            elif self.tool == "body" and len(self._pts) == 2:
+                p.setPen(QPen(QColor(T.CYAN), 2, Qt.PenStyle.DashLine))
+                p.drawLine(self._px(self._pts[0], r), self._px(self._pts[1], r))
             elif self.tool == "shape" and len(self._pts) == 2 and self._shdrag is None:
                 p.setPen(QPen(QColor(T.CYAN), 2))
                 p.setBrush(Qt.BrushStyle.NoBrush)
@@ -878,6 +928,10 @@ class Viewer(QWidget):
             self._pts = [uv]
             self.update()
             return
+        if self.tool == "body":
+            self._pts = [uv, uv]
+            self.update()
+            return
         if self.tool == "shape":
             k = self._shape_at(uv)
             if k is not None and self.shape_tool is None:
@@ -917,6 +971,13 @@ class Viewer(QWidget):
     def _tool_move(self, e):
         uv = self._uv(e.position())
         self._mouse = uv
+        if self.tool == "body":
+            if e.buttons() & Qt.MouseButton.LeftButton and len(self._pts) == 2:
+                self._pts[1] = uv
+            else:
+                self.body_hover = self._body_at(uv)
+            self.update()
+            return
         if self.tool in ("sculpt", "shape", "eyes"):
             if e.buttons() & Qt.MouseButton.LeftButton:
                 if self.tool == "sculpt" and self._pts:
@@ -959,6 +1020,16 @@ class Viewer(QWidget):
         self.update()
 
     def _tool_release(self, e):
+        if self.tool == "body":
+            if len(self._pts) == 2:
+                (u0, v0), (u1, v1) = self._pts
+                if math.hypot(u1 - u0, v1 - v0) > 0.015:
+                    self.body_drawn.emit(u0, v0, u1, v1)
+                else:
+                    self.body_clicked.emit(self._body_at((u0, v0)))
+            self._pts = []
+            self.update()
+            return
         if self.tool == "sculpt":
             if self._pts:
                 self.sculpt_done.emit(list(self._pts))
@@ -1390,6 +1461,8 @@ class DevelopPage(QWidget):
         self.viewer.sculpt_done.connect(self._sculpt_stroke)
         self.viewer.shape_drawn.connect(self._shape_drawn)
         self.viewer.shape_picked.connect(self._shape_picked)
+        self.viewer.body_clicked.connect(self._body_clicked)
+        self.viewer.body_drawn.connect(self._body_drawn)
         self.viewer.shape_moved.connect(self._shape_moved)
         self._portrait: dict = {}                   # the edit's "portrait": faces, sliders, sculpting
         self._shsel = -1                            # selected sculpt shape (index into the sculpt list)
@@ -1962,7 +2035,14 @@ class DevelopPage(QWidget):
                                         "+ cuts through haze and mist (more contrast and colour far away), - adds a "
                                         "soft haze. Makes hazy photos darker overall: adjust exposure after."))
         self.tone = g.add(QComboBox())
-        self.tone.addItems(["Studio Standard", "Camera match", "Linear (no curve)"])
+        self.tone.addItems(["Studio Standard", "Camera match", "Linear (no curve)",
+                            "Lightroom-like brightness (estimated)"])
+        self.tone.setToolTip("Studio Standard: the Studio's own curve. Camera match: fitted to the camera's JPEG. "
+                             "Linear: no curve.\nLightroom-like: Adobe's published default curve (or the Lightroom "
+                             "profile's own curve) and Lightroom's hidden per-camera brightness lift, read from "
+                             "Lightroom's profiles on this PC. Estimated: Lightroom's newest process may differ a "
+                             "little; best with a Lightroom profile chosen below.")
+        self.tone.activated.connect(self._tone_mode_note)
         self.mcb = g.add(QCheckBox("Match camera brightness (optional)"))
         self.mcb.setToolTip("Off by default. Shifts brightness per camera body to match the camera's JPEG.")
         self.hl_mode = g.add(QComboBox())
@@ -2078,7 +2158,17 @@ class DevelopPage(QWidget):
         self.prof_combo = g.add(QComboBox())
         self.prof_combo.setToolTip("Camera profile: how camera colours become real colours. Studio uses the camera "
                                    "matrix; add .dcp profiles (DNG camera profiles) you own or made. Your profiles "
-                                   "stay in settings\\camera_profiles and are never shared.")
+                                   "stay in settings\\camera_profiles and are never shared.\nAmber: Lightroom's own "
+                                   "profiles for this camera, found on this PC (read where Adobe installed them, never "
+                                   "copied). Adobe Standard matches Lightroom's colour; 'Camera ...' ones match the "
+                                   "camera's picture styles. On a PC without Lightroom the photo falls back to the "
+                                   "camera matrix.\n\nStudio (camera matrix): for 1,013 cameras it now blends a "
+                                   "daylight and a tungsten matrix by the photo's white balance (Solomatov & "
+                                   "Akkaynak 2023), so warm and candle light stay true. Best for: everything. Weak "
+                                   "at: nothing new; daylight looks as before.\nSpectral (Solomatov & Akkaynak "
+                                   "2023): a profile calculated for the exact light from the camera's predicted "
+                                   "colour sensitivities. Best for: very warm or unusual light. Weak at: a little "
+                                   "more saturated than Lightroom.")
         self.prof_combo.activated.connect(self._profile_picked)
         self._fill_profiles("")
         self.lut_combo = g.add(QComboBox())
@@ -2609,7 +2699,7 @@ class DevelopPage(QWidget):
         e.banding = self.band.isChecked()
         e.exposure_ev = round(self.ev.value(), 3)
         e.tone.contrast = round(self.con.value(), 3)
-        e.tone.mode = ["standard", "camera_match", "linear"][self.tone.currentIndex()]
+        e.tone.mode = ["standard", "camera_match", "linear", "lightroom"][self.tone.currentIndex()]
         e.tone.match_camera_brightness = self.mcb.isChecked()
         e.white_balance.mode = ["as_shot", "daylight", "temp_tint", "multipliers"][self.wb.currentIndex()]
         if e.white_balance.mode == "multipliers" and not e.white_balance.multipliers:
@@ -2781,7 +2871,7 @@ class DevelopPage(QWidget):
         self.band.setChecked(e.banding)
         self.ev.set_value(e.exposure_ev, emit=False)
         self.con.set_value(e.tone.contrast, emit=False)
-        self.tone.setCurrentIndex({"standard": 0, "camera_match": 1, "linear": 2}.get(e.tone.mode, 0))
+        self.tone.setCurrentIndex({"standard": 0, "camera_match": 1, "linear": 2, "lightroom": 3}.get(e.tone.mode, 0))
         self.mcb.setChecked(e.tone.match_camera_brightness)
         self.wb.setCurrentIndex({"as_shot": 0, "daylight": 1, "temp_tint": 2, "multipliers": 3}.get(
             e.white_balance.mode, 0))
@@ -4319,6 +4409,23 @@ class DevelopPage(QWidget):
         self.controls_changed()
         self.status.emit(f"Black & white: {self.bw_filter.itemText(idx).lower()} (the mixer below shows what it did).")
 
+    def _tone_mode_note(self, idx):
+        """Say what Lightroom-like uses for this photo (the lift is read from Lightroom's profiles on this PC)."""
+        if idx != 3 or self.image is None:
+            return
+        from .. import engine as E
+        try:
+            info = E.lightroom_info(self.image, self.edit_from_controls())
+        except Exception as exc:                              # noqa: BLE001
+            report_problem("reading Lightroom's brightness for this camera", exc)
+            return
+        lift = (f"Lightroom's brightness lift for this camera: {info['lift']:+.2f} stops (read from Lightroom's "
+                f"profiles on this PC)" if info["lift_known"] else
+                "Lightroom's brightness lift for this camera is not known on this PC (no Lightroom camera profiles "
+                "for it), so none is added")
+        curve = ("the profile's own curve" if info["curve"] == "profile" else "Adobe's default curve")
+        self.status.emit(f"Lightroom-like: {lift}; {curve}. Estimated, until checked against a Lightroom export.")
+
     def _fill_profiles(self, current=None):
         from ..engine.color import dcp
         if current is None:
@@ -4331,11 +4438,30 @@ class DevelopPage(QWidget):
             profs = dcp.list_profiles(cam) if cam else []
         except OSError:
             profs = []
+        if self.image is not None:
+            from ..engine.color import spectral as sp
+            try:
+                has_ssf = sp.camera_name(getattr(self.image.meta, "make", ""), cam or "") is not None
+            except (OSError, ValueError) as exc:
+                report_problem("reading the spectral camera data", exc)
+                has_ssf = False
+            if has_ssf:
+                self.prof_combo.addItem(dot_icon(T.VIOLET), f"Profile: {sp.NAME}", sp.KEY)
         for pr in profs:
             self.prof_combo.addItem(dot_icon(T.VIOLET if pr["source"] == "shared" else T.CYAN),
                                     f"Profile: {pr['name']}", pr["file"])
+        if self.image is not None:
+            try:
+                lr = dcp.lightroom_profiles(getattr(self.image.meta, "make", ""), cam or "")
+            except Exception as exc:                          # noqa: BLE001  (a list must never stop the app)
+                report_problem("listing Lightroom's camera profiles", exc)
+                lr = []
+            for pr in lr:
+                self.prof_combo.addItem(dot_icon(T.AMBER), f"Profile: {pr['name']} (Lightroom)", pr["file"])
         if current and self.prof_combo.findData(current) < 0:
-            self.prof_combo.addItem(f"Profile: {current} (not for this camera, or missing)", current)
+            what = (f"{current[3:]} (Lightroom: not on this PC, so the camera matrix is used)"
+                    if current.startswith(dcp.LR_PREFIX) else f"{current} (not for this camera, or missing)")
+            self.prof_combo.addItem(f"Profile: {what}", current)
         self.prof_combo.addItem("Add a camera profile (.dcp)...", "__add__")
         self.prof_combo.setCurrentIndex(max(0, self.prof_combo.findData(current)))
         self.prof_combo.blockSignals(False)
@@ -4841,7 +4967,7 @@ class DevelopPage(QWidget):
             self._set_hint_tool(False)
         if kind and self.viewer.tool == "spot":
             self._set_spot_tool(None)
-        if kind and self.viewer.tool in ("eyes", "sculpt", "shape"):
+        if kind and self.viewer.tool in ("eyes", "sculpt", "shape", "body"):
             self._set_portrait_tool(None)
         if kind and self.viewer.crop_mode:
             self.crop_b.setChecked(False)
@@ -5865,6 +5991,36 @@ class DevelopPage(QWidget):
         self.pt_red.setStyleSheet("padding: 5px 8px;")
         g.add(hbox(self.pt_red))
         g.add(label("Body sculpting", "dim"))
+        self.bd_find = QPushButton("Find bodies")
+        self.bd_find.setObjectName("primary")
+        self.bd_find.setToolTip("Finds everyone's body on this PC (the same Google MediaPipe body model as Masks > "
+                                "Person) and works out their parts: arms, legs, neck, shoulders, waist, hips, and "
+                                "tummy, chest and seat when side-on. Then point and click.")
+        self.bd_find.clicked.connect(self.find_bodies)
+        self.bd_pick = QPushButton("Pick a part")
+        self.bd_pick.setCheckable(True)
+        self.bd_pick.setToolTip("Point at the photo: the part under the pointer lights up with its name; click to "
+                                "select it. Cyan: its outline was measured; amber: an edge was estimated (an arm "
+                                "against the side, loose clothes). Where nothing was found, drag along the limb.")
+        self.bd_pick.toggled.connect(lambda on: self._set_portrait_tool("body" if on else None))
+        self.bd_legs = QPushButton("Longer legs")
+        self.bd_legs.setToolTip("Stretches the legs from the hips down (at most 6% at 100). Needs the hips and an "
+                                "ankle in view. Faces and the top half never move.")
+        self.bd_legs.clicked.connect(self.body_legs)
+        for b in (self.bd_find, self.bd_pick, self.bd_legs):
+            b.setStyleSheet("padding: 5px 8px;")
+        g.add(hbox(self.bd_find, self.bd_pick, self.bd_legs))
+        self.bd_mirror = QCheckBox("Both sides (an arm or leg: do the other one too)")
+        self.bd_mirror.setChecked(True)
+        g.add(self.bd_mirror)
+        self.bd_amount = g.add(ValueSlider("Slim the selected part", -100, 100, 30, 1, "{:+.0f}",
+                                           "Draws the part's outline toward its own centre line (+) or out (-), "
+                                           "fading to nothing at the joints, so a limb narrows without moving. "
+                                           "Faces and hands never move; capped at 12% of the width. For Longer "
+                                           "legs: how much longer (0 to 100)."))
+        self.bd_amount.changed.connect(self._body_amount_changed)
+        self.bd_info = g.add(chip("No bodies yet: press Find bodies", T.DIM))
+        g.add(label("By hand", "dim"))
         self.sc_btn = {}
         for kind, text, tip in (("push", "Push", "Drag to move a contour gently (an arm, a waistline, a stray "
                                  "bulge)"), ("shrink", "Shrink", "Click or drag over an area to make it a little "
@@ -5978,8 +6134,10 @@ class DevelopPage(QWidget):
         self.ec_amount.set_value(float(ec.get("amount", 0) or 0), emit=False)
         self.ec_custom = (ec["hue"], ec["sat"], ec["light"]) if ec.get("preset") == "custom" and "hue" in ec else None
         n = len(self._portrait.get("sculpt") or [])
-        if not (0 <= self._shsel < n) or (self._portrait.get("sculpt") or [{}])[self._shsel].get("kind") != "shape":
+        if not (0 <= self._shsel < n) or (self._portrait.get("sculpt") or [{}])[self._shsel].get("kind") not in \
+                ("shape", "part", "legs"):
             self._shsel = -1
+        self._bparts_key = None
         self._refresh_portrait_ui()
 
     def _faces(self):
@@ -6010,14 +6168,20 @@ class DevelopPage(QWidget):
         self.pt_sl["jawline"].setEnabled(has)
         sc = self._portrait.get("sculpt") or []
         shapes = sum(1 for x in sc if x.get("kind") == "shape")
-        strokes = len(sc) - shapes
+        parts = sum(1 for x in sc if x.get("kind") in ("part", "legs"))
+        strokes = len(sc) - shapes - parts
         self.sc_info.setText("No sculpting" if not sc else
                              ", ".join(t for t in (f"{strokes} stroke{'s' if strokes != 1 else ''}" if strokes else "",
-                                                    f"{shapes} shape{'s' if shapes != 1 else ''}" if shapes else "")
+                                                    f"{shapes} shape{'s' if shapes != 1 else ''}" if shapes else "",
+                                                    f"{parts} body part{'s' if parts != 1 else ''}" if parts else "")
                                        if t))
-        sel = sc[self._shsel] if 0 <= self._shsel < len(sc) else None
-        for w in (self.sh_lift, self.sh_size, self.sh_slim, self.sh_width, self.sh_del):
+        sel_any = sc[self._shsel] if 0 <= self._shsel < len(sc) else None
+        sel = sel_any if sel_any is not None and sel_any.get("kind") == "shape" else None
+        body = sel_any if sel_any is not None and sel_any.get("kind") in ("part", "legs") else None
+        for w in (self.sh_lift, self.sh_size, self.sh_slim, self.sh_width):
             w.setEnabled(sel is not None)
+        self.sh_del.setEnabled(sel_any is not None)
+        self._refresh_body_ui(body)
         if sel is not None:
             lift_tool = sel.get("tool") in ("breast", "butt")
             self.sh_lift.set_value(float(sel.get("lift", 0)), emit=False)
@@ -6045,7 +6209,20 @@ class DevelopPage(QWidget):
         _, _, sw, sh = self.image.raw.crop
         long = float(max(sw, sh))
         shapes = []
+        from ..engine.local import bodies as bd
         for k, x in enumerate(self._portrait.get("sculpt") or []):
+            polys = []
+            if x.get("kind") == "part":
+                polys = [bd.outline(gq, sw, sh) for gq in x.get("geo") or []]
+            elif x.get("kind") == "legs":
+                h, f = np.asarray(x["h"], float) * [sw, sh], np.asarray(x["f"], float) * [sw, sh]
+                d = (f - h) / (np.hypot(*(f - h)) + 1e-9)
+                nv = np.array([-d[1], d[0]]) * float(x.get("w", 0.05)) * long
+                polys = [np.array([h + nv, f + nv, f - nv, h - nv])]
+            for P in polys:
+                u, v = E.s_to_view(self.image, e, P[:, 0] / sw, P[:, 1] / sh)
+                shapes.append({"outline": list(zip(np.atleast_1d(u), np.atleast_1d(v))), "sel": k == self._shsel,
+                               "tool": x.get("kind"), "index": k})
             if x.get("kind") != "shape":
                 continue
             c = np.asarray(x.get("c", [0.5, 0.5]), float) * [sw, sh]
@@ -6059,6 +6236,7 @@ class DevelopPage(QWidget):
             shapes.append({"outline": list(zip(np.atleast_1d(u), np.atleast_1d(v))), "sel": k == self._shsel,
                            "tool": x.get("tool"), "index": k})
         self.viewer.shapes = shapes
+        self._refresh_body_view(e)
         self.viewer.update()
 
     def _show_faces(self, on):
@@ -6077,7 +6255,8 @@ class DevelopPage(QWidget):
             self._set_hint_tool(False)
         kind = which if isinstance(which, str) else (which[0] if which else None)
         sub = which[1] if isinstance(which, tuple) else None
-        for b, on in [(self.pt_eyes, kind == "eyes")] + [(b, kind == "sculpt" and sub == k)
+        for b, on in [(self.pt_eyes, kind == "eyes"), (self.bd_pick, kind == "body")] + \
+                [(b, kind == "sculpt" and sub == k)
                                                           for k, b in self.sc_btn.items()] + \
                 [(b, kind == "shape" and sub == t) for t, b in self.sh_btn.items()]:
             b.blockSignals(True)
@@ -6086,7 +6265,7 @@ class DevelopPage(QWidget):
         if kind:
             if self.viewer.tool == "spot":
                 self._set_spot_tool(None)
-            elif self.viewer.tool and self.viewer.tool not in ("eyes", "sculpt", "shape"):
+            elif self.viewer.tool and self.viewer.tool not in ("eyes", "sculpt", "shape", "body"):
                 self._set_mask_tool(None)
             if self.viewer.crop_mode:
                 self.crop_b.setChecked(False)
@@ -6103,7 +6282,13 @@ class DevelopPage(QWidget):
             if kind == "eyes":
                 self.viewer.show_faces = True
                 self.status.emit("Click the centre of each eye of the face to map.")
-        elif self.viewer.tool in ("eyes", "sculpt", "shape"):
+            if kind == "body":
+                self.viewer.setCursor(Qt.CursorShape.PointingHandCursor)
+                self._refresh_portrait_view()
+                if not (self._portrait.get("bodies") or {}).get("people"):
+                    self.status.emit("No bodies found yet: press Find bodies first, or drag along a limb to "
+                                     "define it by hand.")
+        elif self.viewer.tool in ("eyes", "sculpt", "shape", "body"):
             self.viewer.tool = None
             self.viewer.shape_tool = None
             self.viewer._pts = []
@@ -6359,6 +6544,11 @@ class DevelopPage(QWidget):
         if sh is None or not (0 <= sh["index"] < len(sc)) or self.image is None:
             return
         x = sc[sh["index"]]
+        if x.get("kind") != "shape":                         # found body parts stay on the body
+            self._shsel = sh["index"]
+            self._refresh_portrait_ui()
+            self._refresh_portrait_view()
+            return
         from .. import engine as E
         cu, cv = E.s_to_view(self.image, self.edit, [x["c"][0]], [x["c"][1]])
         (nx, ny), = self._s_points([(float(cu[0]) + du, float(cv[0]) + dv)])
@@ -6371,6 +6561,8 @@ class DevelopPage(QWidget):
         if not (0 <= self._shsel < len(sc)):
             return
         x = sc[self._shsel]
+        if x.get("kind") != "shape":
+            return
         x["lift"] = round(self.sh_lift.value(), 1)
         x["size"] = round(self.sh_size.value(), 1)
         x["slim"] = round(self.sh_slim.value(), 1)
@@ -6396,6 +6588,207 @@ class DevelopPage(QWidget):
         self._shsel = -1
         self._portrait_changed("Sculpt: removed")
 
+    # body parts (local/bodies.py, BUILD_PLAN_PORTRAIT H.3)
+    def find_bodies(self):
+        from .. import engine as E
+        from ..engine.local import people as pp
+        if self.image is None:
+            return
+        if not pp.available():
+            self.status.emit("The people models are missing from models\\people. Run setup again (or copy that "
+                             "folder back from the download).")
+            return
+        img, e, path = self.image, self.edit_from_controls(), self.path
+        self.viewer.busy = True
+        self.viewer.update()
+        self.status.emit("Finding bodies...")
+
+        def done(p, store):
+            if p != self.path:
+                return
+            self.viewer.busy = False
+            if store is None:
+                self.status.emit("No body found in this photo. You can still drag along a limb with Pick a part.")
+                self.viewer.update()
+                return
+            self._portrait["bodies"] = store
+            self._bparts_key = None
+            self._portrait_changed("Bodies found")
+            parts = self._body_parts()
+            n = len(store["people"])
+            if not self.bd_pick.isChecked():
+                self.bd_pick.setChecked(True)
+            else:
+                self._refresh_portrait_view()
+            self.status.emit(f"{n} {'person' if n == 1 else 'people'}, {len(parts)} parts found. Point at a part to "
+                             f"see its name, click to select it, then use 'Slim the selected part'.")
+
+        def fail(_, err):
+            self.viewer.busy = False
+            self.viewer.update()
+            self.status.emit(f"Find bodies problem: {err}")
+        run_bg(lambda: E.find_bodies(img, e), path, done, fail)
+
+    def _body_parts(self) -> list:
+        """The found parts of the stored bodies (worked out once per photo and kept)."""
+        from ..engine.local import bodies as bd
+        store = self._portrait.get("bodies") or {}
+        if self.image is None or not store.get("people"):
+            return []
+        _, _, sw, sh = self.image.raw.crop
+        key = (hash(store.get("data")), json.dumps(store["people"]), sw, sh)
+        if getattr(self, "_bparts_key", None) != key:
+            try:
+                self._bparts = bd.find_parts(store["people"], bd.decode_mask(store), sw, sh)
+            except Exception as exc:                          # noqa: BLE001
+                report_problem("measuring the body parts", exc)
+                self._bparts = []
+            self._bparts_key = key
+        return self._bparts
+
+    def _refresh_body_view(self, e=None):
+        from .. import engine as E
+        from ..engine.local import bodies as bd
+        parts = self._body_parts() if self.viewer.tool == "body" else []
+        if not parts or self.image is None:
+            self.viewer.body_parts, self.viewer.body_hover = [], -1
+            return
+        e = e or self.shown_edit()
+        _, _, sw, sh = self.image.raw.crop
+        out = []
+        for q in parts:
+            P = bd.outline(q, sw, sh)
+            u, v = E.s_to_view(self.image, e, P[:, 0] / sw, P[:, 1] / sh)
+            out.append({"outline": list(zip(np.atleast_1d(u), np.atleast_1d(v))), "name": q["name"],
+                        "how": bd.how(q), "note": q.get("note", "")})
+        self.viewer.body_parts = out
+
+    def _refresh_body_ui(self, sel):
+        store = self._portrait.get("bodies") or {}
+        has = self.image is not None
+        self.bd_find.setEnabled(has)
+        self.bd_pick.setEnabled(has)
+        self.bd_legs.setEnabled(bool(store.get("people")))
+        self.bd_amount.setEnabled(sel is not None)
+        if sel is not None:
+            v = float(sel.get("slim", 0)) if sel.get("kind") == "part" else float(sel.get("amount", 0))
+            self.bd_amount.set_value(v, emit=False)
+            how = sel.get("how", "measured")
+            col = T.CYAN if how == "measured" and sel.get("kind") == "part" else T.AMBER
+            txt = f"Selected: {sel.get('name', 'part')}"
+            if sel.get("kind") == "part":
+                txt += " (outline measured)" if how == "measured" else " (an edge estimated: check it)"
+            self.bd_info.setText(txt)
+            self.bd_info.setStyleSheet(f"color:{col}; border-color:{T.alpha(col, 0.4)};")
+        elif store.get("people"):
+            parts = self._body_parts()
+            meas = sum(1 for q in parts if q.get("how_l") == "measured" and q.get("how_r") == "measured")
+            n = len(store["people"])
+            self.bd_info.setText(f"{n} {'person' if n == 1 else 'people'}: {len(parts)} parts ({meas} measured, "
+                                 f"cyan; {len(parts) - meas} estimated, amber)")
+            self.bd_info.setStyleSheet(f"color:{T.CYAN}; border-color:{T.alpha(T.CYAN, 0.4)};")
+        else:
+            self.bd_info.setText("No bodies yet: press Find bodies")
+            self.bd_info.setStyleSheet("")
+
+    def _add_sculpt(self, items, label_, select=0):
+        sc = list(self._portrait.get("sculpt") or [])
+        first = len(sc)
+        sc.extend(items)
+        self._portrait["sculpt"] = sc
+        self._shsel = first + select
+        self.sc_show.setChecked(True)
+        self._portrait_changed(label_)
+        self._refresh_portrait_view()
+
+    def _body_clicked(self, k):
+        from ..engine.local import bodies as bd
+        parts = self._body_parts()
+        if self.image is None:
+            return
+        if not (0 <= k < len(parts)):
+            self.status.emit("No part found there. Drag along the limb (one end to the other) to define it by hand.")
+            return
+        q = parts[k]
+        _, _, sw, sh = self.image.raw.crop
+        people = (self._portrait.get("bodies") or {}).get("people") or []
+        sc = self._portrait.get("sculpt") or []
+        if q["part"] in bd.LIFT_PARTS:
+            items = bd.lift_shapes(q, people, sw, sh)
+            self._add_sculpt(items, f"Sculpt: {q['name'].lower()} lift")
+            self.status.emit(f"{q['name']}: placed {len(items)} lift shape{'s' if len(items) != 1 else ''} (amber: "
+                             f"placed from the body points, not measured). Use Lift and Size; drag to adjust.")
+            return
+        mirror = self.bd_mirror.isChecked()
+        item = bd.item_for(q, parts, people, sw, sh, mirror=mirror, slim=30.0)
+        for i, x in enumerate(sc):                            # already sculpted: select it instead of adding
+            if x.get("kind") == "part" and (x.get("id") == item["id"] or x.get("id") == q["id"]):
+                self._shsel = i
+                self._refresh_portrait_ui()
+                self._refresh_portrait_view()
+                self.status.emit(f"{x.get('name')} selected.")
+                return
+        self._add_sculpt([item], f"Sculpt: {item['name'].lower()}")
+        msg = f"{item['name']}: slimmed 30 to start. Move 'Slim the selected part' to taste."
+        if bd.how(q) != "measured":
+            msg += " One edge was estimated (amber), so check the result closely."
+        if q.get("note"):
+            msg += " " + q["note"]
+        self.status.emit(msg)
+
+    def _body_drawn(self, u0, v0, u1, v1):
+        from ..engine.local import bodies as bd
+        if self.image is None:
+            return
+        _, _, sw, sh = self.image.raw.crop
+        a, b = self._s_points([(u0, v0), (u1, v1)])
+        store = self._portrait.get("bodies") or {}
+        mask = bd.decode_mask(store) if store.get("data") else None
+        q = bd.manual_part(a, b, mask, sw, sh)
+        item = bd.item_for(q, [], store.get("people") or [], sw, sh, slim=30.0)
+        item["id"] = f"drawn.{len(self._portrait.get('sculpt') or [])}"
+        self._add_sculpt([item], "Sculpt: drawn part")
+        self.status.emit("Part defined along your drag" + (" (its outline measured from the person, cyan)."
+                                                             if bd.how(q) == "measured" else
+                                                             " (its width estimated, amber: Find bodies first to "
+                                                             "measure it).") + " Use 'Slim the selected part'.")
+
+    def body_legs(self):
+        from ..engine.local import bodies as bd
+        if self.image is None:
+            return
+        people = (self._portrait.get("bodies") or {}).get("people") or []
+        sc = self._portrait.get("sculpt") or []
+        sel = sc[self._shsel] if 0 <= self._shsel < len(sc) else {}
+        person = 0
+        for gq in (sel.get("geo") or [])[:1]:                 # the person of the selected part, when there is one
+            for i, q in enumerate(self._body_parts()):
+                if q["a"] == gq["a"] and q["b"] == gq["b"]:
+                    person = q["person"]
+        _, _, sw, sh = self.image.raw.crop
+        item = bd.legs_item(people, person, sw, sh, amount=30.0)
+        if item is None:
+            self.status.emit("Longer legs needs the hips and at least one ankle in view.")
+            return
+        self._add_sculpt([item], "Sculpt: longer legs")
+        self.status.emit("Longer legs at 30: move the slider for more or less (100 = 6% longer).")
+
+    def _body_amount_changed(self, v):
+        sc = self._portrait.get("sculpt") or []
+        if not (0 <= self._shsel < len(sc)):
+            return
+        x = sc[self._shsel]
+        if x.get("kind") == "part":
+            x["slim"] = round(v, 1)
+        elif x.get("kind") == "legs":
+            x["amount"] = round(max(v, 0.0), 1)
+            if v < 0:
+                self.bd_amount.set_value(0, emit=False)
+        else:
+            return
+        self.controls_changed()
+        self._refresh_portrait_view()
+
     def sculpt_clear(self):
         if not self._portrait.get("sculpt"):
             return
@@ -6414,7 +6807,7 @@ class DevelopPage(QWidget):
             b.setChecked(k == kind)
             b.blockSignals(False)
         if kind:
-            if self.viewer.tool in ("eyes", "sculpt", "shape"):
+            if self.viewer.tool in ("eyes", "sculpt", "shape", "body"):
                 self._set_portrait_tool(None)
             elif self.viewer.tool and self.viewer.tool != "spot":
                 self._set_mask_tool(None)
@@ -6829,7 +7222,7 @@ class DevelopPage(QWidget):
             self._set_pick(None)
         if self.viewer.tool == "hint":
             self._set_hint_tool(False)
-        elif self.viewer.tool in ("eyes", "sculpt", "shape"):
+        elif self.viewer.tool in ("eyes", "sculpt", "shape", "body"):
             self._set_portrait_tool(None)
         elif self.viewer.tool == "spot":
             self._set_spot_tool(None)
@@ -7130,9 +7523,11 @@ class HelpPage(InfoPage):
                              ("Person mask", "Masks > Person selects the people in the photo (found on this PC); "
                                              "then pick a part: skin, face, hair, clothes, arms, legs, torso or the "
                                              "background. Edges snap to the photo."),
-                             ("Body sculpting", "Push, Shrink, Grow brushes; shape tools (breast lift & size, butt "
-                                                "improvement tool, slim waist, tummy, arm, thigh): drag along the "
-                                                "area, then set Lift, Size or Slim. Every warp is capped."),
+                             ("Body sculpting", "Find bodies, then Pick a part: point at an arm, leg, waist, hips, "
+                                                "neck or shoulders to see its name, click it, set Slim. Both sides "
+                                                "does the other arm or leg too; Longer legs stretches from the hips "
+                                                "down. By hand: Push, Shrink, Grow brushes and the shape tools. Faces "
+                                                "and hands never move; every warp is capped."),
                              ("Old photos & scans", "The Library shows TIFF, JPEG and PNG scans beside raws. "
                                                     "Develop > Old photo and film: choose Colour or Black and white "
                                                     "negative to turn a negative positive (Pick the film base on "
@@ -7821,6 +8216,11 @@ def run(argv=None) -> int:
     if lock is None:
         return 0
     w = MainWindow()
+    try:
+        from ..engine.color import dcp as _dcp
+        _dcp.warm_lightroom_index()                # Lightroom's profiles indexed in the background
+    except Exception:                              # noqa: BLE001
+        log.debug("Lightroom profile index not started", exc_info=True)
     w.show_as_last_time()
     log.info("app started")
     if crashed:
@@ -7833,9 +8233,20 @@ def run(argv=None) -> int:
     # with an error" after closing it mid-render). Everything worth keeping is saved by now (sidecars, settings,
     # ratings; export and import jobs were waited for), so leave without tearing down.
     logging.shutdown()
-    sys.stdout.flush()
-    sys.stderr.flush()
+    _flush_streams()
     os._exit(int(code))
+
+
+def _flush_streams() -> None:
+    """Flush the console streams before leaving. The installed Studio (the MSI's Photographic Studio.exe) runs with
+    no console, so Python gives it None for stdout and stderr: flushing those crashed every close (0.1.14)."""
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.flush()
+        except (OSError, ValueError, AttributeError):
+            pass
 
 
 def _single_instance(app):

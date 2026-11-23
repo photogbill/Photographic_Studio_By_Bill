@@ -161,8 +161,10 @@ def core_mask(L: Layer) -> np.ndarray:
     return binary_erosion(v, iterations=m, border_value=0)
 
 
-def refine(labels: np.ndarray, layers: list, flare_guard: bool = True, order=None) -> np.ndarray:
-    """Re-cut every boundary between two frames by dynamic programming (module text). Returns new labels."""
+def refine(labels: np.ndarray, layers: list, flare_guard: bool = True, order=None, edge_extra=None) -> np.ndarray:
+    """Re-cut every boundary between two frames by dynamic programming (module text). Returns new labels.
+    ``edge_extra(A, B, box)``: an extra cost of cutting at each pixel of the pair's box (the Flat Mosaic adds the
+    relief's slope, so a cut keeps off kerbs and crack walls)."""
     lab = labels.copy()
     by = {L.i: L for L in layers}
     core = {L.i: core_mask(L) for L in layers}
@@ -197,6 +199,8 @@ def refine(labels: np.ndarray, layers: list, flare_guard: bool = True, order=Non
         dx = abs(xa.mean() - xb.mean())
         dy = abs(ya.mean() - yb.mean())
         edge, ca, cb, _ = pair_costs(A, B, box, flare_guard)
+        if edge_extra is not None:
+            edge = edge + edge_extra(A, B, box)
         by_, bx_ = A.box[0], A.box[2]
         ca_core = core[ia][y0 - by_:y1 - by_, x0 - bx_:x1 - bx_]
         by_, bx_ = B.box[0], B.box[2]

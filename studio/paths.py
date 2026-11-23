@@ -40,6 +40,7 @@ OUTPUTS = DATA_ROOT / "outputs"
 PROFILES = APP_ROOT / "profiles"                       # shared profiles ship with the app
 CALIBRATION_LOCAL = DATA_ROOT / "calibration_local"   # never shared: hot-pixel, PRNU, dust maps, darks
 PHOTOS = DATA_ROOT / "Photos"                         # the suggested Photos folder for card imports (section 24.3)
+JOBS = DATA_ROOT / "jobs"                             # the job queue (jobqueue.py): one folder per job
 ERROR_REPORTS = DATA_ROOT / "error_reports"           # one dated file per unexpected error, written by itself (log.py)
 
 # Environment overrides exist for tests and for users who move the cache; the defaults stay beside the app.
@@ -51,6 +52,7 @@ _OVERRIDES = {
     "SETTINGS": "STUDIO_SETTINGS_DIR",
     "PHOTOS": "STUDIO_PHOTOS_DIR",
     "ERROR_REPORTS": "STUDIO_ERROR_DIR",
+    "JOBS": "STUDIO_JOBS_DIR",
 }
 
 

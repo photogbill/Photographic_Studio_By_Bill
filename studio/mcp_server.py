@@ -42,7 +42,8 @@ META_VERSION = "io.modelcontextprotocol/protocolVersion"
 META_CAPS = "io.modelcontextprotocol/clientCapabilities"
 META_SERVER = "io.modelcontextprotocol/serverInfo"
 SERVER_INFO = {"name": "photographic-studio", "title": "Photographic Studio By Bill", "version": __version__}
-SKIP_COMMANDS = ("batch",)                  # a model simply calls the tools one after another
+SKIP_COMMANDS = ("batch", "queue")          # batch: a model calls the tools one after another; queue: the
+                                            # studio_queue_* tools below take tool calls, not command lines
 SKIP_DESTS = ("help", "json", "result")
 PREVIEW_MAX_BYTES = 1_500_000
 INSTRUCTIONS = (
@@ -53,7 +54,11 @@ INSTRUCTIONS = (
     "'set' ([\"light.shadows=25\"]). Results are written as NAME_Studio.ext into 'out' (a folder) and never replace "
     "a picture: read the path written from the answer. Use 'preview' (a long edge in pixels, e.g. 1024) to get a "
     "quick picture back and look at it before a full-size run; studio_view shows any picture. Large raws and stacks "
-    "take from seconds to minutes.")
+    "take from seconds to minutes. Anything that may take longer than a minute (stack, stacks, foliage, model, intake, "
+    "dualpixel on full-size raws, blender) goes through the queue instead of a direct call, which a client may cut "
+    "off: studio_queue_add takes the same tool name and arguments as a direct call, checks them, answers at once, and "
+    "the job runs to its end in a worker of its own, one job after another; studio_queue_status shows progress and, "
+    "when a job is finished, its result.")
 
 
 # ====================================================================================================== tools
@@ -120,6 +125,93 @@ VIEW_TOOL = {
     "annotations": {"readOnlyHint": True},
 }
 
+def _queue_tool(name, title, desc, props, required=(), read_only=False) -> dict:
+    t = {"name": name, "title": title, "description": desc,
+         "inputSchema": {"type": "object", "additionalProperties": False, "required": list(required),
+                         "properties": props}}
+    if read_only:
+        t["annotations"] = {"readOnlyHint": True}
+    return t
+
+
+_JOB_ITEM = {"type": "object", "additionalProperties": False, "required": ["tool", "arguments"], "properties": {
+    "tool": {"type": "string", "description": "the tool to run, e.g. studio_stack"},
+    "arguments": {"type": "object", "description": "exactly the arguments a direct call of that tool takes"},
+    "title": {"type": "string", "description": "a short name for the job, shown in the status"}}}
+
+QUEUE_TOOLS = [
+    _queue_tool("studio_queue_add", "Studio: add jobs to the queue",
+                "Add one or more jobs to the queue and answer at once. Each job is a tool name and the same arguments "
+                "a direct call takes (checked now, so a wrong argument is said straight away). The jobs run in order, "
+                "each in a fresh Studio process, in a worker that keeps going until the queue is empty, however long "
+                "that takes. 'hold' keeps them waiting until studio_queue_start.",
+                {"jobs": {"type": "array", "items": _JOB_ITEM, "description": "the jobs, in the order to run them"},
+                 "tool": {"type": "string", "description": "one job: the tool (instead of 'jobs')"},
+                 "arguments": {"type": "object", "description": "one job: its arguments"},
+                 "title": {"type": "string", "description": "one job: a short name"},
+                 "hold": {"type": "boolean", "description": "add them held: nothing runs until studio_queue_start"}}),
+    _queue_tool("studio_queue_start", "Studio: start held jobs",
+                "Release held jobs (all, or the ids given) and make sure the worker is running.",
+                {"ids": {"type": "array", "items": {"type": "string"}, "description": "job ids (default every held job)"}}),
+    _queue_tool("studio_queue_status", "Studio: the queue's status",
+                "Without 'id': the counts, whether the worker is alive, and the latest jobs (a running job shows its "
+                "last progress lines). With 'id': that job in full, with its progress lines and, once finished, the "
+                "command's own JSON result (the files it wrote are under result.outputs).",
+                {"id": {"type": "string", "description": "one job's id"},
+                 "lines": {"type": "integer", "description": "progress lines to show for one job (default 8)"}},
+                read_only=True),
+    _queue_tool("studio_queue_cancel", "Studio: cancel jobs",
+                "Cancel one job by id, or 'all': waiting jobs are dropped, a running job is stopped within seconds. "
+                "Files a job already wrote stay.",
+                {"id": {"type": "string", "description": "a job id, or all"}}, ["id"]),
+]
+QUEUE_NAMES = tuple(t["name"] for t in QUEUE_TOOLS)
+
+
+def queue_call(name: str, args: dict) -> dict:
+    """The studio_queue_* tools (jobqueue.py)."""
+    from . import cli, jobqueue
+    tools()
+    if name == "studio_queue_add":
+        items = args.get("jobs")
+        if items is None:
+            if not args.get("tool"):
+                raise BadArguments("give 'jobs' (a list of {tool, arguments}) or one 'tool' with its 'arguments'")
+            items = [{"tool": args["tool"], "arguments": args.get("arguments") or {}, "title": args.get("title", "")}]
+        elif args.get("tool"):
+            raise BadArguments("give 'jobs' or one 'tool', not both")
+        if not isinstance(items, list) or not items:
+            raise BadArguments("'jobs' is a non-empty list of {tool, arguments}")
+        argvs = []
+        for i, it in enumerate(items):
+            if not isinstance(it, dict):
+                raise BadArguments(f"job {i + 1} is not an object")
+            tool = it.get("tool")
+            if tool not in _PARSERS:
+                near = difflib.get_close_matches(str(tool), list(_PARSERS), 3, 0.5)
+                raise BadArguments(f"job {i + 1}: no tool {tool!r} to queue." + (f" Did you mean: {', '.join(near)}?"
+                                   if near else ""))
+            cmd, parser = _PARSERS[tool]
+            argv = to_argv(cmd, parser, it.get("arguments") or {})
+            try:
+                cli.build_parser().parse_args(argv)
+            except SystemExit:
+                raise BadArguments(f"job {i + 1}: those arguments do not fit {tool}: {' '.join(argv[1:])}") from None
+            argvs.append((argv, str(it.get("title") or "")))
+        hold = bool(args.get("hold"))
+        added = [jobqueue.add(argv, title, hold) for argv, title in argvs]
+        started = False if hold else jobqueue.ensure_worker()
+        return {"ok": True, "added": [jobqueue.summary(j) for j in added], "held": hold, "worker_started": started,
+                "worker": jobqueue.worker_info()}
+    if name == "studio_queue_start":
+        return dict(jobqueue.start(args.get("ids")), ok=True)
+    if name == "studio_queue_status":
+        return dict(jobqueue.status(args.get("id"), int(args.get("lines") or 8)), ok=True)
+    if name == "studio_queue_cancel":
+        return {"ok": True, "cancelled": jobqueue.cancel(str(args.get("id") or ""))}
+    raise BadArguments(f"no queue tool {name!r}")
+
+
 _TOOLS: list | None = None
 _PARSERS: dict = {}
 
@@ -130,7 +222,7 @@ def tools() -> list:
     if _TOOLS is None:
         cmds = _commands()
         _PARSERS.update({"studio_" + n.replace("-", "_"): (n, p) for n, p in cmds.items()})
-        _TOOLS = [tool_for(n, p) for n, p in cmds.items()] + [VIEW_TOOL]
+        _TOOLS = [tool_for(n, p) for n, p in cmds.items()] + [VIEW_TOOL] + QUEUE_TOOLS
     return _TOOLS
 
 
@@ -222,6 +314,12 @@ def call_tool(name: str, args: dict, progress=None) -> dict:
     try:
         if name == "studio_view":
             return {"content": view(args or {}), "isError": False}
+        if name in QUEUE_NAMES:
+            try:
+                res = queue_call(name, args or {})
+            except ValueError as e:                        # no such job, an empty command line
+                raise BadArguments(str(e)) from None
+            return {"content": [{"type": "text", "text": json.dumps(res)}], "structuredContent": res, "isError": False}
         cmd, parser = _PARSERS[name]
         argv = to_argv(cmd, parser, args or {})
         log.info("mcp call: %s", " ".join(argv)[:500])
@@ -312,7 +410,7 @@ class Server:
             if method == "tools/call":
                 name = params.get("name")
                 tools()
-                if name not in _PARSERS and name != "studio_view":
+                if name not in _PARSERS and name != "studio_view" and name not in QUEUE_NAMES:
                     return self._error(mid, -32602, f"Unknown tool: {name}")
                 args = params.get("arguments")
                 if args is not None and not isinstance(args, dict):
@@ -341,6 +439,11 @@ def serve(stdin=None, stdout=None) -> int:
     inp = stdin or sys.stdin.buffer
     sys.stdout = sys.stderr                                # a stray print must never reach the protocol stream
     slog.setup()
+    try:                                                   # a client starts us in its own folder (Claude on Windows:
+        from . import paths                                # C:\Windows\system32): a relative path must land beside
+        os.chdir(paths.get("OUTPUTS"))                     # the app, never on C: (rule 4; found 2026-11-22)
+    except OSError as e:
+        log.warning("mcp: could not move to the outputs folder (%s)", e)
     cli_tools.console_to_stderr()
 
     def send(msg: dict):

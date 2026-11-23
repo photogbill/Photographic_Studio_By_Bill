@@ -1,0 +1,18 @@
+{
+  "id": "20261122-000701-3e50ad",
+  "title": "Blender scene: brick wall",
+  "argv": [
+    "blender",
+    "D:\\dual pixel raw test\\Studio surfaces\\brick_wall\\3C9A3253_to_3C9A3260_surface_Studio.json"
+  ],
+  "state": "done",
+  "added": "2026-11-22 00:07:01",
+  "seq": 1795324021.1150136,
+  "started": "2026-11-22 00:08:24",
+  "pid": 178908,
+  "finished": "2026-11-22 00:09:08",
+  "seconds": 44.2,
+  "exit": 0,
+  "ok": true,
+  "outputs": 1
+}

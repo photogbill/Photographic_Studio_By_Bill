@@ -12,6 +12,11 @@ hue/saturation tables (ProfileHueSatMap, ProfileLookTable). Implemented from the
 
 Profiles you add live in settings/camera_profiles (private: commercial profiles must not be shared). Shared
 profiles we make ourselves go in profiles/camera_profiles.
+
+Lightroom's own profiles (Adobe Standard, and the "Camera ..." profiles that match the camera's picture styles) are
+found where Adobe installs them on this PC and offered as "lr:<profile name>" for the photo's camera: read in place,
+never copied or shared. An edit that names one renders with the camera matrix on a PC without Lightroom. Their
+ProfileToneCurve and BaselineExposureOffset are read for Tone > "Lightroom-like" (tone.py).
 """
 from __future__ import annotations
 
@@ -52,6 +57,8 @@ class Profile:
     look_dims: tuple | None = None
     look: np.ndarray | None = None
     look_srgb: bool = False
+    tone: np.ndarray | None = None                      # ProfileToneCurve, (n, 2) linear in/out pairs
+    baseline_offset: float | None = None                # BaselineExposureOffset (stops), when the profile has one
     path: str = ""
 
 
@@ -95,6 +102,10 @@ def read(path: str) -> Profile:
     pr.camera = tags.get(T_MODEL, "")
     pr.name = tags.get(T_NAME, "") or os.path.splitext(os.path.basename(path))[0]
     pr.copyright = tags.get(T_COPY, "")
+    if T_TONE in tags and len(tags[T_TONE]) >= 4:
+        pr.tone = np.asarray(tags[T_TONE], np.float64).reshape(-1, 2)
+    if T_BEO in tags and tags[T_BEO]:
+        pr.baseline_offset = float(tags[T_BEO][0])
     for ti, tc, tf in ((T_ILL1, T_CM1, T_FM1), (T_ILL2, T_CM2, T_FM2)):
         if tc in tags:
             pr.illuminants.append(int(tags.get(ti, [21])[0]))
@@ -145,6 +156,10 @@ def write(pr: Profile, path: str) -> str:
         for t, tab in zip((T_HS1, T_HS2), pr.hsm):
             entries[t] = (11, list(np.asarray(tab, float).ravel()))
         entries[T_HSENC] = (4, [int(pr.hsm_srgb)])
+    if pr.tone is not None:
+        entries[T_TONE] = (11, list(np.asarray(pr.tone, float).ravel()))
+    if pr.baseline_offset is not None:
+        entries[T_BEO] = (10, [float(pr.baseline_offset)])
     if pr.look_dims and pr.look is not None:
         entries[T_LKD] = (4, list(pr.look_dims))
         entries[T_LK] = (11, list(np.asarray(pr.look, float).ravel()))
@@ -341,7 +356,17 @@ def list_profiles(camera: str | None = None) -> list:
     return out
 
 
-def find(name: str) -> str | None:
+def find(name: str, camera=None) -> str | None:
+    """A profile file by name. "lr:<name>" is Lightroom's profile of that name for ``camera`` ((make, model)) on
+    this PC."""
+    if name.startswith(LR_PREFIX):
+        if not camera:
+            return None
+        want = name[len(LR_PREFIX):].strip().lower()
+        for e in lightroom_profiles(*camera):
+            if e["name"].strip().lower() == want:
+                return e["path"]
+        return None
     if os.path.isfile(name):
         return name
     for _, d in profile_dirs():
@@ -351,10 +376,11 @@ def find(name: str) -> str | None:
     return None
 
 
-def load(name: str) -> Profile:
-    p = find(name)
+def load(name: str, camera=None) -> Profile:
+    p = find(name, camera)
     if p is None:
-        raise FileNotFoundError(f"camera profile {name!r} not found in {[d for _, d in profile_dirs()]}")
+        where = "Lightroom's profiles on this PC" if name.startswith(LR_PREFIX) else [d for _, d in profile_dirs()]
+        raise FileNotFoundError(f"camera profile {name!r} not found in {where}")
     st = os.stat(p)
     key = (p, st.st_mtime, st.st_size)
     if key not in _CACHE:
@@ -371,3 +397,183 @@ def add_profile(src_path: str) -> str:
     dst = d / os.path.basename(src_path)
     shutil.copy2(src_path, dst)
     return dst.name
+
+
+# ------------------------------------------------------------------------------------------ Lightroom's profiles
+LR_PREFIX = "lr:"
+_LR_LOCK = __import__("threading").Lock()
+_LR_INDEX: dict = {}                                    # dirs key -> [{"camera", "name", "path", "beo"}]
+_MAKES = {"nikon corporation": "nikon", "nikon": "nikon", "sony": "sony", "canon": "canon", "pentax": "pentax",
+          "pentax corporation": "pentax", "ricoh imaging company, ltd.": "pentax", "ricoh": "ricoh",
+          "fujifilm": "fujifilm", "olympus imaging corp.": "olympus", "olympus corporation": "olympus",
+          "om digital solutions": "om", "panasonic": "panasonic", "leica camera ag": "leica", "hasselblad": "hasselblad"}
+
+
+def lightroom_dirs() -> list:
+    """Where Adobe Camera Raw / Lightroom keep camera profiles on this PC (only those that exist). The environment
+    variable STUDIO_LIGHTROOM_PROFILES (folders separated by os.pathsep) replaces the list (tests)."""
+    env = os.environ.get("STUDIO_LIGHTROOM_PROFILES")
+    if env is not None:
+        cands = [d for d in env.split(os.pathsep) if d]
+    else:
+        cands = []
+        for var in ("PROGRAMDATA", "APPDATA"):
+            if os.environ.get(var):
+                cands.append(os.path.join(os.environ[var], "Adobe", "CameraRaw", "CameraProfiles"))
+        home = os.path.expanduser("~")
+        cands += ["/Library/Application Support/Adobe/CameraRaw/CameraProfiles",
+                  os.path.join(home, "Library", "Application Support", "Adobe", "CameraRaw", "CameraProfiles")]
+    return [d for d in cands if os.path.isdir(d)]
+
+
+def _norm(s: str) -> str:
+    return "".join(ch for ch in str(s).lower() if ch.isalnum())
+
+
+def camera_keys(make: str, model: str) -> set:
+    """Ways Adobe may name this camera (Adobe writes "Sony ILCE-7M4" where the file says SONY / ILCE-7M4)."""
+    make, model = str(make or "").strip(), str(model or "").strip()
+    brand = _MAKES.get(make.lower(), make.split(" ")[0].lower() if make else "")
+    keys = {_norm(model), _norm(make + model), _norm(brand + model)}
+    return {k for k in keys if k}
+
+
+def _header(path: str):
+    """(camera, profile name, BaselineExposureOffset or None) read from a .dcp's first directory only, without
+    reading its tables (Adobe's folders hold over a thousand profiles)."""
+    with open(path, "rb") as fh:
+        head = fh.read(8)
+        if len(head) < 8 or head[:2] not in (b"II", b"MM"):
+            return None
+        e = "<" if head[:2] == b"II" else ">"
+        off = struct.unpack(e + "I", head[4:8])[0]
+        fh.seek(off)
+        n = struct.unpack(e + "H", fh.read(2))[0]
+        ents = fh.read(12 * n)
+        cam = name = None
+        beo = None
+        for k in range(n):
+            tag, typ, cnt = struct.unpack(e + "HHI", ents[12 * k:12 * k + 8])
+            val = ents[12 * k + 8:12 * k + 12]
+            if tag in (T_MODEL, T_NAME) and typ == 2:
+                if cnt <= 4:
+                    raw = val[:cnt]
+                else:
+                    fh.seek(struct.unpack(e + "I", val)[0])
+                    raw = fh.read(min(cnt, 256))
+                txt = raw.split(b"\0")[0].decode("latin-1")
+                if tag == T_MODEL:
+                    cam = txt
+                else:
+                    name = txt
+            elif tag == T_BEO and typ == 10:
+                fh.seek(struct.unpack(e + "I", val)[0])
+                a, b = struct.unpack(e + "ii", fh.read(8))
+                beo = a / b if b else None
+        if not cam:
+            return None
+        return cam, name or os.path.splitext(os.path.basename(path))[0], beo
+
+
+def _dir_stamp(dirs) -> str:
+    """Every folder under Adobe's profile folders with its modified time: changes when Adobe adds a camera."""
+    parts = []
+    for d in dirs:
+        for root, sub, _ in os.walk(d):
+            sub.sort()
+            try:
+                parts.append(f"{root}|{os.stat(root).st_mtime:.0f}")
+            except OSError:
+                pass
+    import hashlib
+    return hashlib.sha1("\n".join(parts).encode("utf-8", "replace")).hexdigest()
+
+
+def _index_file():
+    return paths.get("SETTINGS") / "lightroom_profiles.json"
+
+
+def _lightroom_index() -> list:
+    """Every Lightroom profile's camera, name and offset; kept in settings/lightroom_profiles.json beside the app so
+    the scan of Adobe's folders (over a thousand files) happens once, and again only when Adobe adds profiles."""
+    import json
+    import time
+    dirs = lightroom_dirs()
+    with _LR_LOCK:
+        if not dirs:
+            return []
+        stamp = _dir_stamp(dirs)
+        if stamp in _LR_INDEX:
+            return _LR_INDEX[stamp]
+        try:
+            saved = json.loads(_index_file().read_text(encoding="utf-8"))
+            if saved.get("stamp") == stamp and isinstance(saved.get("profiles"), list):
+                _LR_INDEX.clear()
+                _LR_INDEX[stamp] = saved["profiles"]
+                return saved["profiles"]
+        except (OSError, ValueError):
+            pass
+        t0 = time.perf_counter()
+        out = []
+        for d in dirs:
+            for root, _, files in os.walk(d):
+                for f in files:
+                    if not f.lower().endswith(EXT):
+                        continue
+                    p = os.path.join(root, f)
+                    try:
+                        h = _header(p)
+                    except (OSError, struct.error, ValueError):
+                        log.debug("Lightroom profile %s unreadable", p, exc_info=True)
+                        continue
+                    if h:
+                        out.append({"camera": h[0], "name": h[1], "path": p, "beo": h[2], "key": _norm(h[0])})
+        _LR_INDEX.clear()
+        _LR_INDEX[stamp] = out
+        log.info("Lightroom profiles: %d found in %s (%.2f s)", len(out), dirs, time.perf_counter() - t0)
+        try:
+            f = _index_file()
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(json.dumps({"stamp": stamp, "profiles": out}), encoding="utf-8")
+        except OSError:
+            log.debug("Lightroom profile index not saved", exc_info=True)
+        return out
+
+
+def warm_lightroom_index() -> None:
+    """Build (or load) the index in the background at start, so the first photo opens without waiting for it."""
+    import threading
+
+    def run():
+        try:
+            _lightroom_index()
+        except Exception:                               # noqa: BLE001  (a background nicety must never fail loudly)
+            slog.log_exception("Lightroom profile index", log)
+    threading.Thread(target=run, name="lr-profiles", daemon=True).start()
+
+
+def lightroom_profiles(make: str, model: str) -> list:
+    """Lightroom's profiles for this camera on this PC: [{"name", "file" ("lr:<name>"), "camera", "source",
+    "path", "beo"}], Adobe Standard first, then the camera-matching ones. [] without Lightroom."""
+    keys = camera_keys(make, model)
+    seen, out = set(), []
+    for e in _lightroom_index():
+        if e["key"] in keys and e["name"].lower() not in seen:
+            seen.add(e["name"].lower())
+            out.append({"name": e["name"], "file": LR_PREFIX + e["name"], "camera": e["camera"],
+                        "source": "lightroom", "path": e["path"], "beo": e["beo"]})
+    out.sort(key=lambda e: (0 if e["name"].lower().startswith("adobe standard") else 1, e["name"].lower()))
+    return out
+
+
+def lightroom_baseline(make: str, model: str) -> float | None:
+    """Lightroom's hidden brightness lift for this camera (stops), or None when it cannot be read on this PC.
+    Adobe's camera-matching profiles carry a BaselineExposureOffset that cancels it exactly (seen on this project's
+    PC: Nikon Z 8 -0.20 and Sony A7R V -0.35, against +0.20 and +0.35 in Adobe's DNGs of those cameras), so it is
+    minus the commonest offset among them (HDR variants left out)."""
+    vals = [e["beo"] for e in lightroom_profiles(make, model)
+            if e["beo"] is not None and e["name"].lower().startswith("camera") and "hdr" not in e["name"].lower()]
+    if not vals:
+        return None
+    vals = [round(v, 2) for v in vals]
+    return -max(set(vals), key=vals.count)

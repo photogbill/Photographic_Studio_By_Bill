@@ -67,7 +67,7 @@ The recipe is the Studio's own Edit, as JSON, holding only what differs from the
 | `look-profile PICTURES --save FILE.json` | Measure a look profile (nine colour statistics) from reference pictures. |
 | `depth --make map,view,normals,layers` | 16-bit depth map (near = white), coloured view, normal map (`--normals-y up|down`), or `--layers N` RGBA layers, 1 = farthest, that stack back into the picture. `--cuts` sets where they divide; `--fill` makes layer 1 a whole background plate. Estimated from one picture. |
 | `cutout` | A subject with a soft edge as RGBA (straight alpha), or `--make mask`. Select with `--person [part]`, `--click U,V` / `--avoid U,V` (`--model classic|tiny|large`), `--depth-range`, `--luminance LO,HI`, `--colour HUE,WIDTH`, `--skin`, `--shape JSON`; `--combine`, `--invert`, `--feather`, `--hard 0.5` (firm edge for leaves and fences). |
-| `find --what ...` | Data, no file: `size, info, stats, faces, people, dust, flare, crops, subject, red-eyes, blemishes, hdr, jpeg, infrared, depth`. |
+| `find --what ...` | Data, no file: `size, info, stats, faces, people, bodies, dust, flare, crops, subject, red-eyes, blemishes, hdr, jpeg, infrared, depth`. `bodies`: each person's parts for body sculpting (centre line, outline distance each side, measured or estimated). |
 | `stack focus|superres|pano FRAMES` | A focus bracket, a burst, or a panorama into one linear 32-bit file. Finish it with `edit`. Tool settings with `--set` (listed under `stack` in the schema). Focus only: `--make merge,depth,surface` (default `merge`): the surface files for games, below. |
 | `dualpixel --make report,depth,half1,half2,hdr,anaglyph,sbs,wiggle,surface,near-check` | What a Canon Dual Pixel RAW can make. Its depth is measured, not estimated. `surface`: the same five files and JSON as a stack, from the one photo's own offsets. |
 | `stacks FOLDER [--run surface,depth,foliage]` | The stacks in a folder or on a card (data), or every stack through jobs; resumable (`stacks_job.json`). See "Dual Pixel 3D". |
@@ -115,6 +115,10 @@ Settings (also under `stack.surface` in `schema`):
 * `--tileable [cut|blend]`: a repeating texture, one geometry for every file. `cut` (the default): a minimum-error
   cut through each seam band (structured textures: brick, planks); `blend`: the copies blended (even, random
   textures). The normal map and the maps computed from the height are worked out again from the tiled height.
+  Before the seams are healed, the large scale is taken out (setting `tile_flatten`, on by default; 2026-11-21):
+  the colour's light falloff (vignetting, uneven light: a smooth surface fitted to the log luminance, then lumps
+  over 1/8 of the edge) and the height's overall tilt and broad bumps, so the copies meet without a step. The JSON's
+  `tiling.flattened` says what was done; the height is then relief only.
 * `--maps LIST` (see the next section) and `--size`, `--scale` (game size, real size).
 
 The JSON (`"studio_surface": 2` since 2026-11-21; every key of version 1 is kept): `written_by`, `method` (`focus+dual_pixel`, `focus`, `dual_pixel`), `method_text`,
@@ -323,6 +327,45 @@ object's longest side. The shape, texture and cameras are the same either way: o
 * Blender: the Forge's Blender runner can run `studio/blender/build_material.py` with `-- --surface <json> --out <dir>`
   (it prints `STUDIO_RESULT {json}` on its last line); models' glb files import directly.
 
+## Flat Mosaic: `stack mosaic` (BUILD_PLAN_MOSAIC, 2026-11-23)
+
+`stack mosaic FILES-OR-FOLDERS` stitches hand-held views of a flat or gently curved surface (a road, a path, a floor, a
+wall) into game surfaces, with their height. The camera may move, tilt, turn and change height between views: every
+view's camera is found over the ground and the whole set adjusted at once (`engine/stack/mosaic.py`). Views can be
+raw focus stacks (one per spot: merged with their fused depth, Card to Stacks' grouping), Focus Stack results (a
+picture with `NAME.depth.npz` beside it), single Dual Pixel RAWs, or ordinary photos and raws (colour only), mixed.
+
+```
+studio-cli.bat stack mosaic "D:\pavement\2026-11-24" --out "D:\pavement\out" --json
+studio-cli.bat stack mosaic FOLDER --set resolution=fine --set surface=curve --ruler 0:0.20,0.50,0.80,0.50,300
+studio-cli.bat stack mosaic FOLDER --pieces "0.10,0.20,0.25,0.40;0.60,0.10,0.75,0.30" --maps all
+studio-cli.bat queue add stack mosaic FOLDER --out OUT        (a long set: it runs to its end)
+```
+
+Settings (`--set NAME=VALUE`; `schema` lists them under `stack.mosaic`, with what each is best for and weak at):
+`method` auto | poses | free, `surface` plane | curve, `resolution` game (1 mm per pixel) | fine (0.5) | full | custom
+(with `mm_per_px`), `scale` auto | ruler | focus | relative, `exposure`, `even_out`, `vignette` (on: a texture repeats
+it as a blotch), `seams` smart | straight, `crop` rectangle | edge, `height`, `ortho`, `nudge`, `tileable` (on by
+default; `--tileable cut|blend` picks the method), `size`, `focal_mm`. `--ruler VIEW:U1,V1,U2,V2,MM`: two points of a
+tape in one view (0..1 of that view's picture; VIEW is its number from 0 or its name) and the distance between them.
+
+Writes, beside the first view or in `--out`, the surface files of the Depth Stack above (same names, same JSON
+contract, `"method": "mosaic"`), so the RPG Forge's intake reads them unchanged, plus:
+
+| File | What it holds |
+|---|---|
+| `NAME_misfit_Studio.png` | Where the views still disagree in position: 255 = 4 output pixels or more. |
+| `NAME_coverage_Studio.png` | Every view's footprint from above, cyan finest detail .. amber coarsest; red: gaps inside the set. |
+| `NAME_pieceNN_{colour,height,normal}_Studio.png` | `--pieces` boxes cut out as decals (the colour with a soft transparent edge). |
+
+The JSON gains `repeat_m` (the ground one copy of the texture covers, in metres: the game's tiling from a measurement,
+not a guess; also written for every other surface that knows its size) and a `mosaic` block: the method and surface,
+the solve (residual, drift and loop closures, scale and how it is known, lens distortion), each view's camera height,
+tilt and ground detail, the relief (its size measured by parallax between overlapping views, the fit, and whether
+near and far had to be swapped), whether it was orthorectified or nudged, the coach's advice and the shooting card.
+`NAME` is `FIRST_to_LAST_Mosaic`. Output kinds: `surface_*` as above, `mosaic_misfit`, `mosaic_coverage`,
+`mosaic_piece`. A set that cannot be made (fewer than two views, no overlap) is a usage error (exit 2) said plainly.
+
 ## MCP: an AI model connected directly
 
 `studio/mcp_server.py` serves the same commands over the Model Context Protocol (stdio), so a model calls the Studio's
@@ -348,6 +391,40 @@ entry for any other client, `studio-mcp.bat` starts the server.
 * Standard output carries protocol messages only; logs go to standard error and `logs/studio.log`.
 * Tests: `tests/test_mcp_server.py` (8 tests, both protocol eras, a real stdio run, the connect script).
   Not yet run: a real client (the Claude desktop app) against it on Windows.
+
+### The job queue: long work that runs to its end (2026-11-21)
+
+A client waits only so long for one tool call (the Claude desktop app's bridge: about 80 s), and a full-size focus
+stack takes 10-20 minutes. Long work therefore goes through the queue (`studio/jobqueue.py`):
+
+* **MCP:** `studio_queue_add` takes `jobs`, a list of `{tool, arguments, title}` (or one `tool` with its
+  `arguments`): the same tool names and arguments as a direct call, checked at once, so a wrong argument is said
+  straight away. It answers at once with each job's `id`. `hold: true` adds them held until `studio_queue_start`.
+  `studio_queue_status` (no `id`: counts, the worker, the latest jobs with a running job's last progress lines;
+  with `id`: that job in full, its progress lines and, once finished, the command's own JSON `result`).
+  `studio_queue_cancel` (`id` or `all`: waiting jobs dropped, a running one stopped within seconds).
+* **Command line** (the RPG Forge's `studio.run`): `studio-cli queue --json add [--hold] stack focus a.CR3 b.CR3
+  --make surface --out DIR`, `queue --json status [ID]`, `queue --json start [IDS]`, `queue --json cancel ID|all`.
+  Put `--json` before the action: everything after `add` is the job's own command line.
+* **How it runs:** a worker started by itself in the background (below normal priority, no window) takes the jobs
+  one after another, oldest first, each in a fresh Studio process, until none has waited for 90 s. A crash in one
+  job fails that job only (the problem names the Windows code and the last progress lines); the next job runs.
+  The worker's heartbeat (`jobs/worker.json`) says whether it is alive; a worker that died with the PC is
+  replaced by the next `add` or `start`, and its unfinished job is marked failed so it can be added again.
+* **Files:** `jobs/` beside the app (`STUDIO_JOBS_DIR` overrides): one folder per job with `job.json` (state:
+  held, queued, running, done, failed, cancelled), `progress.log`, `stdout.txt`, `result.json`; the worker's
+  log is `logs/queue.log`. Nothing is deleted; finished jobs stay listed.
+* Tests: `tests/test_jobqueue.py` (the worker with stand-in jobs of known outcome: order, a crash, cancel, a dead
+  worker, the MCP tools, the command line).
+
+### An extension file for the Claude desktop app
+
+`Make Claude Extension.bat` (`tools/make_extension.py`) writes `extension/photographic-studio.mcpb`: a zip whose
+`manifest.json` starts this folder's own Python with `-m studio.mcp_server` (no Studio code inside; the paths are
+this computer's, so it is made again on any other). Install it in Claude: Settings, Desktop app, Manage beside
+Extensions, Advanced settings, Extension Developer, Install Extension. It is the way in when the settings-file entry
+of `Connect Studio to Claude.bat` is not started by the app (the Microsoft Store install). Use one of the two, not
+both (they share the name `photographic-studio`).
 
 ## Examples
 

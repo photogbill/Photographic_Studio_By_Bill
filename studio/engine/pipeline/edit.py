@@ -22,9 +22,11 @@ STAGE_VERSIONS = {
     "white_balance": 1,
     "highlights": 1,
     "demosaic": 1,
-    "camera_matrix": 1,
+    "camera_matrix": 2,              # 2: two-light (tungsten + daylight) matrices when the camera has them
+    #                                  (color/spectral.py); version 1 sidecars keep the daylight-only matrix
     "exposure": 1,
-    "tone": 1,
+    "tone": 2,                       # 2: photos below the lowest native ISO (Sony ISO 50/64/80, Canon L, Nikon Lo)
+    #                                  are darkened as the camera does (tone.extended_low_iso_ev)
     "gamut": 1,
     "output": 1,
     "sharpen": 1,
@@ -68,7 +70,7 @@ class WhiteBalance:
 
 @dataclass
 class Tone:
-    mode: str = "standard"           # standard | camera_match | linear
+    mode: str = "standard"           # standard | camera_match | linear | lightroom (pipeline.lightroom_tone)
     contrast: float = 1.35
     mid_grey: float = 0.11           # raw-relative value rendered as 18% grey (baseline exposure)
     shoulder: float = 1.0

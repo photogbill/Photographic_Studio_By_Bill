@@ -639,14 +639,25 @@ def linear_rgb(image: Image, edit: Edit, region=None, half_size: bool = False, c
             log.info("infrared: camera profile %r not used (made for visible light)", edit.profile)
         with slog.stage("camera_matrix.infrared", log, profile=ir.get("profile"), bw=(ir.get("bw") or {}).get("on")):
             irm.apply_camera(rgb, irm.normalise(ir), raw, strips=_strips)
-    elif edit.profile:
+    elif edit.profile and edit.profile != spectral_key():
         from ..color import dcp
         try:
-            prof = dcp.load(edit.profile)
+            prof = dcp.load(edit.profile, (image.meta.make, image.meta.model))
         except (OSError, ValueError) as err:
             log.warning("camera profile %r unusable (%s); using the camera matrix", edit.profile, err)
+    spec = None
+    if ir is None and prof is None and edit.profile == spectral_key():
+        from ..color import spectral as sp
+        try:
+            spec = sp.camera_to_working(image.meta.make, image.meta.model, mult, cam_xyz=raw.cam_xyz)
+        except (OSError, ValueError) as err:
+            log.warning("spectral profile unusable (%s); using the camera matrix", err)
     if ir is not None:
         pass
+    elif spec is not None:
+        M = spec[0].astype(np.float32)
+        with slog.stage("camera_matrix", log, profile="spectral", kelvin=round(spec[1])):
+            _strips(rgb, lambda s: apply_matrix(s, M, out=s))
     elif prof is not None:
         from ..color import dcp
         M, g = dcp.camera_to_working(prof, mult)
@@ -655,9 +666,23 @@ def linear_rgb(image: Image, edit: Edit, region=None, half_size: bool = False, c
             if prof.hsm or prof.look is not None:
                 _strips(rgb, lambda s: s.__setitem__(Ellipsis, dcp.apply_tables(s, prof, g)))
     else:
-        M = cam.camera_to_working(raw.cam_xyz).astype(np.float32)
-        with slog.stage("camera_matrix", log):
-            _strips(rgb, lambda s: apply_matrix(s, M, out=s))
+        dual = None
+        if edit.stage_versions.get("camera_matrix", 1) >= 2:       # two-light matrices (color/spectral.py)
+            from ..color import spectral as sp
+            try:
+                dual = sp.dual_profile(image.meta.make, image.meta.model, raw.cam_xyz)
+            except (OSError, ValueError) as err:
+                log.warning("two-light matrices unusable (%s); using the camera matrix", err)
+        if dual is not None:
+            from ..color import dcp
+            M, g = dcp.camera_to_working(dual, mult)
+            M = np.asarray(M, np.float32)
+            with slog.stage("camera_matrix", log, profile="two-light", weight_tungsten=round(g, 3)):
+                _strips(rgb, lambda s: apply_matrix(s, M, out=s))
+        else:
+            M = cam.camera_to_working(raw.cam_xyz).astype(np.float32)
+            with slog.stage("camera_matrix", log):
+                _strips(rgb, lambda s: apply_matrix(s, M, out=s))
     if edit.lens.vignette and edit.lens.vignette_model and edit.lens.vignette_amount:
         from ..lens import falloff as fo           # part of stage 13, done here where sensor positions are known
         cx0, cy0, cw0, ch0 = raw.crop
@@ -1833,6 +1858,13 @@ def tone_lut(image: Image, edit: Edit, lin_img: np.ndarray | None = None):
         base = _with_whites(lambda v: np.interp(v, xs_m, ys_m), li.whites)
         xs, _ = tone_mod.curve_lut(lambda v: v)
         return xs, lt.build_light_lut(base, li, _mid_in(image, edit), 3.0, xs)
+    if t.mode == "lightroom":
+        base, mid = lightroom_tone(image, edit)
+        if lt.is_identity(li):
+            return tone_mod.curve_lut(base)
+        base = _with_whites(base, li.whites)
+        xs, _ = tone_mod.curve_lut(lambda v: v)
+        return xs, lt.build_light_lut(base, li, mid, 3.0, xs)
     if t.mode == "linear":
         if lt.is_identity(li):
             return None
@@ -1840,6 +1872,57 @@ def tone_lut(image: Image, edit: Edit, lin_img: np.ndarray | None = None):
         xs, _ = tone_mod.curve_lut(lambda v: v)
         return xs, lt.build_light_lut(base, li, _mid_in(image, edit), 3.0, xs)
     raise ValueError(f"unknown tone mode {t.mode!r}")
+
+
+def spectral_key() -> str:
+    from ..color.spectral import KEY
+    return KEY
+
+
+def lightroom_info(image: Image, edit: Edit) -> dict:
+    """What Tone > "Lightroom-like" uses for this photo: {"lift": stops, "lift_known": bool, "offset": the profile's
+    own offset, "curve": "profile" | "adobe default", "profile": name or ""}."""
+    from ..color import dcp
+    cam = (image.meta.make, image.meta.model)
+    try:
+        lift = dcp.lightroom_baseline(*cam)
+    except OSError:
+        lift = None
+    prof = None
+    if edit.profile:
+        try:
+            prof = dcp.load(edit.profile, cam)
+        except (OSError, ValueError):
+            prof = None
+    curve = prof.tone if prof is not None and prof.tone is not None and len(prof.tone) > 2 else None
+    pull = tone_mod.extended_low_iso_ev(image.meta.make, image.meta.model, getattr(image.meta, "iso", None))
+    return {"lift": float(lift or 0.0) + pull, "lift_known": lift is not None, "iso_pull": pull,
+            "offset": float(prof.baseline_offset or 0.0) if prof is not None else 0.0,
+            "curve": "profile" if curve is not None else "adobe default", "profile": prof.name if prof else "",
+            "_curve": curve}
+
+
+def lightroom_tone(image: Image, edit: Edit):
+    """(curve, mid): Lightroom's way of turning raw light into a picture, as far as it is public. The raw values (1.0 =
+    the clip point) are lifted by Lightroom's hidden per-camera brightness (read from Lightroom's own profiles on
+    this PC, 0 when they are not here) plus the profile's own offset, then the profile's tone curve, or Adobe's
+    default curve for profiles without one (Adobe Standard). ``mid``: the input that comes out as 18% grey."""
+    from ..color.acr_curve import acr_curve
+    info = lightroom_info(image, edit)
+    k = 2.0 ** (info["lift"] + info["offset"])
+    tc = info["_curve"]
+    if tc is not None:
+        cx, cy = np.asarray(tc[:, 0], np.float64), np.asarray(tc[:, 1], np.float64)
+
+        def base(v):
+            return np.interp(np.clip(np.asarray(v, np.float64) * k, 0.0, 1.0), cx, cy).astype(np.float32)
+    else:
+        def base(v):
+            return acr_curve(np.asarray(v, np.float64) * k).astype(np.float32)
+    grid = np.geomspace(1e-5, 1.0, 4000)
+    yv = base(grid)
+    mid = float(np.interp(tone_mod.MID_OUT, yv, grid)) if yv[-1] > tone_mod.MID_OUT else 0.18
+    return base, mid
 
 
 def _with_whites(fn, whites: float):
@@ -1866,9 +1949,16 @@ def apply_orientation(img: np.ndarray, flip: int) -> np.ndarray:
 
 
 def _mid_in(image: Image, edit: Edit) -> float:
+    if edit.tone.mode == "lightroom":
+        return lightroom_tone(image, edit)[1]
     mid = edit.tone.mid_grey
     if edit.tone.match_camera_brightness:
         mid = mid / 2.0 ** tone_mod.body_brightness_ev(image.meta.model)
+    if edit.tone.mode == "standard" and edit.stage_versions.get("tone", 1) >= 2:
+        # below the lowest native ISO the camera exposed more and darkens its own picture: so does the Studio
+        # (Bill, 2026-11-23); version-1 sidecars render as they always did
+        mid = mid / 2.0 ** tone_mod.extended_low_iso_ev(image.meta.make, image.meta.model,
+                                                         getattr(image.meta, "iso", None))
     return mid
 
 
@@ -3260,6 +3350,36 @@ def find_people(image: Image, edit: Edit, size: int = 640) -> dict | None:
     if pp2.hair_available() and res["people"]:
         shape["hair_maps"] = _hair_maps(image, edit, res["people"], img.shape[1], img.shape[0], k)
     return shape
+
+
+def find_bodies(image: Image, edit: Edit) -> dict | None:
+    """Find bodies (body sculpting, local/bodies.py): what the Person finder saw, to keep on the photo's "portrait"
+    as "bodies": {"w", "h", "data" (person mask on a grid of the S frame), "people" (33 points each)}. None when
+    nobody is found."""
+    shape = find_people(image, edit)
+    if not shape or not shape.get("people"):
+        return None
+    return {"w": shape["w"], "h": shape["h"], "data": shape["data"], "people": shape["people"]}
+
+
+def body_parts(image: Image, edit: Edit) -> list:
+    """The parts of everyone in the edit's stored bodies (bodies.find_parts), in S-frame fractions; [] without."""
+    from ..local import bodies as bd
+    store = (edit.portrait or {}).get("bodies")
+    if not store or not store.get("people"):
+        return []
+    _, _, sw, sh = image.raw.crop
+    key = ("bodyparts", hash(store["data"]), json.dumps(store["people"]), sw, sh)
+    with image._lock:
+        if key in image._memo:
+            return image._memo[key]
+    with slog.stage("bodies.parts", log):
+        res = bd.find_parts(store["people"], bd.decode_mask(store), sw, sh)
+    with image._lock:
+        for kk in [kk for kk in image._memo if kk[0] == "bodyparts"]:
+            image._memo.pop(kk, None)
+        image._memo[key] = res
+    return res
 
 
 def _hair_maps(image: Image, edit: Edit, people: list, vw: int, vh: int, k: float) -> list:

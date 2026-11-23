@@ -58,7 +58,8 @@ def test_the_older_handshake_still_works():
 
 def test_every_command_is_a_tool_with_a_typed_schema():
     by = {t["name"]: t for t in M.tools()}
-    want = {"studio_" + c.replace("-", "_") for c in cli_tools.COMMANDS if c != "batch"} | {"studio_view"}
+    want = ({"studio_" + c.replace("-", "_") for c in cli_tools.COMMANDS if c not in M.SKIP_COMMANDS}
+            | {"studio_view"} | set(M.QUEUE_NAMES))
     assert set(by) == want
     assert [t["name"] for t in M.tools()] == [t["name"] for t in M.tools()]          # a fixed order
     p = by["studio_restore"]["inputSchema"]

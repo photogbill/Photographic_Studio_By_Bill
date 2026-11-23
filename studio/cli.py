@@ -446,7 +446,7 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--demosaic", choices=["rcd", "menon", "lmmse", "dual", "mhc", "bilinear", "half"],
                    help="demosaic method (default rcd; edits made before 2026-11-15 keep menon)")
     d.add_argument("--green-eq", action="store_true", help="even out the two greens before demosaicing")
-    d.add_argument("--tone", choices=["standard", "camera_match", "linear"])
+    d.add_argument("--tone", choices=["standard", "camera_match", "linear", "lightroom"])
     d.add_argument("--match-camera-brightness", action="store_true",
                    help="optional: shift brightness per camera body to match the camera JPEG (off by default)")
     d.add_argument("--wb", choices=["as_shot", "daylight"])

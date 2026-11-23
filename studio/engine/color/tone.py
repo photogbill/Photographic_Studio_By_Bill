@@ -44,6 +44,31 @@ RENDER_TO_PP = conversion_matrix(REC2020, PROPHOTO).astype(np.float32)
 PP_LUMA = PROPHOTO.to_xyz_d50[1].astype(np.float32)          # Y weights of linear ProPhoto
 
 
+# Lowest native ISO, where a body's is not 100 (by its model name as the raw file gives it). Below it, the camera
+# exposes more and darkens its JPEG afterwards (Canon "L", Nikon "Lo", Sony's extended ISO 50/64/80).
+_NATIVE_LOW = {"nikon": {"NIKON D810": 64, "NIKON D850": 64, "NIKON Z 7": 64, "NIKON Z 7_2": 64, "NIKON Z 8": 64,
+                         "NIKON Z 9": 64, "NIKON D810A": 200},
+               "sony": {"ILCE-7SM3": 80, "ILME-FX3": 80, "ILME-FX30": 100}}
+
+
+def extended_low_iso_ev(make, model, iso) -> float:
+    """Stops by which the camera darkens a photo taken below its lowest native ISO (0 at native ISOs). Sony pulls
+    every extended-low setting by a whole stop (Adobe's DNGs of a Sony A7R V: +0.35 at ISO 100 and up, -0.65 at ISO
+    50, 64 and 80); others by the ISO ratio (a Nikon Z 8 at Lo 1 / 0.7 / 0.3: -1, -0.66, -0.33 against ISO 64)."""
+    try:
+        iso = float(iso)
+    except (TypeError, ValueError):
+        return 0.0
+    if not iso or iso <= 0:
+        return 0.0
+    mk = str(make or "").lower()
+    brand = "sony" if "sony" in mk else "nikon" if "nikon" in mk else mk.split(" ")[0]
+    base = _NATIVE_LOW.get(brand, {}).get(str(model or "").strip().upper(), 100)
+    if iso >= base - 0.5:
+        return 0.0
+    return -1.0 if brand == "sony" else math.log2(iso / base)
+
+
 def _hermite(t, p0, p1, m0, m1):
     t2, t3 = t * t, t * t * t
     return (2 * t3 - 3 * t2 + 1) * p0 + (t3 - 2 * t2 + t) * m0 + (-2 * t3 + 3 * t2) * p1 + (t3 - t2) * m1

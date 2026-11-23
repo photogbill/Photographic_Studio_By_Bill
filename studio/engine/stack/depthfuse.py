@@ -83,6 +83,14 @@ METHOD_INFO = {
                 "stack or Dual Pixel photo",
         "weak": "colour and shadow are mistaken for shape (a dark stain becomes a pit, a pale stone a bump); the "
                 "broad shape of the surface is lost; every map made from it is amber"},
+    "mosaic": {
+        "name": "Flat Mosaic",
+        "does": "Many hand-held views of a surface stitched on its ground plane: each view's own depth (Dual Pixel, "
+                "focus, or both) matched to its neighbours', the ground taken off, and the relief's size measured "
+                "from the parallax between overlapping views.",
+        "best": "roads, paths, floors and walls larger than one frame: a texture that does not repeat for metres",
+        "weak": "plain areas (nothing to measure: filled in and marked); without overlapping relief the size of the "
+                "relief stays relative; something that moved shows in the agreement map"},
 }
 
 

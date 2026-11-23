@@ -308,3 +308,45 @@ def test_model_and_intake_say_plainly_what_they_need(tmp_path, capsys):
     src = _picture(tmp_path / "a.png")
     code, res = _run(["model", src], capsys)
     assert code == 2 and "two views" in res["problems"][0]["text"]
+
+
+def test_stack_mosaic_files_json_and_wrong_values(tmp_path, capsys):
+    """`stack mosaic FOLDER` (BUILD_PLAN_MOSAIC.md M6): Focus Stack results of a road in, the surface files (tileable
+    by default), the misfit and coverage maps and the pieces out under NAME_*_Studio names; wrong values said
+    plainly (exit code 2); the schema lists the mosaic's settings."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.dirname(__file__))
+    import mosaic_synth as S
+    src = tmp_path / "in"
+    src.mkdir()
+    g = S.Ground(x1=3.0, y1=1.4, seed=14, relief=S.bumps([(0.5, 0.2)], h=0.03, r=0.05))
+    views, _ = S.strip(g, n_per_row=3, rows=2, length=1.0, seed=41)
+    for v in views:
+        p = src / f"ROAD_{v.name}_Focus_Studio.png"
+        Image.fromarray(v.colour).save(p)
+        np.savez_compressed(os.path.splitext(p)[0] + ".depth.npz", depth=np.asarray(v.t, np.float16),
+                            confidence=np.asarray(v.conf, np.float16), label=np.full(v.t.shape, 2, np.uint8))
+    out = tmp_path / "out"
+    code, res = _run(["stack", "mosaic", src, "--out", out, "--set", "resolution=full", "--pieces",
+                      "0.1,0.1,0.3,0.4"], capsys)
+    assert code == 0, res["problems"]
+    kinds = {}
+    for o in res["outputs"]:
+        kinds.setdefault(o["kind"], []).append(o["output"])
+    for k in ("surface_colour", "surface_height", "surface_normal", "surface_confidence", "surface_agreement",
+              "surface_json", "mosaic_misfit", "mosaic_coverage"):
+        assert k in kinds and os.path.exists(kinds[k][0]), k
+        assert kinds[k][0].endswith("_Studio.png") or kinds[k][0].endswith("_Studio.json")
+    assert len(kinds["mosaic_piece"]) == 3
+    doc = json.load(open(kinds["surface_json"][0], encoding="utf-8"))
+    assert doc["method"] == "mosaic" and doc["tileable"] is True
+    assert doc["mosaic"]["solve"]["placed"] == 6 and doc["mosaic"]["shooting_card"]
+    code2, res2 = _run(["stack", "mosaic", src, "--set", "method=banana"], capsys)
+    assert code2 == 2 and "method" in res2["problems"][0]["text"]
+    code3, res3 = _run(["stack", "mosaic", src, "--ruler", "0.1,0.2,0.3,0.4,10"], capsys)
+    assert code3 == 2 and "--ruler" in res3["problems"][0]["text"]
+    one = sorted(src.glob("*.png"))[0]
+    code4, res4 = _run(["stack", "mosaic", one], capsys)
+    assert code4 == 2 and "at least two views" in res4["problems"][0]["text"]
+    code5, res5 = _run(["schema"], capsys)
+    assert code5 == 0 and "shooting_card" in json.dumps(res5["data"])

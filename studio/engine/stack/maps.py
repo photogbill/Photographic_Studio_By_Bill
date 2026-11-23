@@ -457,6 +457,78 @@ def resize_to(arr: np.ndarray, size: int) -> np.ndarray:
     return out[0] if a.ndim == 2 else np.stack(out, 2)
 
 
+def _resize_hw(a: np.ndarray, h: int, w: int) -> np.ndarray:
+    from PIL import Image
+    return np.asarray(Image.fromarray(np.asarray(a, np.float32)).resize((w, h), Image.Resampling.BILINEAR), np.float32)
+
+
+def low_pass(a: np.ndarray, frac: float = 0.125) -> np.ndarray:
+    """The large-scale part of a 2-D map: a Gaussian blur whose sigma is ``frac`` of the long edge, worked out on a
+    copy about 256 pixels across (the blur keeps nothing finer than that) and brought back to full size."""
+    from scipy.ndimage import gaussian_filter
+    a = np.asarray(a, np.float32)
+    H, W = a.shape
+    k = max(1, int(max(H, W) // 256))
+    h2, w2 = max(1, H // k), max(1, W // k)
+    small = _resize_hw(a, h2, w2) if k > 1 else a
+    s = gaussian_filter(small, sigma=max(0.5, frac * max(h2, w2)), mode="reflect")
+    return _resize_hw(s, H, W) if k > 1 else s
+
+
+def poly_surface(a: np.ndarray, deg: int = 3) -> np.ndarray:
+    """The smooth surface (a 2-D polynomial of degree ``deg`` in x and y) that fits a map best, by least squares on a
+    copy about 256 pixels across. Unlike a blur it has no edge bias: a plane or a lens's vignetting is followed right
+    into the corners, where a texture's seams are."""
+    a = np.asarray(a, np.float32)
+    H, W = a.shape
+    k = max(1, int(max(H, W) // 256))
+    h2, w2 = max(2, H // k), max(2, W // k)
+    small = _resize_hw(a, h2, w2) if k > 1 else a
+
+    def basis(hh, ww):
+        y, x = np.mgrid[0:hh, 0:ww].astype(np.float64)
+        y, x = y / max(hh - 1, 1) * 2 - 1, x / max(ww - 1, 1) * 2 - 1
+        return np.stack([x ** i * y ** j for i in range(deg + 1) for j in range(deg + 1 - i)], -1)
+    B = basis(h2, w2).reshape(-1, (deg + 1) * (deg + 2) // 2)
+    coef, *_ = np.linalg.lstsq(B, small.reshape(-1).astype(np.float64), rcond=None)
+    out = np.empty((H, W), np.float32)
+    for y0 in range(0, H, 512):                      # full size in strips: the basis of a whole 44 MP map is large
+        yy, xx = np.mgrid[y0:min(H, y0 + 512), 0:W].astype(np.float64)
+        yy, xx = yy / max(H - 1, 1) * 2 - 1, xx / max(W - 1, 1) * 2 - 1
+        bb = np.stack([xx ** i * yy ** j for i in range(deg + 1) for j in range(deg + 1 - i)], -1)
+        out[y0:y0 + 512] = (bb @ coef).astype(np.float32)
+    return out
+
+
+def flatten_colour(col: np.ndarray, frac: float = 0.125) -> tuple[np.ndarray, float]:
+    """Before tiling: take out the large-scale brightness changes of a colour picture (0..255 sRGB) - a lens's
+    vignetting, light falling off across the frame - on its linear luminance (in stops): first the best smooth
+    surface (poly_surface: no edge bias), then broad lumps larger than ``frac`` of the long edge. Detail, cracks
+    and colour stay. Returns (picture, how much it changed: the 95th percentile of the correction in stops)."""
+    from ..color.spaces import srgb_decode, srgb_encode
+    lin = srgb_decode(np.clip(np.asarray(col, np.float32), 0, 255) / 255.0).astype(np.float32)
+    L = lin[..., 0] * 0.2126 + lin[..., 1] * 0.7152 + lin[..., 2] * 0.0722
+    lg = np.log2(np.maximum(L, 1e-5))
+    trend = poly_surface(lg)
+    r = lg - trend
+    trend = trend + low_pass(r, frac)
+    corr = np.clip(float(np.median(trend)) - trend, -2.0, 2.0).astype(np.float32)
+    out = srgb_encode(np.clip(lin * np.exp2(corr)[..., None], 0, 1)) * 255.0
+    stops = float(np.percentile(np.abs(corr), 95))
+    return out.astype(np.float32), stops
+
+
+def flatten_height(h01: np.ndarray, frac: float = 0.125) -> np.ndarray:
+    """Before tiling: take out the surface's overall tilt toward the camera and its broad bumps, which can never
+    repeat without a step: first the best smooth surface (poly_surface: no edge bias), then lumps larger than
+    ``frac`` of the long edge. The finer relief stays, spread again over 0..1 (0.5 and 99.5 percentiles)."""
+    h = np.asarray(h01, np.float32)
+    d = h - poly_surface(h)
+    d = d - low_pass(d, frac)
+    lo, hi = np.percentile(d, [0.5, 99.5])
+    return np.clip((d - lo) / max(float(hi - lo), 1e-6), 0, 1).astype(np.float32)
+
+
 def pack_orm(ao01: np.ndarray, rough01: np.ndarray | None, rough_const: float = 0.9) -> np.ndarray:
     """ORM (occlusion R, roughness G, metallic B), glTF's and Godot's ORMMaterial3D order."""
     r = np.full(ao01.shape, rough_const, np.float32) if rough01 is None else rough01

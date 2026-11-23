@@ -11,6 +11,7 @@ Made for programs rather than people: the RPG Forge, Claude, and anybody's scrip
     cutout       a subject cut out with a soft edge (RGBA), or its mask alone
     find         what the Studio can find in a picture, as data (faces, people, dust, flare, crops, colour statistics)
     stack        focus | superres | pano: frames in, one linear result out; focus --make surface: the surface
+                 mosaic: hand-held views of a flat surface stitched into game surfaces with their height
                  files for games (colour, height, normal, confidence, agreement, JSON)
     dualpixel    the files a Dual Pixel RAW can make (depth, halves, highlight recovery, 3-D views, a surface)
     schema       every setting, its default and what it does, as JSON (read this first)
@@ -329,6 +330,9 @@ def target(run: Run, a, src: str, spec, extra: str = "", ext: str | None = None)
     the app). Never the picture itself, never over a file the Studio did not write."""
     from .engine.io.export import EXT, export_name, free_target
     of = getattr(a, "out_file", None)
+    if of and not os.path.isabs(of) and not os.path.dirname(of) and getattr(a, "out", None):
+        of = os.path.join(a.out, of)                 # a bare name given with --out goes in --out (2026-11-22: it went
+                                                     # to the current folder, which for the MCP server is system32)
     tag = "".join(c if c.isalnum() or c in "-." else "_" for c in (getattr(a, "tag", None) or "")).strip("_")
     extra = "_".join(x for x in (tag, extra) if x) if not (of and not extra) else extra
     if of and not extra:
@@ -936,7 +940,7 @@ def cmd_cutout(a, run: Run) -> None:
 
 
 # ====================================================================================================== find
-FINDERS = ("size", "info", "stats", "faces", "people", "dust", "flare", "crops", "subject", "red-eyes", "blemishes",
+FINDERS = ("size", "info", "stats", "faces", "people", "bodies", "dust", "flare", "crops", "subject", "red-eyes", "blemishes",
            "hdr", "jpeg", "infrared", "depth")
 
 
@@ -970,6 +974,15 @@ def cmd_find(a, run: Run) -> None:
         if w == "people":
             shp = engine.find_people(img, edit)
             return None if shp is None else {k: v for k, v in shp.items() if a.full or k not in ("data", "hair_maps")}
+        if w == "bodies":
+            from .engine.local import bodies as bd
+            store = engine.find_bodies(img, edit)
+            if store is None:
+                return None
+            _, _, sw, sh = img.raw.crop
+            parts = bd.find_parts(store["people"], bd.decode_mask(store), sw, sh)
+            return {"people": len(store["people"]),
+                    "parts": [{k: v for k, v in q.items()} | {"how": bd.how(q)} for q in parts]}
         if w == "dust":
             return engine.find_dust(img, edit)
         if w == "flare":
@@ -1028,6 +1041,8 @@ def _set_params(p, sets, what: str):
 def cmd_stack(a, run: Run) -> None:
     from .engine.io.export import free_target
     from .engine.stack import frames as FR
+    if a.kind == "mosaic":
+        return cmd_stack_mosaic(a, run)
     files = collect(a.inputs, a.recursive)
     if len(files) < 2:
         raise Usage("stack: give at least two frames (files, or a folder of them)")
@@ -1131,6 +1146,81 @@ def surface_params(a):
     if not 0.05 <= sp.normal_strength <= 20:
         raise Usage("--normal-strength: between 0.05 and 20")
     return sp
+
+
+MOSAIC_CHOICES = {"method": ("auto", "poses", "free"), "surface": ("plane", "curve"),
+                  "resolution": ("game", "fine", "full", "custom"), "scale": ("auto", "ruler", "focus", "relative"),
+                  "seams": ("smart", "straight"), "crop": ("rectangle", "edge"), "tile_method": ("cut", "blend")}
+
+
+def _mosaic_schema() -> dict:
+    from .engine.stack import mosaic as MO
+    from .engine.stack import mosaicbuild as MB
+    from .engine.stack import mosaicio as MI
+    return {"settings": plain(MO.MosaicParams().to_dict()), "choices": {k: list(v) for k, v in MOSAIC_CHOICES.items()},
+            "methods": plain(MO.METHOD_INFO), "surfaces": plain(MO.SURFACE_INFO), "scales": plain(MO.SCALE_INFO),
+            "resolutions": plain(MB.RESOLUTION_INFO), "kinds": plain(MI.KIND_INFO), "shooting_card": MI.SHOOTING_CARD,
+            "what": MI.WHAT, "honest": MI.HONEST}
+
+
+def cmd_stack_mosaic(a, run: Run) -> None:
+    """stack mosaic: files or folders (raw focus stacks, Focus Stack results, Dual Pixel RAWs, photos) of a flat
+    surface shot hand-held -> the game surfaces (BUILD_PLAN_MOSAIC.md)."""
+    from .engine.stack import frames as FR
+    from .engine.stack import mosaic as MO
+    from .engine.stack import mosaicio as MI
+    p = _set_params(MO.MosaicParams(), a.set, "Flat Mosaic")
+    if getattr(a, "ruler", None):
+        p.ruler = a.ruler
+    if getattr(a, "pieces", None):
+        p.pieces = a.pieces
+    tl = getattr(a, "tileable", None)
+    if tl in ("cut", "blend"):
+        p.tileable, p.tile_method = True, tl
+    if getattr(a, "maps", None):
+        p.maps = a.maps
+    if getattr(a, "size", 0):
+        p.size = int(a.size)
+    p.normals_y = getattr(a, "normals_y", p.normals_y) or "up"
+    for k, ok in MOSAIC_CHOICES.items():
+        if getattr(p, k) not in ok:
+            raise Usage(f"mosaic {k}: one of {', '.join(ok)} (got {getattr(p, k)!r})")
+    try:
+        MO.parse_ruler(p.ruler)
+    except ValueError as e:
+        raise Usage(f"mosaic --ruler: {e}")
+    if p.resolution == "custom" and not (float(p.mm_per_px) > 0):
+        raise Usage("mosaic: resolution=custom needs mm_per_px above 0 (--set mm_per_px=0.5)")
+    entries, _ = MI.find_inputs(a.inputs)
+    if len(entries) < 2:
+        raise Usage("stack mosaic: give at least two views (raw focus stacks, Focus Stack results, Dual Pixel RAWs or "
+                    "photos: files, or a folder of them)")
+    last = [""]
+
+    def progress(frac, msg=""):
+        if msg and msg != last[0]:
+            last[0] = msg
+            run.say(f"      {100 * float(frac):3.0f}%  {msg}")
+    first = entries[0]["paths"][0]
+    out_dir = out_dir_of(a) if a.out else FR.default_out_dir(first)[0]
+    _background(a)
+    try:
+        r = MI.run(a.inputs, out_dir, None, p, progress, None, run.taken)
+    except MO.MosaicProblem as e:
+        raise Usage(f"stack mosaic: {e}")
+    doc = r["json"]
+    info = {"kind": "mosaic", "views": r["views"], "placed": r["placed"],
+            "mm_per_px": doc["lateral"]["mm_per_pixel"], "repeat_m": doc.get("repeat_m")}
+    paths = dict(r["paths"])
+    pieces = paths.pop("pieces", [])
+    extra = {k: paths.pop(k) for k in ("misfit", "coverage") if k in paths}
+    surface_outputs(run, first, {"paths": paths, "json": doc}, info)
+    for k, path in extra.items():
+        run.output(input=first, output=path, kind=f"mosaic_{k}", measured=True)
+    for path in pieces:
+        run.output(input=first, output=path, kind="mosaic_piece", measured=not path.endswith("_colour_Studio.png"))
+    for t in r.get("coach", []):
+        run.note(t)
 
 
 def surface_outputs(run: Run, src: str, r: dict, info: dict | None = None) -> None:
@@ -1641,7 +1731,7 @@ def schema() -> dict:
             "demosaic": ["rcd", "menon", "lmmse", "dual", "mhc", "bilinear", "half"],
             "highlight_mode": ["clip", "rebuild", "glow", "none"],
             "white_balance.mode": ["as_shot", "daylight", "temp_tint", "multipliers"],
-            "tone.mode": ["standard", "camera_match", "linear"],
+            "tone.mode": ["standard", "camera_match", "linear", "lightroom"],
             "denoise.method": ["hybrid", "fusion", "starlet", "nlm", "mppca", "collab", "learned"],
             "hdr.strength": list(hdr.STRENGTHS), "hdr.engine": list(hdr.ENGINES),
             "detail": {k: {"lo": v["lo"], "hi": v["hi"], "does": v.get("does", "")} for k, v in scales.METHODS.items()},
@@ -1686,6 +1776,7 @@ def schema() -> dict:
                          "merges": plain(superres.MERGE_INFO)},
             "pano": {"settings": plain(dataclasses.asdict(pano.PanoParams())),
                      "projections": list(project.PROJECTIONS), "methods": plain(pano.METHOD_INFO)},
+            "mosaic": _mosaic_schema(),
         },
         "export": {"format": list(FORMATS), "space": ["adobergb", "srgb", "prophoto", "displayp3"], "bits": [8, 16],
                    "sharpen_for": list(OUTPUT_SHARPEN), "compression": ["none", "zip"],
@@ -1737,6 +1828,16 @@ def cmd_looks(a, run: Run) -> None:
 
 
 # ====================================================================================================== batch
+def cmd_queue(a, run: Run) -> None:
+    """The job queue (jobqueue.py): ``queue add stack focus ... --make surface`` returns at once; the job runs in a
+    worker of its own until done. ``queue status [ID]``, ``queue start``, ``queue cancel ID|all``."""
+    from . import jobqueue
+    try:
+        run.res["data"] = plain(jobqueue.command(a.action, a.rest), True)
+    except ValueError as e:
+        raise Usage(str(e)) from None
+
+
 def cmd_batch(a, run: Run) -> None:
     """Many commands in one run: the Studio starts once, so a queue of small jobs costs no start-up each. The jobs
     file is a JSON list; each job is a list of arguments (["edit", "a.png", "--set", "exposure_ev=0.3"]), one
@@ -1803,7 +1904,8 @@ HELP = {
     "cutout": "cut a subject out with a soft edge (RGBA), or write its mask",
     "find": "what the Studio finds in a picture, as data",
     "stack": "focus | superres | pano: frames in, one linear result out; focus --make surface: colour, height, "
-             "normal, confidence and agreement maps for games",
+             "normal, confidence and agreement maps for games; mosaic: hand-held views of a flat surface (a road, a "
+             "floor, a wall) stitched into game surfaces with their measured height",
     "dualpixel": "what a Dual Pixel RAW can make: depth, halves, highlight recovery, 3-D views, a surface for games; "
                  "near-check: which way is near for this camera, voted from receding scenes",
     "stacks": "the focus stacks in a folder or on a card (data), or every stack through jobs (--run surface,depth): "
@@ -1821,8 +1923,9 @@ HELP = {
     "schema": "every setting, default, choice and command, as JSON (read this first)",
     "looks": "the looks on this PC",
     "batch": "run many of these commands from a jobs file, in one start",
+    "queue": "the job queue for long work: add a command line (it runs on its own, one job after another, until done), start held jobs, status, cancel",
 }
-DATA_COMMANDS = ("schema", "looks", "find", "look-profile")
+DATA_COMMANDS = ("schema", "looks", "find", "look-profile", "queue")
 
 
 def _edit_cmd(name):
@@ -1836,6 +1939,7 @@ HANDLERS = {
     "match": _edit_cmd("match"), "look-profile": cmd_look_profile, "depth": cmd_depth, "cutout": cmd_cutout,
     "find": cmd_find, "stack": cmd_stack, "dualpixel": cmd_dualpixel, "schema": cmd_schema, "looks": cmd_looks,
     "batch": cmd_batch, "stacks": cmd_stacks, "foliage": cmd_foliage, "blender": cmd_blender, "model": cmd_model, "intake": cmd_intake,
+    "queue": cmd_queue,
 }
 COMMANDS = tuple(HANDLERS)
 
@@ -2026,7 +2130,7 @@ def add_parsers(sub) -> None:
     p.add_argument("--full", action="store_true", help="include bulky data (bitmaps, every face point)")
 
     p = sub.add_parser("stack", parents=[common], help=HELP["stack"])
-    p.add_argument("kind", choices=["focus", "superres", "pano"])
+    p.add_argument("kind", choices=["focus", "superres", "pano", "mosaic"])
     p.add_argument("inputs", nargs="+")
     p.add_argument("--recursive", action="store_true")
     p.add_argument("--out", default=None, metavar="FOLDER", help="default: beside the first frame")
@@ -2034,6 +2138,10 @@ def add_parsers(sub) -> None:
                    help="a setting of that tool ('schema' lists them under stack)")
     p.add_argument("--mode", default="handheld", help="superres: handheld, clean, moon or sky")
     p.add_argument("--factor", type=float, default=1.0, help="pano: build smaller (0.25 = quarter size)")
+    p.add_argument("--ruler", default=None, metavar="VIEW:U1,V1,U2,V2,MM", help="mosaic: two points of a ruler in "
+                   "one view (0..1 of that view's picture) and their distance in mm: the size becomes exact")
+    p.add_argument("--pieces", default=None, metavar="X0,Y0,X1,Y1;...", help="mosaic: boxes (0..1 of the result) "
+                   "cut out with all their maps as decals")
     p.add_argument("--make", default="merge", help="focus: comma list of merge (the linear result), depth (height, "
                    "confidence, agreement + JSON: fast) and surface (colour, height, normal, confidence, agreement "
                    "+ JSON, for games); default merge")
@@ -2126,6 +2234,12 @@ def add_parsers(sub) -> None:
     p = sub.add_parser("schema", parents=[common], help=HELP["schema"])
     p.add_argument("setting", nargs="?", default=None, help="one setting or group, e.g. light or light.shadows")
     sub.add_parser("looks", parents=[common], help=HELP["looks"])
+    p = sub.add_parser("queue", parents=[common], help=HELP["queue"])
+    p.add_argument("action", choices=("add", "start", "status", "list", "cancel"), help="add a job, start held jobs, "
+                   "status (all, or one job by id), cancel (a job id, or all)")
+    p.add_argument("rest", nargs=argparse.REMAINDER, help="add: [--hold] then the command line of the job (e.g. stack "
+                   "focus a.CR3 b.CR3 --make surface); status/cancel: a job id; start: job ids (default all held)")
+
     p = sub.add_parser("batch", parents=[common], help=HELP["batch"])
     p.add_argument("jobs", help="a JSON file of jobs ('-' reads standard input)")
     p.add_argument("--stop-on-error", action="store_true")

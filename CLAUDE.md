@@ -40,6 +40,12 @@ Read these before changing anything in this folder:
   comes first** (sources and questions per brand, producing `docs/RAW_FEATURES.md`), then the build (maker-note
   readers, focus distance, focus brackets, pixel shift, PDAF pixels, embedded lens corrections, level and AF point).
   Every brand claim in it is unverified until R checks it.
+- `BUILD_PLAN_MOSAIC.md`: Flat Mosaic (Bill, 2026-11-23): hand-held frames over a flat or gently curved surface
+  (pavement, walls, floors) stitched exactly through plane poses, with differences in camera height part of the model,
+  Dual Pixel height orthorectified into a height mosaic, scale from focus distance (amber) or a ruler (cyan), and game
+  surfaces out through `surface.py` with a measured `repeat_m`. **M0-M6 built (2026-11-23)**: `engine/stack/mosaic.py`,
+  `mosaicbuild.py`, `mosaicio.py`, the Panorama page's Kind switch, `stack mosaic`; its Status section says what is
+  next (M7: Bill's real pavement set).
 - `docs/PROGRESS.md`: where things stand. Keep it current.
 - `docs/CLI.md`: the Studio from the command line for other programs (the RPG Forge, Claude): `studio/cli_tools.py`,
   `studio-cli.bat`. A new tool gets its command there, with a test in `tests/test_cli_tools.py`. The MCP server

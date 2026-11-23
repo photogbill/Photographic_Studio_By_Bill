@@ -1,0 +1,18 @@
+{
+  "id": "20261121-235717-a0ae0c",
+  "title": "Blender scene: cracked asphalt",
+  "argv": [
+    "blender",
+    "D:\\dual pixel raw test\\Studio surfaces\\asphalt_cracked\\3C9A3277_to_3C9A3282_surface_Studio.json"
+  ],
+  "state": "done",
+  "added": "2026-11-21 23:57:17",
+  "seq": 1795323437.2127442,
+  "started": "2026-11-21 23:57:20",
+  "pid": 161396,
+  "finished": "2026-11-21 23:58:21",
+  "seconds": 61.7,
+  "exit": 0,
+  "ok": true,
+  "outputs": 1
+}

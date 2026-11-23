@@ -10,7 +10,8 @@ by matching distinctive points first:
 * **Descriptors**: MOPS: 8 x 8 samples spaced 5 px from the image blurred at sigma 2.5, bias and gain normalised (zero
   mean, unit variance). Upright by default (a panorama turns the camera, it rarely rolls it much); oriented at the
   point's smoothed gradient angle when asked (a roll of more than ~15 degrees between frames).
-* **Matching**: a k-d tree (scipy.spatial.cKDTree), Lowe's ratio test (0.8) and mutual best matches only.
+* **Matching**: exact nearest neighbours by matrix products (the same answer as a k-d tree, several times faster
+  in 64 dimensions), Lowe's ratio test (0.8) and mutual best matches only.
 * **RANSAC**: 4-point homographies (normalised DLT, Hartley), all hypotheses solved at once; the best is re-fitted to
   its inliers. A pair is accepted when inliers > 8 + 0.3 * matches (Brown and Lowe, IJCV 2007, the probabilistic
   check of "Automatic panoramic image stitching using invariant features").
@@ -19,7 +20,6 @@ from __future__ import annotations
 
 import numpy as np
 from scipy.ndimage import gaussian_filter, map_coordinates, maximum_filter
-from scipy.spatial import cKDTree
 
 from ... import log as slog
 
@@ -117,6 +117,32 @@ def describe(img: np.ndarray, pts: np.ndarray, oriented: bool = False) -> tuple:
     return d.astype(np.float32), ang.astype(np.float32)
 
 
+def _two_nearest(q: np.ndarray, ref: np.ndarray, rows: int = 1024) -> tuple:
+    """Exact two nearest neighbours of every row of ``q`` among the rows of ``ref`` (Euclidean): (distances (N, 2),
+    indices (N, 2)). Brute force by matrix products: in 64 dimensions a k-d tree visits nearly every point anyway,
+    and the products are many times faster (the same answer as cKDTree.query(k=2))."""
+    q = np.asarray(q, np.float32)
+    ref = np.asarray(ref, np.float32)
+    rn = (ref * ref).sum(1)
+    dd = np.empty((len(q), 2), np.float64)
+    jj = np.empty((len(q), 2), np.int64)
+    for r0 in range(0, len(q), rows):
+        a = q[r0:r0 + rows]
+        d2 = (a * a).sum(1)[:, None] + rn[None, :] - 2.0 * (a @ ref.T)
+        np.maximum(d2, 0.0, out=d2)
+        if d2.shape[1] >= 2:
+            part = np.argpartition(d2, 1, axis=1)[:, :2]
+        else:
+            part = np.zeros((len(a), 2), np.int64)
+        v = np.take_along_axis(d2, part, 1)
+        o = np.argsort(v, axis=1)
+        part = np.take_along_axis(part, o, 1)
+        v = np.take_along_axis(v, o, 1)
+        dd[r0:r0 + rows] = np.sqrt(v)
+        jj[r0:r0 + rows] = part
+    return dd, jj
+
+
 def match(d1: np.ndarray, d2: np.ndarray, ratio: float = 0.8) -> np.ndarray:
     """(M x 2) index pairs (i in d1, j in d2): ratio test both ways and mutual best."""
     ok1 = ~np.isnan(d1).any(axis=1)
@@ -124,12 +150,10 @@ def match(d1: np.ndarray, d2: np.ndarray, ratio: float = 0.8) -> np.ndarray:
     i1, i2 = np.nonzero(ok1)[0], np.nonzero(ok2)[0]
     if len(i1) < 2 or len(i2) < 2:
         return np.zeros((0, 2), np.int64)
-    t2 = cKDTree(d2[i2])
-    t1 = cKDTree(d1[i1])
-    dd, jj = t2.query(d1[i1], k=2)
+    dd, jj = _two_nearest(d1[i1], d2[i2])
     good12 = dd[:, 0] < ratio * dd[:, 1]
     best12 = i2[jj[:, 0]]
-    dd2, ii = t1.query(d2[i2], k=2)
+    dd2, ii = _two_nearest(d2[i2], d1[i1])
     best21 = np.full(len(d2), -1)
     best21[i2] = np.where(dd2[:, 0] < ratio * dd2[:, 1], i1[ii[:, 0]], -1)
     a = i1[good12]

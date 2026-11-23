@@ -400,6 +400,12 @@ warp on the existing machinery (capped, exactly inverted, pixels sampled once). 
   - *Guards:* B.7; a warning where a warp crosses a pattern (stripes, knit, lettering: found as strong regular
     texture); hands and faces are never moved by a body tool.
   - The ovals stay, as the manual fallback and for old edits.
+- **H.3 status (session 19, 2026-11-23):** built in `engine/local/bodies.py` + `portrait.py` (`outline`, `stretch`) + the
+  Body sculpting panel (Find bodies, Pick a part, Both sides, Longer legs, drag along a limb). Differs from the text
+  above: facing or side-on is read from the points' 2D layout (shoulder width against torso length), because the
+  stored points carry no depth; Chest and Seat place the existing lift ovals (amber) rather than a new lift. Not yet:
+  Height, Shoulders as a "broader" preset (Slim -100 does it), the pattern warning, handles on the outline, B.7 for the
+  ovals. Finished only when Bill says the finding and the selecting work on his photos.
 - **H.4 Recipes across a shoot.** Because shape changes are stored relative to the mesh and the body points,
   "Apply to the other frames of this person" works. The Studio suggests frames in the same folder that look like
   the same sitter (mesh proportions, clothing colour, time); the person confirms. With B.4 this makes shape work

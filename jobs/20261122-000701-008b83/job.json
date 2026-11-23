@@ -1,0 +1,32 @@
+{
+  "id": "20261122-000701-008b83",
+  "title": "Brick wall again (flattened before tiling)",
+  "argv": [
+    "stack",
+    "focus",
+    "D:\\dual pixel raw test\\3C9A3253.CR3",
+    "D:\\dual pixel raw test\\3C9A3254.CR3",
+    "D:\\dual pixel raw test\\3C9A3255.CR3",
+    "D:\\dual pixel raw test\\3C9A3256.CR3",
+    "D:\\dual pixel raw test\\3C9A3257.CR3",
+    "D:\\dual pixel raw test\\3C9A3258.CR3",
+    "D:\\dual pixel raw test\\3C9A3259.CR3",
+    "D:\\dual pixel raw test\\3C9A3260.CR3",
+    "--out=D:\\dual pixel raw test\\Studio surfaces\\brick_wall",
+    "--make=surface",
+    "--tileable=cut",
+    "--maps=all",
+    "--size=2048",
+    "--background"
+  ],
+  "state": "done",
+  "added": "2026-11-22 00:07:01",
+  "seq": 1795324021.1023386,
+  "started": "2026-11-22 00:07:01",
+  "pid": 170568,
+  "finished": "2026-11-22 00:08:24",
+  "seconds": 82.6,
+  "exit": 0,
+  "ok": true,
+  "outputs": 13
+}

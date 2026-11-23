@@ -1,0 +1,30 @@
+{
+  "id": "20261122-000343-80149d",
+  "title": "Cracked asphalt again (flattened before tiling)",
+  "argv": [
+    "stack",
+    "focus",
+    "D:\\dual pixel raw test\\3C9A3277.CR3",
+    "D:\\dual pixel raw test\\3C9A3278.CR3",
+    "D:\\dual pixel raw test\\3C9A3279.CR3",
+    "D:\\dual pixel raw test\\3C9A3280.CR3",
+    "D:\\dual pixel raw test\\3C9A3281.CR3",
+    "D:\\dual pixel raw test\\3C9A3282.CR3",
+    "--out=D:\\dual pixel raw test\\Studio surfaces\\asphalt_cracked",
+    "--make=surface",
+    "--tileable=cut",
+    "--maps=all",
+    "--size=2048",
+    "--background"
+  ],
+  "state": "done",
+  "added": "2026-11-22 00:03:43",
+  "seq": 1795323823.771085,
+  "started": "2026-11-22 00:03:45",
+  "pid": 178304,
+  "finished": "2026-11-22 00:05:15",
+  "seconds": 89.5,
+  "exit": 0,
+  "ok": true,
+  "outputs": 13
+}

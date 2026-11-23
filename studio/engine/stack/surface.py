@@ -62,6 +62,8 @@ class SurfaceParams:
     tileable: bool = False          # offset by half and heal the seams of every file the same way (a texture that
                                     # repeats without a visible join)
     swap: bool = False              # one Dual Pixel photo: near and far the other way round
+    tile_flatten: bool = True       # tileable: first take out the large-scale light falloff (vignetting) of the colour
+                                    # and the overall tilt of the height, so the copies meet without a step
     tile_method: str = "cut"        # tileable: cut (a minimum-error cut through each seam band: structured
                                     # textures such as brick) | blend (the copies blended: even, random textures)
     size: int = 0                   # game size: 0 = as shot; 1024 / 2048 / 4096 = the measured area's best square,
@@ -318,12 +320,52 @@ def targets(out_dir: str, base: str, kinds=KINDS, taken: set | None = None) -> d
     return paths
 
 
+def _lateral(p: SurfaceParams, model: str, meta: dict, col, W: int, H: int, notes: list) -> tuple:
+    """(mm per pixel or None, how, scale info, magnification, pixel mm): from the magnification, a coin or two
+    clicked points, or the lens's focus distance."""
+    from . import maps as MP
+    mag = parse_ratio(p.ratio)
+    pmm = pixel_mm(model)
+    mm_px = (pmm / mag) if (mag and pmm) else None
+    lateral_how = (f"magnification {p.ratio} and the {model}'s {1000 * pmm:.2f} micrometre pixels" if mm_px else
+                   ("magnification given, but this camera's pixel size is not in the Studio's table" if mag else
+                    "not known (give --ratio, e.g. 1:2)"))
+    scale_info = {"lateral_from": "ratio" if mm_px else None}
+    if p.scale:
+        sc = _scale_from_setting(p.scale, col, W, H)
+        if sc is not None:
+            mm_px = sc["mm_per_px"]
+            lateral_how = sc["how"]
+            scale_info = dict(sc, lateral_from=sc["kind"])
+        else:
+            notes.append("No coin was found in the picture: the size stays as it was (relative unless --ratio).")
+    if mm_px is None and meta.get("focus_distance_m") and meta.get("focal_mm") and pmm:
+        # Bill (2026-11-21): scale from how far away the lens says it is focused and how much the lens sees edge to
+        # edge at that distance (no coin): the view across the frame = sensor width / magnification
+        mg = MP.magnification_from_distance(float(meta["focal_mm"]), float(meta["focus_distance_m"]))
+        if mg:
+            mm_px = pmm / mg
+            view = MP.view_edge_to_edge(pmm, mg, W, H)
+            lateral_how = (f"the focus distance the lens recorded ({float(meta['focus_distance_m']):.2f} m) and its "
+                           f"{float(meta['focal_mm']):g} mm view at that distance: about {view[0]:.0f} x {view[1]:.0f} "
+                           f"mm edge to edge (the lens's distance is coarse: amber)")
+            scale_info = {"lateral_from": "focus distance and the lens's view (recorded by the lens: coarse)",
+                          "magnification": mg, "view_mm": [round(view[0], 1), round(view[1], 1)],
+                          "colour": "amber"}
+    return mm_px, lateral_how, scale_info, mag, pmm
+
+
 def write(out_dir: str, base: str, res: DF.DepthResult, shape, flip: int, meta: dict, source: dict,
           p: SurfaceParams, colour: np.ndarray | None = None, kinds=KINDS, taken: set | None = None,
-          near_known: str | None = None) -> dict:
+          near_known: str | None = None, lateral: dict | None = None, height_unit_mm: float | None = None,
+          height_how: str | None = None, extra: dict | None = None) -> dict:
     """Write the surface files and the JSON. ``colour``: uint8 sRGB (H, W, 3), upright, full size (None for --make
     depth). ``shape``: the full-size (h, w) of the depth's frame before turning upright. Returns {"paths": {kind:
-    path}, "json": the JSON as written}."""
+    path}, "json": the JSON as written}.
+
+    For a result that knows its own size (the Flat Mosaic): ``lateral`` {"mm_per_px", "how", "info"} replaces the
+    ratio / coin / focus-distance scale; ``height_unit_mm`` is millimetres per depth unit (the height in mm) with
+    ``height_how`` saying how it was known; ``extra`` is merged into the JSON."""
     from ..color import icc
     from ..io.export import write_png_any
     from . import maps as MP
@@ -369,35 +411,12 @@ def write(out_dir: str, base: str, res: DF.DepthResult, shape, flip: int, meta: 
             gaps01 = np.zeros((H, W), np.float32)
 
     # scale (before any crop: the coin is looked for in the whole picture)
-    mag = parse_ratio(p.ratio)
-    pmm = pixel_mm(model)
-    mm_px = (pmm / mag) if (mag and pmm) else None
-    lateral_how = (f"magnification {p.ratio} and the {model}'s {1000 * pmm:.2f} micrometre pixels" if mm_px else
-                   ("magnification given, but this camera's pixel size is not in the Studio's table" if mag else
-                    "not known (give --ratio, e.g. 1:2)"))
-    scale_info = {"lateral_from": "ratio" if mm_px else None}
-    if p.scale:
-        sc = _scale_from_setting(p.scale, col, W, H)
-        if sc is not None:
-            mm_px = sc["mm_per_px"]
-            lateral_how = sc["how"]
-            scale_info = dict(sc, lateral_from=sc["kind"])
-        else:
-            notes.append("No coin was found in the picture: the size stays as it was (relative unless --ratio).")
-    if mm_px is None and meta.get("focus_distance_m") and meta.get("focal_mm") and pmm:
-        # Bill (2026-11-21): scale from how far away the lens says it is focused and how much the lens sees edge to
-        # edge at that distance (no coin): the view across the frame = sensor width / magnification
-        mg = MP.magnification_from_distance(float(meta["focal_mm"]), float(meta["focus_distance_m"]))
-        if mg:
-            mm_px = pmm / mg
-            view = MP.view_edge_to_edge(pmm, mg, W, H)
-            lateral_how = (f"the focus distance the lens recorded ({float(meta['focus_distance_m']):.2f} m) and its "
-                           f"{float(meta['focal_mm']):g} mm view at that distance: about {view[0]:.0f} x {view[1]:.0f} "
-                           f"mm edge to edge (the lens's distance is coarse: amber)")
-            scale_info = {"lateral_from": "focus distance and the lens's view (recorded by the lens: coarse)",
-                          "magnification": mg, "view_mm": [round(view[0], 1), round(view[1], 1)],
-                          "colour": "amber"}
-
+    if lateral is not None:
+        mm_px = lateral.get("mm_per_px")
+        lateral_how = lateral.get("how", "")
+        scale_info = dict(lateral.get("info") or {}, lateral_from=lateral.get("from", "the result itself"))
+    else:
+        mm_px, lateral_how, scale_info, _, _ = _lateral(p, model, meta, col, W, H, notes)
     # game size: the measured area's best square, every map cut and resized the same way
     crop = None
     if p.size:
@@ -417,9 +436,13 @@ def write(out_dir: str, base: str, res: DF.DepthResult, shape, flip: int, meta: 
     unit = {"steps": "focus steps (the typical step between neighbouring frames)",
             "frames": "frames (focus steps, taken as even: without Dual Pixel an uneven hand-held step cannot be seen)",
             "dual pixel px": "pixels of Dual Pixel offset",
-            "estimated": "relative (estimated from the picture, not measured)"}[res.units]
+            "estimated": "relative (estimated from the picture, not measured)"}.get(res.units, res.units)
     h_mm = steps * float(p.step_mm) if (p.step_mm and res.units in ("steps", "frames")) else None
-    if h_mm is not None:
+    if height_unit_mm:                               # the result knows its height in mm (the Flat Mosaic)
+        h_mm = steps * float(height_unit_mm)
+    if height_how:
+        pass                                         # the result says how its height is known
+    elif h_mm is not None:
         height_how = f"you gave the focus step: {p.step_mm:g} mm per step"
     elif res.units == "dual pixel px":
         height_how = "relative: one Dual Pixel photo gives offsets, not distances"
@@ -430,8 +453,20 @@ def write(out_dir: str, base: str, res: DF.DepthResult, shape, flip: int, meta: 
         height_how = ("relative: the distance the focus moved between frames is not known (give --step-mm for a "
                       "rail, or calibrate the Dual Pixel scale once with a coin in the frame)")
 
-    # tileable: one geometry for every map
+    # tileable: first the large scale out (it can never repeat: a vignetted corner or a tilted surface steps at
+    # every seam), then one geometry for every map
     tiled = None
+    flat_doc = None
+    if p.tileable and p.tile_flatten:
+        flat_doc = {"scale": "1/8 of the edge", "height": "overall tilt and broad bumps taken out; finer relief kept"}
+        h01 = MP.flatten_height(h01)
+        if col is not None:
+            col, stops = MP.flatten_colour(col)
+            flat_doc["colour"] = (f"large-scale brightness evened out (vignetting, light falloff): up to "
+                                  f"{stops:.2f} stops corrected")
+        notes.append("Tileable: the large-scale light falloff of the colour and the overall tilt of the height were "
+                     "taken out before the seams were healed, so the texture repeats without steps (the height is "
+                     "relief only; the slope of the ground as shot is not in it).")
     if p.tileable:
         if p.tile_method == "blend":
             w = tile_weights(H, W)
@@ -585,7 +620,8 @@ def write(out_dir: str, base: str, res: DF.DepthResult, shape, flip: int, meta: 
         "maps": maps_doc,
         "scale": scale_info,
         "tiling": ({"method": tiled[0], "about": "cut: a minimum-error cut through each seam band, the same for every "
-                    "map (structured textures); blend: the copies blended (even, random textures)"}
+                    "map (structured textures); blend: the copies blended (even, random textures)",
+                    "flattened": flat_doc}
                    if tiled else None),
         "game_size": ({"size": int(p.size), "crop": {"y": crop[0], "x": crop[1], "side": crop[2]},
                        "about": "the measured area's best square, resized"} if crop else None),
@@ -593,7 +629,11 @@ def write(out_dir: str, base: str, res: DF.DepthResult, shape, flip: int, meta: 
         "light": ({k_: (round(v, 4) if isinstance(v, float) else v) for k_, v in light.items()}
                   if light else None),
         "godot": godot_notes(kinds, p, mm_px, h_mm),
+        # the size one copy of the texture covers on the ground, so the game sets its tiling from a measurement
+        "repeat_m": ([round(W * mm_px / 1000.0, 4), round(H * mm_px / 1000.0, 4)] if mm_px else None),
     }
+    if extra:
+        doc.update(extra)
     if "json" in paths:
         tmp = paths["json"] + ".partial"
         with open(tmp, "w", encoding="utf-8") as fh:
