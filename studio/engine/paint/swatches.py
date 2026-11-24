@@ -148,7 +148,23 @@ def from_painting(doc: Document, count: int = 8, samples: int = 40000, seed: int
     a = px[..., 3:4]
     rgb = np.where(a > 0, px[..., :3] / np.maximum(a, 1e-8), 0).reshape(-1, 3)
     keep = a.reshape(-1) > 0.5
-    rgb = rgb[keep]
+    return from_pixels(rgb[keep], count, samples, seed, "From the painting",
+                       "The painting's main colour masses, dark to light.")
+
+
+def from_image(path: str, count: int = 8, seed: int = 0) -> SwatchSet:
+    """A palette from a photo or reference picture (its main colour masses, dark to light)."""
+    from PIL import Image
+    im = Image.open(path).convert("RGB")
+    im.thumbnail((512, 512))
+    rgb = np.asarray(im, np.float32).reshape(-1, 3) / 255.0
+    return from_pixels(rgb, count, 40000, seed, "From " + Path(path).stem,
+                       "The main colour masses of " + Path(path).name + ", dark to light.")
+
+
+def from_pixels(rgb, count=8, samples=40000, seed=0, name="Palette", note=""):
+    """k-means in Oklab over straight sRGB pixels (N, 3)."""
+    rgb = np.asarray(rgb, np.float32).reshape(-1, 3)
     rng = np.random.default_rng(seed)
     if len(rgb) > samples:
         rgb = rgb[rng.choice(len(rgb), samples, replace=False)]
@@ -170,7 +186,7 @@ def from_painting(doc: Document, count: int = 8, samples: int = 40000, seed: int
             break
         cent = new
     cent = cent[np.argsort(cent[:, 0])]
-    sw = SwatchSet("From the painting", note="The painting's main colour masses, dark to light.")
+    sw = SwatchSet(name, note=note)
     for c in cent:
         rgb_c = oklab_to_srgb(c.astype(np.float32))
         sw.add(rgb_c, to_hex(rgb_c))

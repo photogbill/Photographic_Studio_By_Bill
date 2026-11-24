@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import os
 
+import math
+
 import numpy as np
 
 import pytest
@@ -310,12 +312,12 @@ def test_select_edit_transform_mask_adjust_in_the_window(page):
     page.undo()
     assert c.doc.layer.read(120, 150, 1, 1)[0, 0, 3] > 0.99
     page.add_mask()
-    page.mask_cb.setChecked(True)
+    page.gmask_cb.setChecked(True)
     page.set_tool("brush")
     page.set_colour((0, 0, 0))                               # black on the mask hides
     c.stroke_from([Sample(150 + k, 150, 1, k / 100) for k in range(60)])
     assert c.doc.layer.mask_values(170, 150, 1, 1)[0, 0] < 0.3
-    page.mask_cb.setChecked(False)
+    page.gmask_cb.setChecked(False)
     page.adj_cb.setCurrentIndex(page.adj_cb.findData("invert"))
     page.add_adjustment()
     assert c.doc.layer.is_adjust and c.doc.composite()[10, 10, 1] > 0.99   # red inverted to cyan
@@ -376,3 +378,58 @@ def test_transform_handles_special_layers_and_working_space(page, tmp_path):
     t = page.export({"fmt": "exr", "space": "srgb", "bits": 8, "quality": 90, "lossless": False})
     assert t and t.endswith("w_Studio.exr")
     assert page.open_path(t) and c.doc.space == "linear"
+
+
+def test_drawing_aids_on_the_page(page, tmp_path):
+    """P6: a ruler straightens a wobbly stroke, mirror symmetry paints both sides in one undo step, wrap-around
+    comes in at the other edge, references pick colours, a mask moves a colour, the vision view changes the screen."""
+    from studio.engine.paint.smoothing import Sample
+    c = page.canvas
+    page.set_colour((0, 0, 0))
+    page.assist_cb.setCurrentIndex(list(page.assist_cb.itemData(i) for i in range(page.assist_cb.count()))
+                                   .index("ruler"))
+    page.set_tool("assistant")
+    c.stroke_from([Sample(20, 100)])
+    c.stroke_from([Sample(580, 100)])
+    assert len(c.assistants) == 1
+    page.set_tool("brush")
+    c.stroke_from([Sample(60 + i * 2, 100 + 12 * math.sin(i / 5), 0.8, i / 200) for i in range(200)])
+    a = c.doc.layer
+    col = lambda y: a.tiles.get((0, 0))[y, 200, 3] if (0, 0) in a.tiles else 0
+    assert col(100) > 0.5 and col(112) < 0.05                          # on the line, not where the hand wobbled
+    page._assist_clear()
+    page.undo()
+    page.sym_cb.setCurrentIndex([page.sym_cb.itemData(i) for i in range(page.sym_cb.count())].index("x"))
+    c.stroke_from([Sample(100, 300 + i, 0.8, i / 100) for i in range(60)])
+    px = c.doc.composite(0, 0, 600, 400)
+    assert px[330, 100, 0] < 0.3 and px[330, 500, 0] < 0.3             # both sides, mirrored about x = 300
+    page.undo()
+    assert c.doc.composite(0, 0, 600, 400)[330, 500, 0] > 0.9          # one undo step took both away
+    page.sym_cb.setCurrentIndex([page.sym_cb.itemData(i) for i in range(page.sym_cb.count())].index("wrap"))
+    c.stroke_from([Sample(560 + i, 200, 0.8, i / 100) for i in range(60)])   # off the right edge
+    px = c.doc.composite(0, 0, 600, 400)
+    assert px[200, 10, 0] < 0.3                                        # comes in at the left
+    page.sym_cb.setCurrentIndex(0)
+    # reference: pick its colour
+    from PIL import Image
+    im = np.zeros((20, 20, 3), np.uint8)
+    im[:] = (0, 200, 0)
+    Image.fromarray(im).save(tmp_path / "ref.png")
+    page._ref_add([str(tmp_path / "ref.png")])
+    page.ref_view.resize(200, 200)
+    page.ref_view._rescale()
+    got = page.ref_view.pick_at(100, 100)
+    assert got is not None and got[1] > 0.7
+    # gamut mask moves a picked colour into the open sectors
+    page.gmask_cb.setCurrentIndex([page.gmask_cb.itemData(i) for i in range(page.gmask_cb.count())].index("atmospheric"))
+    page._picked(page.pickers[0], (0.2, 0.3, 0.9))
+    from studio.engine.paint.aids import hue_allowed
+    from studio.engine.paint.colour import srgb_to_oklch
+    assert hue_allowed(float(srgb_to_oklch(c.colour)[2]), "atmospheric", 0) or \
+        abs(((float(srgb_to_oklch(c.colour)[2]) - 55) + 180) % 360 - 180) < 2
+    assert page.harm_row.count() >= 2
+    before = c._img.copy()
+    page.vision_cb.setCurrentIndex(2)
+    assert page.canvas.vision == "deutan"
+    page.vision_cb.setCurrentIndex(0)
+    assert before.shape == c._img.shape

@@ -21,6 +21,9 @@ the plan's Status ("Still to build"): P5 colour, P6, P7, P8, P9, P10 and the lis
 Then (11:39): P4 finished (on-canvas transform handles, perspective / warp / mesh / cage, filter / fill / file
 layers, the Studio's Natural curve and Clean, subject select by SAM) and P5 built (working colour spaces, linear HDR
 canvas, soft proof on any screen, EXR, PSD profiles / ZIP / .psb); 64 quick tests pass. Next: P6.
+Then (12:20): P6 built (assistants with snapping, symmetry and seamless tiles, grid and guides, reference pictures,
+harmonies, gamut masks, palette from a photo, colour-blindness preview: `engine/paint/aids.py`, the Aids and
+Reference tabs); the new quick tests pass. Next: P10.
 
 ## Paint, P0 and most of P1 (2026-11-23 night, chat session with Bill)
 

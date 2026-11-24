@@ -1,6 +1,8 @@
 """Paint's engine on synthetic strokes with known truth (BUILD_PLAN_PAINT P0/P1). Quick tests only."""
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
 
@@ -1308,3 +1310,69 @@ def test_working_spaces_hdr_exr_and_psd_profiles(tmp_path):
     blob = struct.pack(">H", 3) + zlib.compress(delta.tobytes())
     ch = _channel(_R(blob), 2, 3, 8, len(blob))
     assert np.allclose(ch * 255, rows)
+
+
+# ---------------------------------------------------------------- P6: drawing aids
+def test_aids_assistants_snap():
+    from studio.engine.paint import aids
+    g = aids.Guide([aids.Assistant("ruler", [(0, 50), (100, 50)])])
+    pts = [g(x, 50 + (3 if x % 2 else -3)) for x in range(0, 60, 2)]
+    assert all(abs(y - 50) < 1e-6 for _, y in pts[5:])                 # held on the line once decided
+    # perspective with two points: a stroke heading to the right VP stays on the line to it
+    g = aids.Guide([aids.Assistant("perspective", [(-1000, 100), (1000, 100)])])
+    for i in range(40):
+        x, y = g(100 + i * 2, 300 - i * 0.4 + (1 if i % 2 else -1))
+    vx, vy = 1000, 100
+    cross = (x - 100) * (vy - 299) - (y - 299) * (vx - 100)          # the stroke starts at (100, 299)
+    assert abs(cross) / math.hypot(vx - 100, vy - 299) < 1e-6
+    # uprights stay upright
+    g = aids.Guide([aids.Assistant("perspective", [(-1000, 100), (1000, 100)])])
+    for i in range(30):
+        x, y = g(200 + (1 if i % 2 else 0), 300 + i * 2)
+    assert abs(x - 200) < 1e-6
+    # concentric: keeps the radius it starts at
+    g = aids.Guide([aids.Assistant("concentric", [(0, 0), (100, 0), (0, 50)])])
+    for i in range(60):
+        t = i * 0.05
+        x, y = g(50 * math.cos(t) * 1.03, 25 * math.sin(t) * 0.97)
+    assert abs(math.sqrt((x / 50) ** 2 + (y / 25) ** 2) - 1.03) < 1e-6     # the ring it started on
+    # half strength moves halfway
+    g = aids.Guide([aids.Assistant("ruler", [(0, 0), (100, 0)])], strength=0.5)
+    for x in range(0, 40, 2):
+        last = g(x, 4.0)
+    assert abs(last[1] - 2.0) < 1e-6
+
+
+def test_aids_symmetry_and_colour():
+    from studio.engine.paint import aids
+    assert aids.symmetry_maps("x", 100, 80)[0](10, 5) == (90, 5)
+    r = aids.symmetry_maps("radial", 100, 100, spokes=4)
+    assert len(r) == 3 and np.allclose(r[1](60, 50), (40, 50))
+    assert len(aids.symmetry_maps("mandala", 100, 100, spokes=4)) == 7
+    assert (130, 20) in [f(30, 20) for f in aids.symmetry_maps("wrap", 100, 80)]
+    from studio.engine.paint.colour import srgb_to_oklch
+    red = (0.8, 0.2, 0.2)
+    h0 = float(srgb_to_oklch(red)[2])
+    c = aids.harmony(red, "complementary")
+    assert abs(((float(srgb_to_oklch(c[1])[2]) - h0 - 180) + 180) % 360 - 180) < 3
+    green = (0.2, 0.7, 0.2)
+    m = aids.apply_mask(green, "complementary", rotation=h0)       # sectors on red and its complement
+    hm = float(srgb_to_oklch(m)[2])
+    assert any(abs(((hm - (h0 + c0)) + 180) % 360 - 180) <= w / 2 + 1 for c0, w in aids.GAMUT_MASKS["complementary"][1])
+    rg = aids.simulate_vision(np.array([[0.8, 0.2, 0.2], [0.2, 0.6, 0.2]], np.float32), "deutan")
+    orig = np.abs(np.array([0.6, -0.4, 0]))
+    assert np.abs(rg[0] - rg[1]).sum() < orig.sum()
+    assert np.allclose(aids.simulate_vision(np.full((2, 3), 0.5, np.float32), "protan"), 0.5, atol=0.02)
+
+
+def test_palette_from_image(tmp_path):
+    from PIL import Image
+    from studio.engine.paint import swatches
+    a = np.zeros((40, 40, 3), np.uint8)
+    a[:, :20] = (200, 20, 20)
+    a[:, 20:] = (20, 20, 200)
+    p = tmp_path / "ref.png"
+    Image.fromarray(a).save(p)
+    sw = swatches.from_image(str(p), count=2)
+    assert len(sw.colours) == 2
+    assert sw.colours[0][2] > 0.6 and sw.colours[1][0] > 0.6 or sw.colours[1][2] > 0.6 and sw.colours[0][0] > 0.6

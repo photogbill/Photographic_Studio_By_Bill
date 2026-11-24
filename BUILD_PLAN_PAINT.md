@@ -551,8 +551,24 @@ line for each part, a Status note here.
   written to .psd as sRGB. Known limits: .ora stores 8/16-bit so values above 1 are clipped there (export EXR to keep
   them); the Classic / Light / Pigment / LPM blend maths treat stored values as sRGB-encoded in every space (close in
   P3 / Adobe RGB, less so in ProPhoto and linear); EXR PIZ / DWA / tiled files are not read. Tests: 64 quick ones pass.
-- **Still to build:** **P6** (perspective and other assistants with snapping, symmetry and wrap-around, reference
-  images, grid and guides, colour harmonies, gamut masks, colour-blindness preview); **P7** (vector layers, text,
+- **2026-11-24 (12:20), P6 built** (`engine/paint/aids.py`, the Aids and Reference tabs, colour tools in the Colour
+  tab, the vision box on the bar): assistants as in Krita (ruler, parallel ruler, vanishing point, 1/2/3-point
+  perspective with uprights and level lines, ellipse, concentric ellipses, fisheye through two horizon points, a
+  four-point curve), placed by clicking points; the first 8 screen pixels of a stroke choose the assistant (and the
+  vanishing point or upright) it already follows, then every pen sample is pulled onto it by the snapping strength;
+  nothing is drawn ahead of the pen. Symmetry: mirror X, Y, both, radial and mandala with N spokes and a movable
+  centre, seamless tile (wrap-around: a copy is drawn only while it is on the canvas); all copies are one undo step
+  and turn the pen's tilt and rotation with them (`GuidedStroke`). Grid (size, show, snap) and guide lines (selection
+  corners and assistant points snap to them). Reference pictures: a list, click to pick a colour, greyscale, pin a
+  floating window on top (not saved in the painting). Colour: harmonies (complementary, analogous, triadic, split,
+  tetradic, in OKLCH at the same lightness and chroma), gamut masks with rotation and a ring showing the open
+  sectors (a picked colour outside is moved to the nearest open hue), palette from a photo
+  (`swatches.from_image`), colour-blindness preview (Machado 2009 protan / deutan / tritan, and values only).
+  Layer groups and alpha lock work as before under all of it (each copy paints the same target layer). Known limits:
+  the pickers do not dim the masked hues themselves; the vision view works on sRGB values (in other working spaces it
+  is approximate); assistants and guides are not saved in the .ora yet. Tests: the new quick ones pass (68 in all;
+  the whole Paint set was not run again, as Bill asked).
+- **Still to build:** **P7** (vector layers, text,
   comic panels and bubbles, print with bleed); **P8** (animation); **P9** (workspaces, timelapse, snapshots, Paint in
   the CLI / MCP, resource manager, GPU canvas and 20k canvases); **P10** (photo as a paint layer and back to Develop,
   photo to underpainting, depth and light from the Studio, relight); history on disk (P1); filter / deform brush

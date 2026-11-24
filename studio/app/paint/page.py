@@ -83,6 +83,8 @@ class PaintPage(QWidget):
         self.side.addTab(self._scroll(self._layers_tab()), "Layers")
         self.side.addTab(self._scroll(self._fill_tab()), "Fill")
         self.side.addTab(self._scroll(self._select_tab()), "Select")
+        self.side.addTab(self._scroll(self._aids_tab()), "Aids")
+        self.side.addTab(self._scroll(self._reference_tab()), "Reference")
         self.side.addTab(self._history_tab(), "History")
         self.side.addTab(self._scroll(self._keys_tab()), "Keys")
         self.tablet = TabletCheck()
@@ -166,6 +168,17 @@ class PaintPage(QWidget):
         self.value_cb.setToolTip("Show the painting in greys to check light and dark (the painting is not changed)")
         self.value_cb.toggled.connect(self._value_view)
         h.addWidget(self.value_cb)
+        from ...engine.paint.aids import VISION
+        self.vision_cb = QComboBox()
+        for k, (n, best, weak) in VISION.items():
+            self.vision_cb.addItem(n, k)
+            self.vision_cb.setItemData(self.vision_cb.count() - 1,
+                                       f"{n}. Best for: {best}. Weak at: {weak}." if best else n,
+                                       Qt.ItemDataRole.ToolTipRole)
+        self.vision_cb.setToolTip("See the painting as people with colour blindness do (the painting is not "
+                                  "changed; Machado 2009)")
+        self.vision_cb.currentIndexChanged.connect(self._vision)
+        h.addWidget(self.vision_cb)
         h.addStretch(1)
         self.view_lbl = QLabel("")
         self.view_lbl.setStyleSheet(f"color:{T.DIM}")
@@ -381,6 +394,7 @@ class PaintPage(QWidget):
         self._swatch_sets = swatch_files.saved_sets()
         self._swatch_i = 0
         self._refresh_swatches()
+        self._colour_tools(v)
         self._space_box(v)
         v.addWidget(self._note("Alt + click on the painting picks its colour. The Values button on the bar shows "
                                "the painting in greys."))
@@ -753,6 +767,10 @@ class PaintPage(QWidget):
         if tool in select.TOOLS:
             n, best, weak = select.TOOLS[tool]
             self._say(f"{n}: best for {best}. Weak at: {weak}.")
+        elif tool == "assistant":
+            self._say("Click the assistant's points on the painting (Aids tab says which). B goes back to the brush.")
+        elif tool == "symmetry_centre":
+            self._say("Click where the symmetry centre goes.")
         elif tool == "liquify":
             self._say("Liquify: drag to push paint (the brush size sets how much). Best for: nudging shapes. Weak "
                       "at: big straight moves (use Transform).")
@@ -1248,6 +1266,13 @@ class PaintPage(QWidget):
 
     # ------------------------------------------------------------------ colour
     def _picked(self, pk, c):
+        mask = getattr(self, "gmask_cb", None)
+        if mask is not None and mask.currentData() != "none":
+            from ...engine.paint.aids import apply_mask
+            m = apply_mask(c, mask.currentData(), self.mask_rot.value())
+            if max(abs(a - b) for a, b in zip(m, c[:3])) > 1e-4:
+                self.set_colour(m)                         # moved into the open part of the mask
+                return
         if isinstance(pk, GamutPicker) and self.canvas.doc.space not in ("srgb",):
             from ...engine.paint.colour import oklch_to_space
             self.set_colour(c, from_wheel=pk, working=oklch_to_space(pk.L, pk.C, pk.H, self.canvas.doc.space))
@@ -1450,6 +1475,7 @@ class PaintPage(QWidget):
         self.fg_sw.setStyleSheet(f"background:{to_hex(rgb)}; border:1px solid {T.LINE};")
         self.bg_sw.setStyleSheet(f"background:{to_hex(self.bg_colour)}; border:1px solid {T.LINE};")
         self.canvas.second_colour = tuple(self.bg_colour)
+        self._refresh_harmony()
 
     def _remember_colour(self):
         c = tuple(round(v, 4) for v in self.canvas.colour)
@@ -1479,6 +1505,327 @@ class PaintPage(QWidget):
             self.set_colour(from_hex(self.hex_ed.text()))
         except ValueError:
             self.hex_ed.setText(to_hex(self.canvas.colour))
+
+    def _vision(self, _i=None):
+        self.canvas.vision = self.vision_cb.currentData()
+        self.canvas.refresh()
+
+    # ------------------------------------------------------------------ colour tools (P6)
+    def _colour_tools(self, v):
+        from ...engine.paint.aids import GAMUT_MASKS, HARMONIES
+        v.addWidget(QLabel("Harmonies"))
+        self.harm_cb = QComboBox()
+        for k, (n, _offs, best, weak) in HARMONIES.items():
+            self.harm_cb.addItem(n, k)
+            self.harm_cb.setItemData(self.harm_cb.count() - 1, f"Best for: {best}. Weak at: {weak}.",
+                                     Qt.ItemDataRole.ToolTipRole)
+        self.harm_cb.currentIndexChanged.connect(self._refresh_harmony)
+        v.addWidget(self.harm_cb)
+        self.harm_row = QHBoxLayout()
+        v.addLayout(self.harm_row)
+        v.addWidget(self._note("Colours in harmony with the painting colour: same lightness and chroma, hue turned "
+                               "in OKLCH (so steps look even). Click one to paint with it."))
+        v.addWidget(QLabel("Gamut mask"))
+        row = QHBoxLayout()
+        self.gmask_cb = QComboBox()
+        for k, (n, _sec, best, weak) in GAMUT_MASKS.items():
+            self.gmask_cb.addItem(n, k)
+            if best:
+                self.gmask_cb.setItemData(self.gmask_cb.count() - 1, f"Best for: {best}. Weak at: {weak}.",
+                                         Qt.ItemDataRole.ToolTipRole)
+        from PySide6.QtWidgets import QSpinBox
+        self.mask_rot = QSpinBox()
+        self.mask_rot.setRange(0, 359)
+        self.mask_rot.setWrapping(True)
+        self.mask_rot.setSuffix("°")
+        self.mask_rot.setToolTip("Turn the mask round the wheel")
+        row.addWidget(self.gmask_cb, 1)
+        row.addWidget(self.mask_rot)
+        v.addLayout(row)
+        self.mask_ring = MaskRing()
+        v.addWidget(self.mask_ring)
+        for sig in (self.gmask_cb.currentIndexChanged, self.mask_rot.valueChanged):
+            sig.connect(lambda *_: self.mask_ring.set_mask(self.gmask_cb.currentData(), self.mask_rot.value()))
+        v.addWidget(self._note("With a mask on, a colour picked outside the open sectors is moved to the nearest "
+                               "open hue (lightness and chroma kept; greys pass). Picking from the painting is not "
+                               "changed. Weak at: the pickers themselves still show the whole wheel."))
+        b = QPushButton("Palette from a photo…")
+        b.setToolTip("A swatch set of a picture's main colour masses (dark to light)")
+        b.clicked.connect(self._swatch_from_photo)
+        v.addWidget(b)
+
+    def _refresh_harmony(self, *_):
+        from ...engine.paint.aids import harmony
+        from ...engine.paint.space import to_srgb
+        row = getattr(self, "harm_row", None)
+        if row is None:
+            return
+        while row.count():
+            it = row.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+        try:
+            cols = harmony(to_srgb(self.canvas.colour, self.canvas.doc.space), self.harm_cb.currentData())
+        except Exception as err:                       # noqa: BLE001
+            report_problem("Paint: colour harmony", err)
+            return
+        for col in cols:
+            b = QPushButton()
+            b.setFixedSize(34, 26)
+            b.setToolTip(to_hex(col))
+            b.setStyleSheet(f"background:{to_hex(col)}; border:1px solid {T.LINE};")
+            b.clicked.connect(lambda _=False, cc=col: self.set_colour(cc))
+            row.addWidget(b)
+        row.addStretch(1)
+
+    def _swatch_from_photo(self, path=None):
+        if not path:
+            path, _ = QFileDialog.getOpenFileName(self, "Palette from a photo", "",
+                                                  "Pictures (*.png *.jpg *.jpeg *.tif *.tiff *.webp *.bmp)")
+        if not path:
+            return
+        try:
+            sw = swatch_files.from_image(path, 8)
+        except OSError as err:
+            self._say(f"That picture could not be read: {err}")
+            return
+        except Exception as err:                       # noqa: BLE001
+            report_problem("Paint: palette from a photo", err)
+            self._say("The palette could not be made; an error report was saved.")
+            return
+        self._swatch_sets.append(sw)
+        self._swatch_i = len(self._swatch_sets) - 1
+        self._refresh_swatches()
+        self._say(f"{len(sw.colours)} colours taken from {os.path.basename(path)}. Save set keeps them.")
+
+    # ------------------------------------------------------------------ drawing aids (P6)
+    def _aids_tab(self):
+        from ...engine.paint.aids import ASSISTANTS, SYMMETRY
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.addWidget(QLabel("Assistants"))
+        self.assist_cb = QComboBox()
+        for k, (n, best, weak) in ASSISTANTS.items():
+            self.assist_cb.addItem(n, k)
+            self.assist_cb.setItemData(self.assist_cb.count() - 1, f"Best for: {best}. Weak at: {weak}.",
+                                       Qt.ItemDataRole.ToolTipRole)
+        v.addWidget(self.assist_cb)
+        self.persp_cb = QComboBox()
+        for n in (1, 2, 3):
+            self.persp_cb.addItem(f"{n}-point perspective", n)
+        self.persp_cb.setCurrentIndex(1)
+        v.addWidget(self.persp_cb)
+        self.assist_note = self._note("")
+        v.addWidget(self.assist_note)
+
+        def chosen(*_):
+            k = self.assist_cb.currentData()
+            n, best, weak = ASSISTANTS[k]
+            self.persp_cb.setVisible(k == "perspective")
+            self.canvas.assist_kind = k
+            self.canvas.persp_points = self.persp_cb.currentData()
+            self.canvas._assist_pts = []
+            need = {"ruler": "two points on the line", "parallel": "two points giving the direction",
+                    "vanishing": "the vanishing point", "perspective": "each vanishing point (on the horizon)",
+                    "ellipse": "the centre, the end of one axis, then a point on the other axis",
+                    "concentric": "the centre, the end of one axis, then a point on the other axis",
+                    "fisheye": "the two vanishing points on the horizon",
+                    "spline": "the start, two shaping points, then the end"}[k]
+            self.assist_note.setText(f"Best for: {best}. Weak at: {weak}. Click Place, then click {need}.")
+        self.assist_cb.currentIndexChanged.connect(chosen)
+        self.persp_cb.currentIndexChanged.connect(chosen)
+        chosen()
+        row = QHBoxLayout()
+        for text, fn, tip in (("Place", lambda: self.set_tool("assistant"), "Click the points on the painting"),
+                              ("Remove last", self._assist_remove, "Take away the last assistant"),
+                              ("Clear", self._assist_clear, "Take away every assistant")):
+            b = QPushButton(text)
+            b.setToolTip(tip)
+            b.clicked.connect(fn)
+            row.addWidget(b)
+        v.addLayout(row)
+        self.assist_on_cb = QCheckBox("Strokes follow the assistants")
+        self.assist_on_cb.setChecked(True)
+        self.assist_on_cb.toggled.connect(lambda on: (setattr(self.canvas, "assist_on", on), self.canvas.update()))
+        v.addWidget(self.assist_on_cb)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Snapping"))
+        self.assist_str = QSlider(Qt.Orientation.Horizontal)
+        self.assist_str.setRange(0, 100)
+        self.assist_str.setValue(100)
+        self.assist_str.setToolTip("100: exactly on the guide; lower: pulled towards it, the hand still shows")
+        self.assist_str.valueChanged.connect(lambda x: setattr(self.canvas, "assist_strength", x / 100))
+        row.addWidget(self.assist_str, 1)
+        v.addLayout(row)
+        v.addWidget(self._note("The first few pixels of a stroke choose the assistant (and, in perspective, which "
+                               "vanishing point or upright) it already heads along; the rest of the stroke keeps to "
+                               "it. Nothing is drawn ahead of the pen."))
+        v.addWidget(QLabel("Symmetry"))
+        self.sym_cb = QComboBox()
+        for k, (n, best, weak) in SYMMETRY.items():
+            self.sym_cb.addItem(n, k)
+            if best:
+                self.sym_cb.setItemData(self.sym_cb.count() - 1, f"Best for: {best}. Weak at: {weak}.",
+                                        Qt.ItemDataRole.ToolTipRole)
+        v.addWidget(self.sym_cb)
+        row = QHBoxLayout()
+        from PySide6.QtWidgets import QSpinBox
+        self.spokes_sb = QSpinBox()
+        self.spokes_sb.setRange(2, 32)
+        self.spokes_sb.setValue(6)
+        self.spokes_sb.setPrefix("Spokes ")
+        self.spokes_sb.valueChanged.connect(lambda n: (setattr(self.canvas, "spokes", n), self.canvas.update()))
+        row.addWidget(self.spokes_sb)
+        b = QPushButton("Set centre")
+        b.setToolTip("Click where the mirror line or the centre of the spokes goes")
+        b.clicked.connect(lambda: self.set_tool("symmetry_centre"))
+        row.addWidget(b)
+        b = QPushButton("Centre")
+        b.setToolTip("Back to the middle of the canvas")
+        b.clicked.connect(lambda: (setattr(self.canvas, "sym_centre", None), self.canvas.update()))
+        row.addWidget(b)
+        v.addLayout(row)
+        self.sym_note = self._note("")
+        v.addWidget(self.sym_note)
+
+        def sym(*_):
+            k = self.sym_cb.currentData()
+            n, best, weak = SYMMETRY[k]
+            self.canvas.symmetry = k
+            self.spokes_sb.setEnabled(k in ("radial", "mandala"))
+            self.sym_note.setText(f"Best for: {best}. Weak at: {weak}." if best else "")
+            self.canvas.update()
+        self.sym_cb.currentIndexChanged.connect(sym)
+        v.addWidget(QLabel("Grid and guides"))
+        row = QHBoxLayout()
+        self.grid_cb = QCheckBox("Grid")
+        self.grid_cb.toggled.connect(lambda on: (setattr(self.canvas, "show_grid", on), self.canvas.update()))
+        row.addWidget(self.grid_cb)
+        self.grid_sb = QSpinBox()
+        self.grid_sb.setRange(4, 2048)
+        self.grid_sb.setValue(64)
+        self.grid_sb.setSuffix(" px")
+        self.grid_sb.valueChanged.connect(lambda n: (setattr(self.canvas, "grid", n), self.canvas.update()))
+        row.addWidget(self.grid_sb)
+        self.snap_cb = QCheckBox("Snap")
+        self.snap_cb.setToolTip("Selection corners and assistant points snap to the grid (and always to guides)")
+        self.snap_cb.toggled.connect(lambda on: setattr(self.canvas, "snap_grid", on))
+        row.addWidget(self.snap_cb)
+        v.addLayout(row)
+        row = QHBoxLayout()
+        for text, kind in (("+ Across", "h"), ("+ Down", "v")):
+            b = QPushButton(text)
+            b.setToolTip("A guide line across the painting (asks where)" if kind == "h" else
+                         "A guide line down the painting (asks where)")
+            b.clicked.connect(lambda _=False, k=kind: self._add_guide(k))
+            row.addWidget(b)
+        b = QPushButton("Clear guides")
+        b.clicked.connect(lambda: (self.canvas.guides.clear(), self.canvas.update()))
+        row.addWidget(b)
+        v.addLayout(row)
+        v.addWidget(self._note("Grid, guides, assistants and symmetry lines are drawn over the painting only; they "
+                               "are never painted or exported."))
+        v.addStretch(1)
+        return w
+
+    def _assist_remove(self):
+        if self.canvas.assistants:
+            self.canvas.assistants.pop()
+        self.canvas._assist_pts = []
+        self.canvas.update()
+
+    def _assist_clear(self):
+        self.canvas.assistants.clear()
+        self.canvas._assist_pts = []
+        self.canvas.update()
+
+    def _add_guide(self, kind, at=None):
+        d = self.canvas.doc
+        if at is None:
+            at, ok = QInputDialog.getInt(self, "Guide", "Where (pixels from the top)" if kind == "h" else
+                                         "Where (pixels from the left)",
+                                         (d.height if kind == "h" else d.width) // 2, 0, 100000)
+            if not ok:
+                return
+        self.canvas.guides.append((kind, float(at)))
+        self.canvas.update()
+
+    # ------------------------------------------------------------------ reference images (P6)
+    def _reference_tab(self):
+        w = QWidget()
+        v = QVBoxLayout(w)
+        self.ref_list = QListWidget()
+        self.ref_list.setMaximumHeight(110)
+        self.ref_list.currentRowChanged.connect(self._ref_show)
+        v.addWidget(self.ref_list)
+        row = QHBoxLayout()
+        for text, fn, tip in (("Add…", self._ref_add, "Bring in reference photos (they stay outside the painting)"),
+                              ("Remove", self._ref_remove, "Take the chosen reference away"),
+                              ("Pin", self._ref_pin, "Float the reference in its own window, on top, to place "
+                                                     "beside the canvas")):
+            b = QPushButton(text)
+            b.setToolTip(tip)
+            b.clicked.connect(fn)
+            row.addWidget(b)
+        v.addLayout(row)
+        self.ref_grey = QCheckBox("Greyscale (check values)")
+        self.ref_grey.toggled.connect(lambda _: self._ref_show(self.ref_list.currentRow()))
+        v.addWidget(self.ref_grey)
+        self.ref_view = RefView()
+        self.ref_view.picked.connect(self.set_colour)
+        v.addWidget(self.ref_view, 1)
+        v.addWidget(self._note("Click the reference to paint with its colour. Palette from a photo (Colour tab) "
+                               "makes a swatch set from one. References are not saved in the painting."))
+        self._refs = []        # (path, straight sRGB float array)
+        self._pins = []
+        return w
+
+    def _ref_add(self, paths=None):
+        if not paths:
+            paths, _ = QFileDialog.getOpenFileNames(self, "Reference pictures", "",
+                                                    "Pictures (*.png *.jpg *.jpeg *.tif *.tiff *.webp *.bmp)")
+        for path in paths or []:
+            try:
+                from PIL import Image
+                im = Image.open(path).convert("RGB")
+                im.thumbnail((1600, 1600))
+                arr = np.asarray(im, np.float32) / 255.0
+            except OSError as err:
+                self._say(f"{os.path.basename(path)} could not be read: {err}")
+                continue
+            except Exception as err:                   # noqa: BLE001
+                report_problem("Paint: reference picture", err)
+                continue
+            self._refs.append((path, arr))
+            self.ref_list.addItem(os.path.basename(path))
+        if self._refs:
+            self.ref_list.setCurrentRow(len(self._refs) - 1)
+
+    def _ref_remove(self):
+        i = self.ref_list.currentRow()
+        if 0 <= i < len(self._refs):
+            del self._refs[i]
+            self.ref_list.takeItem(i)
+            if not self._refs:
+                self.ref_view.set_image(None)
+
+    def _ref_show(self, i):
+        if 0 <= i < len(self._refs):
+            self.ref_view.set_image(self._refs[i][1], self.ref_grey.isChecked())
+
+    def _ref_pin(self):
+        i = self.ref_list.currentRow()
+        if not (0 <= i < len(self._refs)):
+            self._say("Add a reference first.")
+            return
+        win = RefView()
+        win.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
+        win.setWindowTitle(os.path.basename(self._refs[i][0]))
+        win.set_image(self._refs[i][1], self.ref_grey.isChecked())
+        win.picked.connect(self.set_colour)
+        win.resize(420, 320)
+        win.show()
+        self._pins.append(win)
 
     def _value_view(self, on):
         self.canvas.value_view = on
@@ -2228,3 +2575,92 @@ class PaintPage(QWidget):
 
     def _say(self, text):
         self.status.emit(text)
+
+
+
+class MaskRing(QWidget):
+    """The OKLCH hue ring with the gamut mask's closed sectors dimmed."""
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedHeight(90)
+        self.mask, self.rot = "none", 0
+
+    def set_mask(self, mask, rot):
+        self.mask, self.rot = mask, rot
+        self.update()
+
+    def paintEvent(self, _):
+        from PySide6.QtCore import QPointF
+        from PySide6.QtGui import QPainter, QPen
+        from ...engine.paint.aids import hue_allowed
+        from ...engine.paint.colour import oklch_to_srgb
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        cx, cy, r = self.width() / 2, self.height() / 2, self.height() / 2 - 6
+        import math as _m
+        for d in range(0, 360, 3):
+            ok = hue_allowed(d, self.mask, self.rot)
+            rgb = oklch_to_srgb(0.72, 0.13 if ok else 0.02, d)
+            c = QColor.fromRgbF(*rgb)
+            if not ok:
+                c = c.darker(220)
+            p.setPen(QPen(c, 9))
+            a = _m.radians(d)
+            p.drawLine(QPointF(cx + (r - 4) * _m.cos(a), cy - (r - 4) * _m.sin(a)),
+                       QPointF(cx + (r + 4) * _m.cos(a), cy - (r + 4) * _m.sin(a)))
+        p.end()
+
+
+class RefView(QLabel):
+    """A reference picture; a click gives its colour there."""
+    picked = Signal(tuple)
+
+    def __init__(self):
+        super().__init__()
+        self.setMinimumHeight(200)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setStyleSheet("background:#111")
+        self._arr = None
+        self._pix = None
+
+    def set_image(self, arr, grey=False):
+        if arr is not None and grey:
+            y = arr @ np.array([0.2126, 0.7152, 0.0722], np.float32)
+            arr = np.repeat(y[..., None], 3, -1)
+        self._arr = arr
+        if arr is None:
+            self.clear()
+            self._pix = None
+            return
+        from PySide6.QtGui import QImage
+        a8 = np.ascontiguousarray((np.clip(arr, 0, 1) * 255 + 0.5).astype(np.uint8))
+        img = QImage(a8.data, a8.shape[1], a8.shape[0], 3 * a8.shape[1], QImage.Format.Format_RGB888).copy()
+        self._pix = QPixmap.fromImage(img)
+        self._rescale()
+
+    def _rescale(self):
+        if self._pix is not None:
+            self.setPixmap(self._pix.scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio,
+                                            Qt.TransformationMode.SmoothTransformation))
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._rescale()
+
+    def pick_at(self, x, y):
+        """Colour at widget position (x, y), or None off the picture."""
+        if self._arr is None or self.pixmap() is None:
+            return None
+        pm = self.pixmap()
+        ox, oy = (self.width() - pm.width()) / 2, (self.height() - pm.height()) / 2
+        u, v = (x - ox) / max(pm.width(), 1), (y - oy) / max(pm.height(), 1)
+        if not (0 <= u < 1 and 0 <= v < 1):
+            return None
+        h, w = self._arr.shape[:2]
+        return tuple(float(c) for c in self._arr[int(v * h), int(u * w)])
+
+    def mousePressEvent(self, e):
+        c = self.pick_at(e.position().x(), e.position().y())
+        if c is not None:
+            self.picked.emit(c)

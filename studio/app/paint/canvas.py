@@ -67,6 +67,15 @@ class PaintCanvas(QWidget):
         self.grad_opts = {"kind": "linear", "space": "oklab", "to_clear": False}
         self._grad = None                 # (start, end) in doc space while dragging a gradient
         self.managed = True               # through the monitor's colour profile (color/display.py)
+        # drawing aids (P6, engine/paint/aids.py)
+        self.assistants = []              # aids.Assistant list
+        self.assist_on, self.assist_strength = True, 1.0
+        self.assist_kind, self.persp_points = "ruler", 2   # what the Assistant tool places next
+        self._assist_pts = []
+        self.symmetry, self.spokes, self.sym_centre = "none", 6, None
+        self.grid, self.show_grid, self.snap_grid = 64, False, False
+        self.guides = []                  # ("h", y) or ("v", x) in canvas pixels
+        self.vision = "normal"            # colour-blindness preview (view only)
         self._stroke = None
         self._smoother = None
         self._pan_from = None
@@ -131,6 +140,11 @@ class PaintCanvas(QWidget):
         if self.value_view:
             v = px[..., 0] * 0.2126 + px[..., 1] * 0.7152 + px[..., 2] * 0.0722
             px = np.dstack([v, v, v, px[..., 3]])
+        if self.vision != "normal":                            # colour-blindness preview (on the sRGB values)
+            from ...engine.paint.aids import simulate_vision
+            a = np.clip(px[..., 3:4], 0, 1)
+            sim = simulate_vision(px[..., :3] / np.maximum(a, 1e-8), self.vision)
+            px = np.concatenate([sim * a, px[..., 3:4]], -1).astype(np.float32)
         self._img[y0:y1, x0:x1] = self._to_screen(px)
         self.update()
 
@@ -241,6 +255,7 @@ class PaintCanvas(QWidget):
             pts = self._sel_outline()
             for a_, b_ in zip(pts, pts[1:]):
                 p.drawLine(QPointF(*a_), QPointF(*b_))
+        self._draw_aids(p)
         if self.tool == "transform" and self.transform_session is not None:
             self._draw_handles(p)
         if self._grad is not None:                             # the gradient being dragged
@@ -488,6 +503,13 @@ class PaintCanvas(QWidget):
         if self.tool == "transform" and self.transform_session is not None:
             self._tf_press(s)
             return
+        if self.tool == "assistant":
+            self._place_assistant_point(*self.snap(s.x, s.y))
+            return
+        if self.tool == "symmetry_centre":
+            self.sym_centre = self.snap(s.x, s.y)
+            self.update()
+            return
         if self.tool == "subject":
             from ...engine.paint import select
             try:
@@ -508,6 +530,7 @@ class PaintCanvas(QWidget):
                 if c is not None:
                     self.set_selection(select.colour_range(self.doc, c, getattr(self, "colour_fuzz", 0.08)))
             elif self.tool == "polygon":
+                s = Sample(*self.snap(s.x, s.y))
                 pts = self._sel or []
                 if len(pts) >= 3 and math.hypot(s.x - pts[0][0], s.y - pts[0][1]) * self.zoom < 10:
                     self._finish_selection()                  # clicked back on the first point: closed
@@ -515,7 +538,7 @@ class PaintCanvas(QWidget):
                     self._sel = pts + [(s.x, s.y)]
                     self.update()
             else:
-                self._sel = [(s.x, s.y)]
+                self._sel = [self.snap(s.x, s.y)]
             return
         if self.tool == "liquify":
             from ...engine.paint import edit
@@ -546,10 +569,12 @@ class PaintCanvas(QWidget):
                     self.clone_offset = (self.clone_source[0] - s.x, self.clone_source[1] - s.y)
                 clone = self.clone_offset
             target = self._mask_proxy() if self.mask_mode else self.doc.paint_layer()
-            self._stroke = make_stroke(target, self.brush, self.colour, None if self.mask_mode else self.undo,
-                                       eraser=True if eraser else None, clone=clone, clip=self.doc.selection,
-                                       sample=lambda x0, y0, w, h: self.doc.composite(x0, y0, w, h,
-                                                                                      background=False))
+
+            def factory():
+                return make_stroke(target, self.brush, self.colour, None if self.mask_mode else self.undo,
+                                   eraser=True if eraser else None, clone=clone, clip=self.doc.selection,
+                                   sample=lambda x0, y0, w, h: self.doc.composite(x0, y0, w, h, background=False))
+            self._stroke = self._guided(factory)
         except LayerLocked as err:
             self.undo.end()
             self.message.emit(str(err))
@@ -563,7 +588,7 @@ class PaintCanvas(QWidget):
             self._tf_move(s)
             return
         if self._sel is not None and self.tool in ("rect", "ellipse", "lasso"):
-            self._sel.append((s.x, s.y))
+            self._sel.append(self.snap(s.x, s.y) if self.tool != "lasso" else (s.x, s.y))
             self.update()
             return
         if self.tool == "liquify" and self.transform_session is not None:
@@ -750,6 +775,109 @@ class PaintCanvas(QWidget):
             self.colour_picked.emit(to_srgb(c, self.doc.space))      # the pickers work in sRGB
 
     # ---- for scripts and tests
+    # ---- drawing aids (P6)
+    POINTS = {"ruler": 2, "parallel": 2, "vanishing": 1, "ellipse": 3, "concentric": 3, "fisheye": 2, "spline": 4}
+
+    def _guided(self, factory):
+        """The brush stroke, through the assistants and the symmetry (one stroke when neither is on)."""
+        from ...engine.paint import aids
+        guide = aids.Guide(self.assistants, self.assist_strength, 8.0 / max(self.zoom, 0.05)) \
+            if (self.assist_on and self.assistants) else None
+        cx, cy = self.sym_centre or (self.doc.width / 2, self.doc.height / 2)
+        maps = aids.symmetry_maps(self.symmetry, self.doc.width, self.doc.height, cx, cy, self.spokes)
+        if guide is None and not maps:
+            return factory()
+        wrap = (self.doc.width, self.doc.height) if self.symmetry == "wrap" else None
+        return aids.GuidedStroke(factory, maps, guide, wrap, margin=self.brush.size)
+
+    def snap(self, x, y):
+        """A point snapped to a guide line (within 8 screen pixels) and, when on, to the grid."""
+        tol = 8.0 / max(self.zoom, 0.05)
+        for kind, v in self.guides:
+            if kind == "v" and abs(x - v) < tol:
+                x = v
+            elif kind == "h" and abs(y - v) < tol:
+                y = v
+        if self.snap_grid and self.grid > 0:
+            g = self.grid
+            x, y = round(x / g) * g, round(y / g) * g
+        return float(x), float(y)
+
+    def _place_assistant_point(self, x, y):
+        from ...engine.paint import aids
+        self._assist_pts.append((x, y))
+        k = self.assist_kind
+        need = self.persp_points if k == "perspective" else self.POINTS.get(k, 2)
+        if len(self._assist_pts) >= need:
+            self.assistants.append(aids.Assistant(k, self._assist_pts))
+            self._assist_pts = []
+            self.message.emit(f"{aids.ASSISTANTS[k][0]} placed. Paint and your strokes follow it.")
+        else:
+            self.message.emit(f"{aids.ASSISTANTS[k][0]}: point {len(self._assist_pts)} of {need} placed.")
+        self.update()
+
+    def _draw_aids(self, p):
+        from PySide6.QtGui import QPainterPath
+        w, h = self.doc.width, self.doc.height
+        if self.show_grid and self.grid > 0 and self.grid * self.zoom >= 4:
+            p.setPen(QPen(QColor(255, 255, 255, 45), 0))
+            for gx in range(self.grid, w, self.grid):
+                p.drawLine(QPointF(gx, 0), QPointF(gx, h))
+            for gy in range(self.grid, h, self.grid):
+                p.drawLine(QPointF(0, gy), QPointF(w, gy))
+        p.setPen(QPen(QColor(34, 211, 238, 200), 0))
+        for kind, v in self.guides:
+            if kind == "v":
+                p.drawLine(QPointF(v, -1e4), QPointF(v, h + 1e4))
+            else:
+                p.drawLine(QPointF(-1e4, v), QPointF(w + 1e4, v))
+        if self.symmetry not in ("none", "wrap"):
+            cx, cy = self.sym_centre or (w / 2, h / 2)
+            p.setPen(QPen(QColor(232, 121, 249, 170), 0, Qt.PenStyle.DashLine))
+            if self.symmetry in ("x", "xy"):
+                p.drawLine(QPointF(cx, 0), QPointF(cx, h))
+            if self.symmetry in ("y", "xy"):
+                p.drawLine(QPointF(0, cy), QPointF(w, cy))
+            if self.symmetry in ("radial", "mandala"):
+                r = math.hypot(w, h)
+                for k in range(max(2, self.spokes)):
+                    a = 2 * math.pi * k / max(2, self.spokes)
+                    p.drawLine(QPointF(cx, cy), QPointF(cx + r * math.cos(a), cy + r * math.sin(a)))
+        col = QColor(251, 191, 36, 200) if self.assist_on else QColor(150, 150, 150, 120)
+        p.setPen(QPen(col, 0))
+        big = 4 * math.hypot(w, h)
+        for a in self.assistants:
+            P = a.points
+            if a.kind in ("ruler", "parallel", "fisheye"):
+                (ax, ay), (bx, by) = P[:2]
+                n = math.hypot(bx - ax, by - ay) or 1
+                ux, uy = (bx - ax) / n, (by - ay) / n
+                p.drawLine(QPointF(ax - ux * big, ay - uy * big), QPointF(bx + ux * big, by + uy * big))
+            elif a.kind in ("vanishing", "perspective"):
+                for vx, vy in P:
+                    for k in range(16):
+                        t = 2 * math.pi * k / 16
+                        p.drawLine(QPointF(vx, vy), QPointF(vx + big * math.cos(t), vy + big * math.sin(t)))
+            elif a.kind in ("ellipse", "concentric"):
+                (cx, cy), (ax, ay), (bx, by) = P[:3]
+                rx = math.hypot(ax - cx, ay - cy)
+                ang = math.atan2(ay - cy, ax - cx)
+                ry = abs(-(bx - cx) * math.sin(ang) + (by - cy) * math.cos(ang)) or rx
+                p.save()
+                p.translate(cx, cy)
+                p.rotate(math.degrees(ang))
+                for f in ((1.0,) if a.kind == "ellipse" else (0.5, 1.0, 1.5)):
+                    p.drawEllipse(QPointF(0, 0), rx * f, ry * f)
+                p.restore()
+            elif a.kind == "spline":
+                path = QPainterPath(QPointF(*P[0]))
+                path.cubicTo(QPointF(*P[1]), QPointF(*P[2]), QPointF(*P[3]))
+                p.drawPath(path)
+            for x, y in P:
+                p.drawEllipse(QPointF(x, y), 4 / self.zoom, 4 / self.zoom)
+        for x, y in self._assist_pts:
+            p.drawEllipse(QPointF(x, y), 4 / self.zoom, 4 / self.zoom)
+
     def stroke_from(self, samples, eraser=None):
         """Paint a stroke from doc-space Samples as if they came from the pen (tests, scripts)."""
         self._begin(samples[0], self.eraser_mode if eraser is None else eraser)
