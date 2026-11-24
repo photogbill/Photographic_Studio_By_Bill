@@ -49,8 +49,9 @@ Read these before changing anything in this folder:
 - `BUILD_PLAN_PAINT.md`: Paint, a digital painting section (Bill, 2026-11-23): match and beat Krita and Moko, for a
   friend painting on Linux with a Huion HS64. Section 0 has the research, licences (Krita GPL-3 portable,
   libmypaint ISC, spectral.js MIT, Mixbox not usable), the architecture, Bill's answers and the research verdicts
-  (0.9). **P0 and most of P1 built (2026-11-23)**: `studio/engine/paint/`, `studio/app/paint/`; its Status says what
-  is next. Bill: quick tests only until the whole app is finished.
+  (0.9). **P0, P1 (all but history on disk) and the start of P2 built (2026-11-23/24)**: groups, pickers, swatches,
+  keys, exports, smudge, pigment mixing, the MyPaint engine; `studio/engine/paint/`, `studio/app/paint/`; its Status
+  says what is next. Bill: quick tests only until the whole app is finished.
 - `docs/PROGRESS.md`: where things stand. Keep it current.
 - `docs/CLI.md`: the Studio from the command line for other programs (the RPG Forge, Claude): `studio/cli_tools.py`,
   `studio-cli.bat`. A new tool gets its command there, with a test in `tests/test_cli_tools.py`. The MCP server

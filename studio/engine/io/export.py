@@ -366,7 +366,7 @@ def is_own_export(path: str) -> bool:
             with tifffile.TiffFile(path) as tf:
                 tag = tf.pages[0].tags.get(305)
                 return tag is not None and str(tag.value).startswith(OWN_MARK)
-        if low.endswith((".jpg", ".jpeg")):
+        if low.endswith((".jpg", ".jpeg", ".webp")):
             from PIL import Image
             with Image.open(path) as im:
                 return str(im.getexif().get(305) or "").startswith(OWN_MARK)

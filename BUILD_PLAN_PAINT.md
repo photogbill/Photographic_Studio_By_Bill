@@ -432,6 +432,45 @@ line for each part, a Status note here.
   the monitor's profile, soft proof included; unmanaged screens shown as sRGB). Tests: 19 quick ones pass (fill with
   and without gap closing on a broken ring, gradient ends, Oklab vs. Classic, Light vs. Classic, image tip, the tools
   in the window).
-- **Not built yet from P1:** layer groups; triangle and wide-gamut pickers, swatch sets; pen-key mapping screen; WebP
-  export and colour profiles in exports; history kept on disk; 16-bit layers in .ora; LPM blend style; branching undo
-  and the History panel (0.9). Next: those, then P2 (smudge, pigment mixing, MyPaint first).
+- 2026-11-24 00:16 (Bill: "build the next part"): **branching undo** (0.9). `undo.py` is now a tree: undo moves to the
+  parent, redo follows the branch last used, painting after an undo adds a branch, `jump()` goes to any step (undo up
+  to the shared step, redo down). Memory budget: branches away from the current path go first (oldest first), then
+  the oldest steps; the last step can always be undone. The History tab lists the tree (↳ marks a branch, the current
+  step in cyan, other branches dimmed); a click jumps. Test: two ideas kept on two branches, bit-exact jumps, trimming.
+- 2026-11-24 night, from 00:25 (Bill: groups, then the rest of P1, then P2): **layer groups** (`tiles.py`: the list
+  stays flat and bottom first; each layer names its group in `parent`, a group sits directly above its contents;
+  pass-through and isolated groups with opacity and mode; hidden / locked groups act on what is inside;
+  `paint_layer()` passes a stroke on a selected group to its top layer; move up / down goes into open groups and out
+  at the edges, closed groups are stepped over; group, ungroup, merge a group into one layer, delete with contents;
+  `check()` repairs a broken tree), groups in .ora both ways (nested `<stack>`, `isolation`, our own
+  `studio-pass-through` so a faded pass-through group survives), the Layers panel as a tree. **The rest of P1:** the
+  triangle picker and the wide-gamut OKLCH picker (sRGB and Display P3 edges drawn; past sRGB the chroma is lowered at
+  the same lightness and hue, since the canvas is sRGB), swatch sets (`swatches.py`: .gpl both ways, Krita .kpl read,
+  three built-in sets, palette from the painting by k-means in Oklab), the Keys tab and `keymap.py` (every action, two
+  keys each, tablet keys arrive as ordinary keys, a key given to a new action is taken from the old one and said),
+  `export.py` (PNG / TIFF / JPEG / **WebP**, ICC profile in every export, sRGB / Display P3 / Adobe RGB / ProPhoto,
+  16-bit PNG and TIFF, the Studio's mark so `free_target` replaces only our own files; `.webp` added to
+  `is_own_export`), **16-bit layers in .ora** (`Document.bits`, our own small PNG codec since Pillow reads 16-bit
+  colour PNGs as 8-bit; recovery copies always 16-bit; MyPaint and Krita read 16-bit layers, GIMP unknown), the **LPM**
+  blend style (`colour.lpm_filter` ported from the GPL-3 MATLAB code, `lpm_mix`; finding: the published code is an
+  image filter whose transitions never reach the end colours, so it acts only in the middle of a mix, scaled by
+  colour difference, lightness kept; the effect is small, about 1 %), and **side by side** of two branches
+  (`UndoStack.picture_at`, `other_tip`; History tab button and right-click). Tests: 32 quick ones pass
+  (tests/test_paint_engine.py 22, tests/test_paint_page.py 10).
+- Same night, **P2 begun:** **smudge** (mode "smudge" in `brush.py`: smear carries a patch of pixels, dull one averaged
+  colour; smudge length, colour rate, read this layer or every layer; presets Smudge (smear), Blender (dull), Oil
+  (loaded brush); speed gate passes, p95 8-14 ms at 60 px). **Pigment mixing** (`colour.pigment_mix`, blend style
+  "pigment", data `spectral_data.py` from spectral.js, MIT): blue + yellow at half = #3d933e as spectral.js; fast path
+  (one brush colour cached, each distinct canvas colour once, each (colour, amount in 1/2048) pair once; a first
+  version rounded the K/S weight and lost light touches of strong dark pigments, found by the test against the exact
+  path and fixed); preset Gouache (pigment). **Speed: pigment fails the gate** at 30-60 px on detailed areas (p95 30-50
+  ms per pen event on 2 cores, 12-17 ms on empty canvas); NumPy's per-call overhead on small dab pieces is the limit.
+  Numba measured as the native path: 7x faster than the NumPy worst case but about 200 MB to install; Bill to decide
+  (asked). **The MyPaint engine** (`mypaint.py`, libmypaint ISC; settings table `mypaint_settings.json`): settings and
+  input curves, .myb v3 read and written, stroke and dab maths as listed in its header; not yet: spectral paint mode
+  (WGM), smudge buckets, gridmap, directional offsets, colorize, posterize, snap to pixel. `brush.make_stroke` picks
+  the engine; "Load MyPaint brushes" in the Brush tab, kept in `paint/brushes`. Speed gate passes (p95 13-16 ms at
+  60 px). Not yet tried on real MyPaint packs (none in the workspace). Tests: 39 quick ones pass.
+- **Not built yet:** history kept on disk (P1); from P2: texture / grain, dual brush, scatter and colour jitter
+  options, the other engines (spray, chalk, sketch, hatching, ...), the brush editor with a live preview stroke,
+  brush tags, imports (.abr, .sut, .kpp, .gbr / .gih), the 100-preset pack; the native pigment kernel if Bill agrees.

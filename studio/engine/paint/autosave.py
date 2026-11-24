@@ -41,9 +41,10 @@ class AutoSaver:
     def save_now(self) -> Path:
         d = recovery_dir()
         target = d / f"{self.session}.ora"
-        ora.save(self.doc, str(target))
+        ora.save(self.doc, str(target), bits=16)      # only Paint reads these: keep every shade
         meta = {"session": self.session, "title": self.title, "original": self.doc.path,
-                "saved": time.strftime("%Y-%m-%d %H:%M:%S"), "width": self.doc.width, "height": self.doc.height}
+                "saved": time.strftime("%Y-%m-%d %H:%M:%S"), "width": self.doc.width, "height": self.doc.height,
+                "bits": self.doc.bits}
         tmp = d / f"{self.session}.json.partial"
         tmp.write_text(json.dumps(meta, indent=2), encoding="utf-8")
         os.replace(tmp, d / f"{self.session}.json")
@@ -79,6 +80,7 @@ def recoverable() -> list[dict]:
 def recover(meta: dict) -> Document:
     doc = ora.load(meta["ora"])
     doc.path = meta.get("original")
+    doc.bits = int(meta.get("bits", 8))               # the recovery copy is 16-bit; her own file keeps its depth
     doc.dirty = True
     return doc
 

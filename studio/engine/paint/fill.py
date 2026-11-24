@@ -67,10 +67,7 @@ def source_pixels(doc: Document, source: str = "picture", reference: int | None 
 def fill(doc: Document, x: float, y: float, colour, tolerance: float = 0.1, gap: int = 0, grow: int = 1,
          source: str = "picture", reference: int | None = None, opacity: float = 1.0, undo=None):
     """Fill on the active layer. Returns the changed rectangle (x0, y0, x1, y1) or None."""
-    lay = doc.layer
-    if lay.locked:
-        from .brush import LayerLocked
-        raise LayerLocked(f"The layer \"{lay.name}\" is locked. Unlock it in the Layers panel to fill on it.")
+    lay = doc.paint_layer()
     reg = region(source_pixels(doc, source, reference), int(np.floor(x)), int(np.floor(y)), tolerance, gap, grow)
     if not reg.any():
         return None
@@ -119,10 +116,7 @@ def gradient_pixels(w: int, h: int, p0, p1, c0, c1, kind: str = "linear", space:
 
 def gradient(doc: Document, p0, p1, c0, c1, kind: str = "linear", space: str = "oklab", undo=None):
     """Lay a gradient over the whole active layer (painted on top of what is there)."""
-    lay: Layer = doc.layer
-    if lay.locked:
-        from .brush import LayerLocked
-        raise LayerLocked(f"The layer \"{lay.name}\" is locked. Unlock it in the Layers panel.")
+    lay: Layer = doc.paint_layer()
     g = gradient_pixels(doc.width, doc.height, p0, p1, c0, c1, kind, space)
     base = lay.read(0, 0, doc.width, doc.height)
     out = g + base * (1 - g[..., 3:4])

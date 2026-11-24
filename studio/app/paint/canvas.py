@@ -18,7 +18,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPointingDevice, QTransform
 from PySide6.QtWidgets import QWidget
 
-from ...engine.paint.brush import LayerLocked, Stroke
+from ...engine.paint.brush import LayerLocked, Stroke, make_stroke
 from ...engine.paint.colour import pick
 from ...engine.paint.curves import Curve
 from ...engine.paint.smoothing import Sample, Smoother
@@ -211,8 +211,9 @@ class PaintCanvas(QWidget):
             return
         try:
             self.undo.begin("Erase" if (eraser or self.brush.eraser) else "Stroke")
-            self._stroke = Stroke(self.doc.layer, self.brush, self.colour, self.undo,
-                                  eraser=True if eraser else None)
+            self._stroke = make_stroke(self.doc.paint_layer(), self.brush, self.colour, self.undo,
+                                       eraser=True if eraser else None,
+                                  sample=lambda x0, y0, w, h: self.doc.composite(x0, y0, w, h, background=False))
         except LayerLocked as err:
             self.undo.end()
             self.message.emit(str(err))
@@ -329,22 +330,6 @@ class PaintCanvas(QWidget):
         k = e.key()
         if k == Qt.Key.Key_Space and not e.isAutoRepeat():
             self._space = True
-        elif k == Qt.Key.Key_4:
-            self.rotate_by(-15)
-        elif k == Qt.Key.Key_6:
-            self.rotate_by(15)
-        elif k == Qt.Key.Key_5:
-            self.rotate_by(None)
-        elif k == Qt.Key.Key_M:
-            self.toggle_mirror()
-        elif k == Qt.Key.Key_0:
-            self.fit()
-        elif k == Qt.Key.Key_1:
-            self.set_zoom(1.0)
-        elif k in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
-            self.set_zoom(self.zoom * 1.25)
-        elif k == Qt.Key.Key_Minus:
-            self.set_zoom(self.zoom / 1.25)
         else:
             super().keyPressEvent(e)
             return

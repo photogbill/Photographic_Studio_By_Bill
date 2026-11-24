@@ -1,5 +1,17 @@
 # Build progress
 
+## Paint, layer groups, the rest of P1 and P2 begun (2026-11-24 night, chat session with Bill)
+
+`BUILD_PLAN_PAINT.md` Status (2026-11-24 entries) says what is built and what is not. Layer groups (tree in a flat
+list, pass-through and isolated, .ora both ways, the Layers panel as a tree); triangle and wide-gamut OKLCH pickers;
+swatch sets (.gpl / .kpl, palette from the painting); the Keys tab (pen and tablet keys); exports with WebP and ICC
+profiles; 16-bit layers in .ora (own PNG codec); the LPM blend style (adapted: the published code is an image
+filter); side by side of two undo branches. P2: smudge (smear, dull, colour rate, every layer), pigment mixing
+(Kubelka-Munk from spectral.js; correct colours, but over the speed gate on detailed areas: Bill asked about Numba),
+the MyPaint engine and .myb brushes (libmypaint port; what is not ported is listed in mypaint.py). Quick synthetic
+tests only, as Bill asked: tests/test_paint_engine.py (27) and tests/test_paint_page.py (12) pass on the Linux copy.
+Not run on Windows; no real pen; no real MyPaint pack tried.
+
 ## Paint, P0 and most of P1 (2026-11-23 night, chat session with Bill)
 
 `BUILD_PLAN_PAINT.md` Status says what is built and what is not; section 0.9 holds the verdicts on Bill's research

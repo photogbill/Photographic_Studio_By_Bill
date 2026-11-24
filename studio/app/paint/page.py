@@ -14,23 +14,24 @@ import os
 
 import numpy as np
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPixmap, QShortcut
+from PySide6.QtGui import QAction, QColor, QCursor, QIcon, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout,
                                QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox,
-                               QPushButton, QScrollArea, QSlider, QTabWidget, QToolButton, QVBoxLayout, QWidget)
+                               QPushButton, QScrollArea, QSlider, QTabWidget, QToolButton, QTreeWidget, QTreeWidgetItem,
+                               QVBoxLayout, QWidget)
 
-from ...engine.paint import autosave, ora
-from ...engine.paint.brush import MODES as PAINT_MODES, presets
+from ...engine.paint import autosave, keymap, ora, swatches as swatch_files
+from ...engine.paint.brush import MODES as PAINT_MODES, SMUDGE_KINDS, presets
 from ...engine.paint.colour import SPACES, from_hex, to_hex
 from ...engine.paint.fill import FILL_SOURCES, GAP_NOTE, GRADIENT_KINDS
 from ...engine.paint.curves import PRESET_NOTES, PRESETS, Curve
 from ...engine.paint.smoothing import MODES as SMOOTH_MODES
-from ...engine.paint.tiles import BLEND_MODES, Document
+from ...engine.paint.tiles import BLEND_MODES, GROUP_BLEND, GROUP_NOTE, Document
 from .. import theme as T
 from ..common import Settings, report_problem
 from .canvas import PaintCanvas
 from .tabletcheck import TabletCheck
-from .widgets import ColourWheel, CurveBox
+from .widgets import ColourWheel, CurveBox, GamutPicker, SwatchGrid, TrianglePicker
 
 log = logging.getLogger("studio.paint")
 
@@ -53,6 +54,7 @@ class PaintPage(QWidget):
         super().__init__()
         self.settings = settings or Settings()
         self.brushes = presets()
+        self._add_saved_mypaint()
         self.brush_i = 2
         self.bg_colour = (1.0, 1.0, 1.0)
         self.recent: list = []
@@ -73,6 +75,8 @@ class PaintPage(QWidget):
         self.side.addTab(self._scroll(self._colour_tab()), "Colour")
         self.side.addTab(self._scroll(self._layers_tab()), "Layers")
         self.side.addTab(self._scroll(self._fill_tab()), "Fill")
+        self.side.addTab(self._history_tab(), "History")
+        self.side.addTab(self._scroll(self._keys_tab()), "Keys")
         self.tablet = TabletCheck()
         self.side.addTab(self._scroll(self.tablet), "Tablet check")
         mid.addWidget(self.side)
@@ -85,20 +89,18 @@ class PaintPage(QWidget):
         c.message.connect(self._say)
         c.popup_requested.connect(self.popup)
         self._load_prefs()
+        self.picker_cb.setCurrentIndex(int(self.settings.get("paint_picker", 0) or 0))
+        names = [sw.name for sw in self._swatch_sets]
+        if self.settings.get("paint_swatch_set") in names:
+            self._swatch_i = names.index(self.settings.get("paint_swatch_set"))
+            self._refresh_swatches()
         self.select_brush(self.brush_i)
         self.set_tool("brush")
         self.set_colour((0.1, 0.12, 0.2))
         self._new_saver("Untitled")
         self._refresh_layers()
-        for seq, fn in (("Ctrl+Z", self.undo), ("Ctrl+Shift+Z", self.redo), ("Ctrl+Y", self.redo),
-                        ("B", lambda: self.set_tool("brush")), ("F", lambda: self.set_tool("fill")),
-                        ("G", lambda: self.set_tool("gradient")), ("E", lambda: self.set_eraser(not c.eraser_mode)),
-                        ("X", self.swap_colours), ("[", lambda: self.nudge_size(1 / 1.15)),
-                        ("]", lambda: self.nudge_size(1.15)), ("Tab", self.toggle_canvas_only),
-                        ("Ctrl+S", self.save), ("Ctrl+Shift+S", self.save_as), ("Ctrl+O", self.open)):
-            sc = QShortcut(QKeySequence(seq), self)
-            sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-            sc.activated.connect(fn)
+        self._shortcuts: list = []
+        self._apply_keys()
         self._autosave_timer = QTimer(self, interval=15000, timeout=self._autosave)
         self._autosave_timer.start()
         app = QApplication.instance()
@@ -205,6 +207,32 @@ class PaintPage(QWidget):
         v.addLayout(f)
         self.mode_note = self._note()
         v.addWidget(self.mode_note)
+        self.smudge_box = QWidget()
+        sf = QFormLayout(self.smudge_box)
+        sf.setContentsMargins(0, 0, 0, 0)
+        self.sm_kind = QComboBox()
+        for k, (name, _, _) in SMUDGE_KINDS.items():
+            self.sm_kind.addItem(name, k)
+        self.sm_len = _slider(0, 100, 80)
+        self.sm_len.setToolTip("How far the brush carries the paint it picks up")
+        self.sm_rate = _slider(0, 100, 0)
+        self.sm_rate.setToolTip("How much of the painting colour is mixed into the carried paint (an oily, "
+                                "loaded brush). 0 = smudge only")
+        self.sm_all = QCheckBox("Read every layer (pull paint from below up onto this layer)")
+        sf.addRow("Smudge", self.sm_kind)
+        sf.addRow("Smudge length", self.sm_len)
+        sf.addRow("Colour rate", self.sm_rate)
+        sf.addRow(self.sm_all)
+        for w_ in (self.sm_kind,):
+            w_.currentIndexChanged.connect(self._brush_from_ui)
+        for w_ in (self.sm_len, self.sm_rate):
+            w_.valueChanged.connect(self._brush_from_ui)
+        self.sm_all.toggled.connect(self._brush_from_ui)
+        v.addWidget(self.smudge_box)
+        mb = QPushButton("Load MyPaint brushes (.myb)…")
+        mb.setToolTip("MyPaint's brushes, with all their curves, painted by our port of MyPaint's brush engine")
+        mb.clicked.connect(lambda: self.load_mypaint())
+        v.addWidget(mb)
         tiprow = QHBoxLayout()
         tb = QPushButton("Tip from a picture...")
         tb.setToolTip("Any picture becomes the brush's tip: a scan of an ink mark, a leaf, a sponge. Dark marks on a "
@@ -245,9 +273,33 @@ class PaintPage(QWidget):
     def _colour_tab(self):
         w = QWidget()
         v = QVBoxLayout(w)
-        self.wheel = ColourWheel()
-        self.wheel.colour_changed.connect(lambda c: self.set_colour(c, from_wheel=True))
-        v.addWidget(self.wheel)
+        from PySide6.QtWidgets import QStackedWidget
+        self.picker_cb = QComboBox()
+        self.pickers = [ColourWheel(), TrianglePicker(), GamutPicker()]
+        notes = ["Quick hue, then saturation across and value down. Weak at: even lightness steps.",
+                 "Tints, shades and tones of one hue are straight lines to the white and black corners (as Krita "
+                 "and MyPaint). Weak at: an exact saturation.",
+                 "OKLCH: lightness up, chroma across, hue below, in even steps to the eye. Cyan line: the edge of "
+                 "sRGB, what the canvas holds; violet: Display P3. Weak at: past the cyan line the colour is brought "
+                 "in to sRGB at the same lightness and hue."]
+        for name in ("Wheel and square", "Triangle", "Wide gamut (OKLCH)"):
+            self.picker_cb.addItem(name)
+        self.picker_stack = QStackedWidget()
+        for pk in self.pickers:
+            pk.colour_changed.connect(lambda c, pk=pk: self.set_colour(c, from_wheel=pk))
+            self.picker_stack.addWidget(pk)
+        self.wheel = self.pickers[0]
+        self.picker_note = self._note(notes[0])
+
+        def pick_picker(i):
+            self.picker_stack.setCurrentIndex(i)
+            self.pickers[i].set_rgb(self.canvas.colour)
+            self.picker_note.setText(notes[i])
+            self.settings.set("paint_picker", i)
+        self.picker_cb.currentIndexChanged.connect(pick_picker)
+        v.addWidget(self.picker_cb)
+        v.addWidget(self.picker_stack)
+        v.addWidget(self.picker_note)
         row = QHBoxLayout()
         self.fg_sw = QPushButton()
         self.fg_sw.setFixedSize(46, 46)
@@ -263,9 +315,39 @@ class PaintPage(QWidget):
         self.hex_ed.editingFinished.connect(self._hex)
         row.addWidget(self.hex_ed)
         v.addLayout(row)
+        self.gamut_lbl = self._note("")
+        v.addWidget(self.gamut_lbl)
         v.addWidget(QLabel("Recent colours"))
         self.recent_row = QHBoxLayout()
         v.addLayout(self.recent_row)
+        v.addWidget(QLabel("Swatches"))
+        self.sw_cb = QComboBox()
+        self.sw_cb.activated.connect(self._swatch_set_chosen)
+        v.addWidget(self.sw_cb)
+        self.sw_grid = SwatchGrid()
+        self.sw_grid.picked.connect(self.set_colour)
+        self.sw_grid.remove_requested.connect(self._swatch_remove)
+        v.addWidget(self.sw_grid)
+        self.sw_note = self._note("")
+        v.addWidget(self.sw_note)
+        r1, r2 = QHBoxLayout(), QHBoxLayout()
+        for r, text, fn, tip in (
+                (r1, "+ Colour", self._swatch_add, "Add the painting colour to this set"),
+                (r1, "From painting", self._swatch_from_painting,
+                 "A new set of the painting's main colour masses (dark to light)"),
+                (r2, "New set", self._swatch_new, "Start an empty set"),
+                (r2, "Save set", self._swatch_save, "Save this set (as .gpl: Krita, GIMP, Inkscape and MyPaint "
+                                                     "read it)"),
+                (r2, "Load set…", self._swatch_load, "Bring in a .gpl or Krita .kpl swatch set")):
+            b = QPushButton(text)
+            b.setToolTip(tip)
+            b.clicked.connect(fn)
+            r.addWidget(b)
+        v.addLayout(r1)
+        v.addLayout(r2)
+        self._swatch_sets = swatch_files.saved_sets()
+        self._swatch_i = 0
+        self._refresh_swatches()
         v.addWidget(self._note("Alt + click on the painting picks its colour. The Values button on the bar shows "
                                "the painting in greys."))
         v.addStretch(1)
@@ -274,20 +356,33 @@ class PaintPage(QWidget):
     def _layers_tab(self):
         w = QWidget()
         v = QVBoxLayout(w)
-        self.layer_list = QListWidget()
-        self.layer_list.currentRowChanged.connect(self._layer_selected)
+        self.layer_list = QTreeWidget()
+        self.layer_list.setHeaderHidden(True)
+        self.layer_list.setIndentation(16)
+        self.layer_list.currentItemChanged.connect(self._layer_selected)
         self.layer_list.itemDoubleClicked.connect(self._rename_layer)
+        self.layer_list.itemExpanded.connect(lambda it: self._fold(it, False))
+        self.layer_list.itemCollapsed.connect(lambda it: self._fold(it, True))
         v.addWidget(self.layer_list)
         row = QHBoxLayout()
-        for text, fn, tip in (("+", self.add_layer, "New layer"), ("−", self.delete_layer, "Delete layer"),
-                              ("▲", lambda: self.move_layer(1), "Move up"),
-                              ("▼", lambda: self.move_layer(-1), "Move down"),
-                              ("Merge", self.merge_down, "Merge into the layer below")):
+        row2 = QHBoxLayout()
+        for r, text, fn, tip in (
+                (row, "+", self.add_layer, "New layer (inside the selected group when a group is selected)"),
+                (row, "−", self.delete_layer, "Delete the layer, or the group with everything in it"),
+                (row, "▲", lambda: self.move_layer(1), "Move up. Past an open group it goes in; at the top of a "
+                                                       "group it comes out"),
+                (row, "▼", lambda: self.move_layer(-1), "Move down. Past an open group it goes in; at the bottom "
+                                                        "of a group it comes out"),
+                (row2, "Group", self.group_layer, "Put the selected layer into a new group"),
+                (row2, "Ungroup", self.ungroup_layer, "Remove the selected group, keeping what is in it"),
+                (row2, "Merge", self.merge_down, "A layer: merge into the layer below it. A group: merge it "
+                                                  "into one layer that looks the same")):
             b = QPushButton(text)
             b.setToolTip(tip)
             b.clicked.connect(fn)
-            row.addWidget(b)
+            r.addWidget(b)
         v.addLayout(row)
+        v.addLayout(row2)
         f = QFormLayout()
         self.l_opac = _slider(0, 100, 100)
         self.l_opac.sliderReleased.connect(self._layer_props)
@@ -314,7 +409,14 @@ class PaintPage(QWidget):
         self.paper_cb.activated.connect(self._paper)
         bgrow.addWidget(self.paper_cb)
         v.addLayout(bgrow)
-        v.addWidget(self._note("Double-click a layer to rename it. The top of the list is the top layer."))
+        self.bits_cb = QCheckBox("Save layers in 16-bit")
+        self.bits_cb.setToolTip("Best for: soft glazes and slow fades keep every shade. Weak at: larger files; "
+                                "MyPaint and Krita read it (Krita turns it to 8-bit), other programs may not.")
+        self.bits_cb.toggled.connect(self._bits)
+        v.addWidget(self.bits_cb)
+        v.addWidget(self._note("Double-click a layer to rename it. The top of the list is the top layer. Groups "
+                               "keep layers together; the arrow beside a group opens and closes it. A selected "
+                               "group passes strokes to the top layer inside it."))
         v.addStretch(1)
         return w
 
@@ -335,6 +437,16 @@ class PaintPage(QWidget):
             cb.blockSignals(True)
             cb.setCurrentIndex(val)
             cb.blockSignals(False)
+        for w_, val in ((self.sm_kind, list(SMUDGE_KINDS).index(b.smudge_kind)), (self.sm_len, b.smudge_length * 100),
+                        (self.sm_rate, b.colour_rate * 100), (self.sm_all, b.smudge_all)):
+            w_.blockSignals(True)
+            if w_ is self.sm_kind:
+                w_.setCurrentIndex(val)
+            elif w_ is self.sm_all:
+                w_.setChecked(bool(val))
+            else:
+                w_.setValue(int(round(val)))
+            w_.blockSignals(False)
         self.tip_lbl.setText("Tip: picture" if b.tip is not None else "Tip: round")
         self.brush_note.setText(f"<b>Best for:</b> {b.best_for}<br><b>Weak at:</b> {b.weak_at}")
         self._mode_note()
@@ -350,6 +462,10 @@ class PaintPage(QWidget):
         b.spacing = self.s_space.value() / 100
         b.mode = self.mode_cb.currentData()
         b.space = self.space_cb.currentData()
+        b.smudge_kind = self.sm_kind.currentData()
+        b.smudge_length = self.sm_len.value() / 100
+        b.colour_rate = self.sm_rate.value() / 100
+        b.smudge_all = self.sm_all.isChecked()
         self._mode_note()
         self.canvas.update()
 
@@ -357,8 +473,72 @@ class PaintPage(QWidget):
         b = self.brushes[self.brush_i]
         _, best, weak = PAINT_MODES[b.mode]
         sn, sbest, sweak = SPACES[b.space]
-        self.mode_note.setText(f"{PAINT_MODES[b.mode][0]}: best for {best}. Weak at: {weak}.<br>"
-                               f"{sn}: best for {sbest}. Weak at: {sweak}.")
+        text = (f"{PAINT_MODES[b.mode][0]}: best for {best}. Weak at: {weak}.<br>"
+                f"{sn}: best for {sbest}. Weak at: {sweak}.")
+        smudging = b.mode == "smudge"
+        self.smudge_box.setVisible(smudging)
+        if smudging:
+            kn, kb, kw = SMUDGE_KINDS[b.smudge_kind]
+            text += f"<br>{kn}: best for {kb}. Weak at: {kw}. (Mix colours does not apply to smudging.)"
+        self.mode_note.setText(text)
+
+    def load_mypaint(self, paths=None):
+        """Add MyPaint brushes to the list (the .myb files are copied into Paint's brushes folder, so they stay)."""
+        from ...engine.paint.brush import from_myb
+        from ...engine.paint.mypaint import load_myb
+        if paths is None:
+            paths, _ = QFileDialog.getOpenFileNames(self, "MyPaint brushes", "", "MyPaint brushes (*.myb)")
+        added, bad = 0, []
+        for p in paths or []:
+            try:
+                b = from_myb(load_myb(p))
+            except (OSError, ValueError, KeyError) as err:
+                bad.append(f"{os.path.basename(p)}: {err}")
+                continue
+            except Exception as err:                   # noqa: BLE001
+                report_problem(f"Paint: reading MyPaint brush {p}", err)
+                bad.append(os.path.basename(p))
+                continue
+            self._keep_myb(p)
+            self.brushes.append(b)
+            it = QListWidgetItem(b.name)
+            it.setToolTip(f"Best for: {b.best_for}\nWeak at: {b.weak_at}")
+            self.brush_list.addItem(it)
+            added += 1
+        if added:
+            self.select_brush(len(self.brushes) - 1)
+        msg = f"{added} MyPaint brush{'es' if added != 1 else ''} added."
+        if bad:
+            msg += " Could not read: " + "; ".join(bad[:3]) + (" …" if len(bad) > 3 else "")
+        self._say(msg)
+        return added
+
+    def _keep_myb(self, path):
+        import shutil
+        from ... import paths as P
+        d = P.get("PAINT") / "brushes"
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            dst = d / os.path.basename(path)
+            if os.path.abspath(path) != os.path.abspath(dst):
+                shutil.copyfile(path, dst)
+        except OSError as err:
+            log.info("MyPaint brush not kept: %s", err)
+
+    def _add_saved_mypaint(self):
+        """MyPaint brushes loaded before (kept in paint/brushes beside the app) come back at start."""
+        from ...engine.paint.brush import from_myb
+        from ...engine.paint.mypaint import load_myb
+        for p in self._saved_mypaint():
+            try:
+                self.brushes.append(from_myb(load_myb(p)))
+            except (OSError, ValueError, KeyError) as err:
+                log.info("MyPaint brush %s skipped: %s", p, err)
+
+    def _saved_mypaint(self):
+        from ... import paths as P
+        d = P.get("PAINT") / "brushes"
+        return sorted(str(p) for p in d.glob("*.myb")) if d.is_dir() else []
 
     def load_tip(self):
         from ...engine.paint.brush import load_tip
@@ -460,6 +640,114 @@ class PaintPage(QWidget):
         v.addStretch(1)
         return w
 
+    def _history_tab(self):
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.addWidget(self._note("Every step of the painting. Click one to go back to it. Painting after going back "
+                               "starts a new branch (↳) instead of throwing the later steps away, so two ideas can "
+                               "both be kept: click between them to compare."))
+        self.hist_list = QListWidget()
+        self.hist_list.itemClicked.connect(self._history_clicked)
+        self.hist_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.hist_list.customContextMenuRequested.connect(self._history_menu)
+        v.addWidget(self.hist_list, 1)
+        b = QPushButton("Side by side with the other branch")
+        b.setToolTip("Show where you are next to the newest step of another branch. Right-click any step to "
+                     "compare with that one instead.")
+        b.clicked.connect(lambda: self.compare_steps(None))
+        v.addWidget(b)
+        self._hist_nodes = []
+        return w
+
+    def _history_menu(self, pos):
+        item = self.hist_list.itemAt(pos)
+        if item is None:
+            return
+        node = self._hist_nodes[self.hist_list.row(item)]
+        m = QMenu(self)
+        m.addAction("Side by side with where I am", lambda: self.compare_steps(node))
+        m.addAction("Go to this step", lambda: self._history_clicked(item))
+        m.exec(self.hist_list.mapToGlobal(pos))
+
+    def compare_steps(self, node=None, show: bool = True):
+        """Where you are and another step side by side (the painting is not changed). ``show=False`` builds the
+        window without opening it (tests). Returns the window, or None."""
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox
+        u = self.canvas.undo
+        node = node or u.other_tip()
+        if node is None or node is u.current:
+            self._say("There is no other branch yet. Go back a few steps in History and paint something different, "
+                      "then compare the two.")
+            return None
+        try:
+            imgs = [u.picture_at(u.current, 900), u.picture_at(node, 900)]
+        except Exception as err:                       # noqa: BLE001
+            report_problem("Paint: side by side", err)
+            self._say("Side by side failed; an error report was saved.")
+            return None
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Side by side")
+        lay = QVBoxLayout(dlg)
+        row = QHBoxLayout()
+        for img, title in zip(imgs, (f"Where you are: {u.current.name}", f"Other: {node.name}")):
+            col = QVBoxLayout()
+            lbl = QLabel()
+            a = img[..., 3:4]
+            rgb = np.where(a > 0, img[..., :3] / np.maximum(a, 1e-8), 1.0) * a + (1 - a)
+            arr = np.ascontiguousarray((np.clip(rgb, 0, 1) * 255 + 0.5).astype(np.uint8))
+            from PySide6.QtGui import QImage
+            qi = QImage(arr.data, arr.shape[1], arr.shape[0], 3 * arr.shape[1], QImage.Format.Format_RGB888).copy()
+            pm = QPixmap.fromImage(qi)
+            lbl.setPixmap(pm.scaled(560, 560, Qt.AspectRatioMode.KeepAspectRatio,
+                                    Qt.TransformationMode.SmoothTransformation))
+            col.addWidget(QLabel(title))
+            col.addWidget(lbl)
+            row.addLayout(col)
+        lay.addLayout(row)
+        bb = QDialogButtonBox()
+        stay = bb.addButton("Stay where I am", QDialogButtonBox.ButtonRole.RejectRole)
+        go = bb.addButton("Go to the other", QDialogButtonBox.ButtonRole.AcceptRole)
+        stay.clicked.connect(dlg.reject)
+        go.clicked.connect(dlg.accept)
+        lay.addWidget(bb)
+        dlg._images = imgs
+        if not show:
+            return dlg
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            u.jump(node)
+            self._after_history(f"Now at: {node.name}")
+        return dlg
+
+    def _refresh_history(self):
+        if not hasattr(self, "hist_list"):
+            return
+        u = self.canvas.undo
+        on_path = set(id(n) for n in u.path())
+        self.hist_list.clear()
+        self._hist_nodes = []
+        cur_row = 0
+        for node, depth, branch in u.tree():
+            mark = "↳ " if branch else ""
+            it = QListWidgetItem("    " * depth + mark + node.name)
+            if node is u.current:
+                it.setForeground(QColor(T.CYAN))
+                f = it.font()
+                f.setBold(True)
+                it.setFont(f)
+                cur_row = len(self._hist_nodes)
+            elif id(node) not in on_path:
+                it.setForeground(QColor(T.DIM))
+            self.hist_list.addItem(it)
+            self._hist_nodes.append(node)
+        self.hist_list.scrollToItem(self.hist_list.item(cur_row))
+
+    def _history_clicked(self, item):
+        row = self.hist_list.row(item)
+        if 0 <= row < len(self._hist_nodes):
+            node = self._hist_nodes[row]
+            self.canvas.undo.jump(node)
+            self._after_history(f"Back at: {node.name}")
+
     def _fill_from_ui(self, *_):
         c = self.canvas
         src = self.f_src.currentData()
@@ -521,11 +809,103 @@ class PaintPage(QWidget):
         self.recent = [tuple(c) for c in self.settings.get("paint_recent", [])][:12]
 
     # ------------------------------------------------------------------ colour
+    # ------------------------------------------------------------------ swatches
+    def _refresh_swatches(self):
+        self.sw_cb.blockSignals(True)
+        self.sw_cb.clear()
+        for sw in self._swatch_sets:
+            self.sw_cb.addItem(sw.name + ("" if sw.path or sw in self._swatch_sets[:len(swatch_files.BUILT_IN)]
+                                          else "  (not saved)"))
+        self._swatch_i = min(self._swatch_i, len(self._swatch_sets) - 1)
+        self.sw_cb.setCurrentIndex(self._swatch_i)
+        self.sw_cb.blockSignals(False)
+        sw = self._swatch_sets[self._swatch_i]
+        self.sw_grid.set_colours(sw.colours, sw.names)
+        self.sw_note.setText((sw.note + " " if sw.note else "") + "Click a swatch to paint with it; right-click "
+                             "removes it from the set.")
+
+    def _swatch_set_chosen(self, i):
+        self._swatch_i = i
+        self.settings.set("paint_swatch_set", self._swatch_sets[i].name)
+        self._refresh_swatches()
+
+    def _swatch_add(self):
+        self._swatch_sets[self._swatch_i].add(self.canvas.colour, to_hex(self.canvas.colour))
+        self._refresh_swatches()
+
+    def _swatch_remove(self, i):
+        self._swatch_sets[self._swatch_i].remove(i)
+        self._refresh_swatches()
+
+    def _swatch_new(self):
+        name, ok = QInputDialog.getText(self, "New swatch set", "Name:", text="My swatches")
+        if ok and name.strip():
+            self._swatch_sets.append(swatch_files.SwatchSet(name.strip()))
+            self._swatch_i = len(self._swatch_sets) - 1
+            self._refresh_swatches()
+
+    def _swatch_from_painting(self):
+        n, ok = QInputDialog.getInt(self, "Palette from the painting", "How many colours?", 8, 2, 32)
+        if not ok:
+            return
+        try:
+            sw = swatch_files.from_painting(self.canvas.doc, n)
+        except Exception as err:                       # noqa: BLE001
+            report_problem("Paint: palette from the painting", err)
+            self._say("The palette could not be made; an error report was saved.")
+            return
+        self._swatch_sets.append(sw)
+        self._swatch_i = len(self._swatch_sets) - 1
+        self._refresh_swatches()
+        self._say(f"{len(sw.colours)} colours taken from the painting. Save set keeps them.")
+
+    def _swatch_save(self):
+        sw = self._swatch_sets[self._swatch_i]
+        if sw.path is None and sw.name in [b.name for b in swatch_files.BUILT_IN]:
+            sw.name = sw.name + " (mine)"
+        try:
+            path = sw.path or str(swatch_files.swatch_dir() / (swatch_files.safe_name(sw.name) + ".gpl"))
+            if sw.path and sw.path.lower().endswith(".kpl"):
+                path = sw.path[:-4] + ".gpl"
+            swatch_files.save_gpl(sw, path)
+        except OSError as err:
+            self._say(f"The swatch set could not be saved: {err}")
+            return
+        self._refresh_swatches()
+        self._say(f"Saved {os.path.basename(path)} in Paint's swatches folder.")
+
+    def _swatch_load(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Load a swatch set", "", "Swatch sets (*.gpl *.kpl)")
+        if not path:
+            return
+        try:
+            sw = swatch_files.load(path)
+            sw.path = None                              # a copy is kept in Paint's own folder when saved
+            if not sw.colours:
+                self._say("That file has no RGB colours in it.")
+                return
+            swatch_files.save_gpl(sw, str(swatch_files.swatch_dir() / (swatch_files.safe_name(sw.name) + ".gpl")))
+        except (OSError, ValueError, KeyError) as err:
+            self._say(f"That swatch set could not be read: {err}")
+            return
+        except Exception as err:                       # noqa: BLE001
+            report_problem(f"Paint: loading swatches {path}", err)
+            self._say("That swatch set could not be read; an error report was saved.")
+            return
+        self._swatch_sets.append(sw)
+        self._swatch_i = len(self._swatch_sets) - 1
+        self._refresh_swatches()
+        self._say(f"Loaded {sw.name} ({len(sw.colours)} colours); a copy is kept in Paint's swatches folder.")
+
     def set_colour(self, rgb, from_wheel=False):
         rgb = tuple(float(c) for c in rgb[:3])
         self.canvas.colour = rgb
-        if not from_wheel:
-            self.wheel.set_rgb(rgb)
+        for pk in self.pickers:
+            if pk is not from_wheel:
+                pk.set_rgb(rgb)
+        gp = self.pickers[2]
+        self.gamut_lbl.setText("Past the sRGB edge: the canvas holds the nearest sRGB colour (same lightness and hue)."
+                               if self.picker_stack.currentIndex() == 2 and gp.out_of_srgb() else "")
         self.hex_ed.setText(to_hex(rgb))
         self.fg_sw.setStyleSheet(f"background:{to_hex(rgb)}; border:1px solid {T.LINE};")
         self.bg_sw.setStyleSheet(f"background:{to_hex(self.bg_colour)}; border:1px solid {T.LINE};")
@@ -567,27 +947,67 @@ class PaintPage(QWidget):
     # ------------------------------------------------------------------ layers
     def _refresh_layers(self):
         doc = self.canvas.doc
-        self.layer_list.blockSignals(True)
-        self.layer_list.clear()
-        for lay in reversed(doc.layers):
+        self._shown_active = doc.active
+        tree = self.layer_list
+        tree.blockSignals(True)
+        tree.clear()
+        kids = doc._kids()
+        current = None
+
+        def add(parent_item, i):
+            nonlocal current
+            lay = doc.layers[i]
             flags = ("" if lay.visible else "  (hidden)") + ("  🔒" if lay.locked else "") + \
                     ("  α" if lay.alpha_lock else "")
-            self.layer_list.addItem(f"{lay.name}{flags}")
-        self.layer_list.setCurrentRow(len(doc.layers) - 1 - doc.active)
-        self.layer_list.blockSignals(False)
+            if lay.is_group:
+                mode = "pass-through" if lay.blend == "pass" else BLEND_MODES.get(lay.blend, ("",))[0]
+                text = f"▣ {lay.name}  ({mode}{'' if lay.opacity >= 1 else f', {lay.opacity * 100:.0f} %'}){flags}"
+            else:
+                text = f"{lay.name}{flags}"
+            it = QTreeWidgetItem([text])
+            it.setData(0, Qt.UserRole, i)
+            if not doc.shown(lay):
+                it.setForeground(0, QColor(T.DIM))
+            (parent_item.addChild(it) if parent_item is not None else tree.addTopLevelItem(it))
+            if i == doc.active:
+                current = it
+            for j in reversed(kids.get(lay.uid, [])):
+                add(it, j)
+            if lay.is_group:
+                it.setExpanded(not lay.collapsed)
+        for i in reversed(kids.get(None, [])):
+            add(None, i)
+        if current is not None:
+            p = current.parent()
+            while p is not None:                       # never hide the selected layer inside a closed group
+                p.setExpanded(True)
+                doc.layers[p.data(0, Qt.UserRole)].collapsed = False
+                p = p.parent()
+            tree.setCurrentItem(current)
+        tree.blockSignals(False)
         lay = doc.layer
         self.l_opac.blockSignals(True)
         self.l_opac.setValue(int(round(lay.opacity * 100)))
         self.l_opac.blockSignals(False)
-        self.l_blend.setCurrentIndex(list(BLEND_MODES).index(lay.blend))
-        _, best, weak = BLEND_MODES[lay.blend]
-        self.blend_note.setText(f"Best for: {best}. Weak at: {weak}.")
+        self.l_blend.blockSignals(True)
+        self.l_blend.clear()
+        modes = {**GROUP_BLEND, **BLEND_MODES} if lay.is_group else BLEND_MODES
+        for k, (name, _, _) in modes.items():
+            self.l_blend.addItem(name, k)
+        self.l_blend.setCurrentIndex(max(0, list(modes).index(lay.blend) if lay.blend in modes else 0))
+        self.l_blend.blockSignals(False)
+        _, best, weak = modes.get(lay.blend, BLEND_MODES["normal"])
+        note = f"Best for: {best}. Weak at: {weak}."
+        if lay.is_group and lay.blend != "pass":
+            note = GROUP_NOTE["isolated"] + " " + note
+        self.blend_note.setText(note)
         if hasattr(self, "f_ref"):
             keep = self.f_ref.currentData()
             self.f_ref.blockSignals(True)
             self.f_ref.clear()
             for i in reversed(range(len(doc.layers))):
-                self.f_ref.addItem(doc.layers[i].name, i)
+                if not doc.layers[i].is_group:
+                    self.f_ref.addItem("    " * doc.depth(doc.layers[i]) + doc.layers[i].name, i)
             j = self.f_ref.findData(keep)
             self.f_ref.setCurrentIndex(j if j >= 0 else 0)
             self.f_ref.blockSignals(False)
@@ -595,75 +1015,77 @@ class PaintPage(QWidget):
         self.l_vis.setChecked(lay.visible)
         self.l_lock.setChecked(lay.locked)
         self.l_alpha.setChecked(lay.alpha_lock)
+        self.l_alpha.setEnabled(not lay.is_group)
+        self.bits_cb.blockSignals(True)
+        self.bits_cb.setChecked(doc.bits == 16)
+        self.bits_cb.blockSignals(False)
 
-    def _layer_selected(self, row):
-        if row < 0:
+    def _layer_selected(self, item, _prev=None):
+        if item is None:
             return
         doc = self.canvas.doc
-        doc.active = len(doc.layers) - 1 - row
+        doc.active = int(item.data(0, Qt.UserRole))
         self._refresh_layers()
+
+    def _fold(self, item, collapsed):
+        """Opening and closing a group is a view setting: saved with the painting, not an undo step."""
+        lay = self.canvas.doc.layers[int(item.data(0, Qt.UserRole))]
+        lay.collapsed = collapsed
 
     def _layer_change(self, name, fn):
         u = self.canvas.undo
         u.layers_changing(name)
-        fn()
+        ok = fn()
+        if ok is False:
+            u._pending = None
+            return False
         u.layers_changed()
         self.canvas.doc.dirty = True
         self._refresh_layers()
         self.canvas.refresh()
         self._changed()
+        return True
 
     def add_layer(self):
         self._layer_change("Add layer", lambda: self.canvas.doc.add_layer())
 
+    def group_layer(self):
+        self._layer_change("Group", lambda: self.canvas.doc.add_group())
+        self._say("Grouped. Pass-through: the layers inside blend with the picture as before. Pick Isolated "
+                  "modes in Blend to treat the group as one picture.")
+
+    def ungroup_layer(self):
+        doc = self.canvas.doc
+        if not doc.layer.is_group:
+            self._say("Select a group to ungroup.")
+            return
+        g = doc.layer
+        changes = g.blend != "pass" and (g.opacity < 1 or g.blend != "normal")
+        if self._layer_change("Ungroup", lambda: doc.ungroup()) and changes:
+            self._say("Ungrouped. The group's opacity and blend mode are gone, so the picture may look different; "
+                      "Ctrl+Z puts the group back.")
+
     def delete_layer(self):
         doc = self.canvas.doc
-        if len(doc.layers) == 1:
-            self._say("A painting keeps at least one layer.")
-            return
-
-        def go():
-            del doc.layers[doc.active]
-            doc.active = max(0, doc.active - 1)
-        self._layer_change("Delete layer", go)
+        if not self._layer_change("Delete group" if doc.layer.is_group else "Delete layer", lambda: doc.delete()):
+            self._say("A painting keeps at least one layer to paint on.")
 
     def move_layer(self, d):
-        doc = self.canvas.doc
-        j = doc.active + d
-        if not 0 <= j < len(doc.layers):
-            return
-
-        def go():
-            doc.layers[doc.active], doc.layers[j] = doc.layers[j], doc.layers[doc.active]
-            doc.active = j
-        self._layer_change("Move layer", go)
+        self._layer_change("Move layer", lambda: self.canvas.doc.move(d))
 
     def merge_down(self):
         doc = self.canvas.doc
-        if doc.active == 0:
-            self._say("The bottom layer has nothing below it to merge into.")
+        if doc.layer.is_group:
+            self._layer_change("Merge group", lambda: doc.flatten_group() is not None)
             return
+        if not self._layer_change("Merge down", lambda: doc.merge_down()):
+            self._say("There is no layer directly below this one in the same group to merge into.")
 
-        def go():
-            from ...engine.paint.tiles import TILE, blend
-            top, low = doc.layers[doc.active], doc.layers[doc.active - 1]
-            for key in set(top.tiles) | set(low.tiles):
-                a = low.tiles.get(key)
-                b = top.tiles.get(key)
-                a = np.zeros((TILE, TILE, 4), np.float32) if a is None else a
-                if b is not None and top.visible:
-                    a = blend(a * low.opacity, b * top.opacity, top.blend)
-                    low.tiles[key] = a.astype(np.float32)
-            low.opacity = 1.0 if top.visible else low.opacity
-            del doc.layers[doc.active]
-            doc.active -= 1
-        self._layer_change("Merge down", go)
-
-    def _rename_layer(self, item):
+    def _rename_layer(self, item, _col=0):
         doc = self.canvas.doc
-        name, ok = QInputDialog.getText(self, "Rename layer", "Name:", text=doc.layer.name)
+        name, ok = QInputDialog.getText(self, "Rename", "Name:", text=doc.layer.name)
         if ok and name.strip():
-            self._layer_change("Rename layer", lambda: setattr(doc.layer, "name", name.strip()))
+            self._layer_change("Rename", lambda: setattr(doc.layer, "name", name.strip()))
 
     def _layer_opacity_live(self, v):
         self.canvas.doc.layer.opacity = v / 100
@@ -678,6 +1100,13 @@ class PaintPage(QWidget):
         def go():
             lay.opacity, lay.blend, lay.visible, lay.locked, lay.alpha_lock = vals
         self._layer_change("Layer settings", go)
+
+    def _bits(self, on):
+        doc = self.canvas.doc
+        if doc.bits != (16 if on else 8):
+            doc.bits = 16 if on else 8
+            doc.dirty = True
+            self._changed()
 
     def _paper(self, i):
         doc = self.canvas.doc
@@ -696,6 +1125,7 @@ class PaintPage(QWidget):
         self._after_history(f"Redone: {name}" if name else "Nothing to redo.")
 
     def _after_history(self, msg):
+        self._refresh_history()
         self._refresh_layers()
         self.canvas.refresh()
         self._changed()
@@ -709,6 +1139,9 @@ class PaintPage(QWidget):
         return name
 
     def _changed(self):
+        if getattr(self, "_shown_active", None) != self.canvas.doc.active:
+            self._refresh_layers()                    # a stroke on a group went to a layer inside it
+        self._refresh_history()
         if self.saver:
             self.saver.changed()
         self._remember_colour() if self.canvas.colour not in self.recent[:1] else None
@@ -744,6 +1177,7 @@ class PaintPage(QWidget):
         self.canvas.set_document(doc)
         self._new_saver(os.path.basename(doc.path) if doc.path else "Untitled")
         self._refresh_layers()
+        self._refresh_history()
         self._title()
 
     def open(self):
@@ -804,41 +1238,89 @@ class PaintPage(QWidget):
         self._say(f"Saved {os.path.basename(path)}")
         return True
 
-    def export(self):
-        from PIL import Image
+    def export_options(self):
+        """The export choices: format, colour profile, bits, quality. Returns a dict, or None when cancelled."""
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox, QSpinBox
+        from ...engine.paint.export import FORMATS, PROFILES
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Export")
+        f = QFormLayout(dlg)
+        fmt, prof, bits = QComboBox(), QComboBox(), QComboBox()
+        for k, (name, ext, _, _) in FORMATS.items():
+            fmt.addItem(f"{name} ({ext})", k)
+        for k, (name, _, _) in PROFILES.items():
+            prof.addItem(name, k)
+        bits.addItem("8-bit", 8)
+        bits.addItem("16-bit (smooth gradients, larger)", 16)
+        q = QSpinBox()
+        q.setRange(50, 100)
+        q.setValue(int(self.settings.get("paint_export_quality", 92) or 92))
+        lossless = QCheckBox("Lossless (WebP: exact, larger)")
+        note = self._note("")
+        for cb, key in ((fmt, "paint_export_format"), (prof, "paint_export_profile"), (bits, "paint_export_bits")):
+            j = cb.findData(self.settings.get(key))
+            if j >= 0:
+                cb.setCurrentIndex(j)
+
+        def upd(*_):
+            k = fmt.currentData()
+            _, _, best, weak = FORMATS[k]
+            pn, pb, pw = PROFILES[prof.currentData()]
+            bits.setEnabled(k in ("png", "tiff"))
+            q.setEnabled(k in ("jpeg", "webp") and not (k == "webp" and lossless.isChecked()))
+            lossless.setEnabled(k == "webp")
+            note.setText(f"{FORMATS[k][0]}. Best for: {best}. Weak at: {weak}.\n{pn}. Best for: {pb}. Weak at: "
+                         f"{pw}. The canvas is sRGB: other profiles hold the same colours, described for that "
+                         "space.")
+        for w_ in (fmt, prof, bits):
+            w_.currentIndexChanged.connect(upd)
+        lossless.toggled.connect(upd)
+        f.addRow("Format", fmt)
+        f.addRow("Colour profile", prof)
+        f.addRow("Bits", bits)
+        f.addRow("Quality", q)
+        f.addRow("", lossless)
+        f.addRow(note)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        f.addRow(bb)
+        upd()
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        opts = {"fmt": fmt.currentData(), "space": prof.currentData(), "bits": bits.currentData(),
+                "quality": q.value(), "lossless": lossless.isChecked()}
+        for key, val in (("paint_export_format", opts["fmt"]), ("paint_export_profile", opts["space"]),
+                         ("paint_export_bits", opts["bits"]), ("paint_export_quality", opts["quality"])):
+            self.settings.set(key, val)
+        return opts
+
+    def export(self, opts: dict | None = None):
         from ...engine.io.export import free_target
+        from ...engine.paint import export as pexport
         doc = self.canvas.doc
         stem = os.path.splitext(os.path.basename(doc.path))[0] if doc.path else "Painting"
         folder = os.path.dirname(doc.path) if doc.path else self.settings.get("paint_folder", "")
         if not folder:
             folder = QFileDialog.getExistingDirectory(self, "Export into which folder?")
             if not folder:
-                return
-        kinds = ["PNG (keeps see-through areas)", "TIFF", "JPEG (for the web)"]
-        kind, ok = QInputDialog.getItem(self, "Export", "Format:", kinds, 0, False)
-        if not ok:
-            return
-        ext = {0: ".png", 1: ".tif", 2: ".jpg"}[kinds.index(kind)]
+                return None
+        opts = opts or self.export_options()
+        if not opts:
+            return None
+        ext = pexport.FORMATS[opts["fmt"]][1]
         target = free_target(os.path.join(folder, f"{stem}_Studio{ext}"), source=doc.path)
         try:
-            px = doc.composite()
-            a = px[..., 3:4]
-            rgb = np.where(a > 0, px[..., :3] / np.maximum(a, 1e-8), 0)
-            arr = (np.clip(np.concatenate([rgb, a], -1), 0, 1) * 255 + 0.5).astype(np.uint8)
-            im = Image.fromarray(arr, "RGBA")
-            if ext == ".jpg":
-                im = im.convert("RGB")
-                im.save(target, quality=92)
-            else:
-                im.save(target)
+            pexport.export(doc, target, **opts)
         except OSError as err:
             self._say(f"The export could not be written: {err}")
-            return
+            return None
         except Exception as err:                       # noqa: BLE001
             report_problem(f"Paint: exporting {target}", err)
             self._say("Export failed; an error report was saved.")
-            return
-        self._say(f"Exported {os.path.basename(target)}")
+            return None
+        self._say(f"Exported {os.path.basename(target)} ({pexport.PROFILES[opts['space']][0]}).")
+        return target
 
     # ------------------------------------------------------------------ autosave and recovery
     def _autosave(self):
@@ -909,6 +1391,139 @@ class PaintPage(QWidget):
         if info.get("kind") == "tablet":
             self.curve_box.live = info["pressure"] if info["pressure"] > 0 else None
             self.curve_box.update()
+
+    # ------------------------------------------------------------------ keys (pen and tablet keys too)
+    def _actions(self):
+        c = self.canvas
+        return {
+            "undo": self.undo, "redo": self.redo, "brush": lambda: self.set_tool("brush"),
+            "fill": lambda: self.set_tool("fill"), "gradient": lambda: self.set_tool("gradient"),
+            "eraser": lambda: self.set_eraser(not c.eraser_mode), "swap": self.swap_colours,
+            "smaller": lambda: self.nudge_size(1 / 1.15), "bigger": lambda: self.nudge_size(1.15),
+            "popup": lambda: self.popup(QCursor.pos()), "pick": self._pick_here,
+            "canvas_only": self.toggle_canvas_only, "rotate_left": lambda: c.rotate_by(-15),
+            "rotate_right": lambda: c.rotate_by(15), "rotate_reset": lambda: c.rotate_by(None),
+            "mirror": c.toggle_mirror, "fit": c.fit, "zoom_100": lambda: c.set_zoom(1.0),
+            "zoom_in": lambda: c.set_zoom(c.zoom * 1.25), "zoom_out": lambda: c.set_zoom(c.zoom / 1.25),
+            "new_layer": self.add_layer, "values": self._toggle_values,
+            "save": self.save, "save_as": self.save_as, "open": self.open,
+        }
+
+    def _apply_keys(self):
+        for sc in self._shortcuts:
+            sc.setEnabled(False)
+            sc.deleteLater()
+        self._shortcuts = []
+        acts = self._actions()
+        for a, keys in self.keys.items():
+            for k in keys:
+                if a not in acts or not k:
+                    continue
+                sc = QShortcut(QKeySequence(k), self)
+                sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+                sc.activated.connect(acts[a])
+                self._shortcuts.append(sc)
+
+    def _pick_here(self):
+        from PySide6.QtCore import QPointF
+        d = self.canvas.to_doc(QPointF(self.canvas.mapFromGlobal(QCursor.pos())))
+        x, y = d.x(), d.y()
+        from ...engine.paint.colour import pick
+        col = pick(self.canvas.doc, x, y, 1)
+        if col is not None:
+            self.set_colour(col)
+
+    def _toggle_values(self):
+        self.value_cb.setChecked(not self.canvas.value_view)     # its toggled signal does the rest
+
+    def _keys_tab(self):
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.addWidget(self._note(
+            "Tablet keys and pen buttons: set them to send a key in the tablet's own settings (Huion's driver, or "
+            "OpenTabletDriver on Linux), then click an action here and press that tablet key. Each action can have "
+            "two keys, one on the keyboard and one on the tablet. Holding Space pans; the pen's barrel button opens "
+            "the pop-up palette."))
+        self.keys = keymap.load()
+        self.keys_form = QFormLayout()
+        v.addLayout(self.keys_form)
+        self._key_btns = {}
+        for a, (name, what, _) in keymap.ACTIONS.items():
+            b = QPushButton()
+            b.setToolTip(f"{name}: {what}. Click, then press a key (or a tablet key). Esc: cancel. Backspace: "
+                         "no key." if what else f"{name}. Click, then press a key.")
+            b.clicked.connect(lambda _=False, a=a: self._capture_key(a))
+            self._key_btns[a] = b
+            self.keys_form.addRow(name, b)
+        self.keys_note = self._note("")
+        v.addWidget(self.keys_note)
+        reset = QPushButton("All keys back to how they came")
+        reset.clicked.connect(self._reset_keys)
+        v.addWidget(reset)
+        v.addStretch(1)
+        self._refresh_keys()
+        return w
+
+    def _refresh_keys(self):
+        for a, b in self._key_btns.items():
+            b.setText(",  ".join(self.keys.get(a, [])) or "(no key)")
+
+    def _capture_key(self, action):
+        from PySide6.QtWidgets import QDialog
+        name = keymap.ACTIONS[action][0]
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Key for {name}")
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel(f"Press the key, or the tablet key, for \u201c{name}\u201d.\n"
+                             "Esc cancels. Backspace leaves it with no key."))
+        got = {}
+
+        def kp(e):
+            k = e.key()
+            if k in (Qt.Key.Key_Shift, Qt.Key.Key_Control, Qt.Key.Key_Alt, Qt.Key.Key_Meta, Qt.Key.Key_AltGr):
+                return
+            if k == Qt.Key.Key_Escape and not e.modifiers():
+                dlg.reject()
+                return
+            if k == Qt.Key.Key_Backspace and not e.modifiers():
+                got["clear"] = True
+            else:
+                got["key"] = QKeySequence(e.keyCombination().toCombined()).toString()
+            dlg.accept()
+        dlg.keyPressEvent = kp
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        self.set_key(action, got.get("key"))
+
+    def set_key(self, action, key):
+        """Give ``key`` to ``action`` (None: no key). A keyboard key goes in the first place, an extra key (a tablet
+        key, or a second keyboard key) in the second."""
+        if key is None:
+            keymap.clear(self.keys, action)
+            msg = f"{keymap.ACTIONS[action][0]} has no key now."
+        else:
+            have = self.keys.get(action, [])
+            slot = 0 if not have else (len(have) if len(have) < keymap.MAX_KEYS else 1)
+            taken = keymap.assign(self.keys, action, key, slot)
+            msg = f"{key} now does {keymap.ACTIONS[action][0]}."
+            if taken:
+                msg += f" It no longer does {keymap.ACTIONS[taken][0]}."
+        self._save_keys()
+        self.keys_note.setText(msg)
+        self._say(msg)
+
+    def _reset_keys(self):
+        self.keys = keymap.defaults()
+        self._save_keys()
+        self.keys_note.setText("Every key is back to how it came.")
+
+    def _save_keys(self):
+        try:
+            keymap.save(self.keys)
+        except OSError as err:
+            self._say(f"The keys could not be saved: {err}")
+        self._apply_keys()
+        self._refresh_keys()
 
     def keyPressEvent(self, e):
         if e.text():
