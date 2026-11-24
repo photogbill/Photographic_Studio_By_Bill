@@ -2,6 +2,10 @@
 
 Newest first. Written by tools/whats_new.py from docs/NEXT_UPDATE.md each time Release.bat makes an update.
 
+## 0.1.18 (2026-11-24)
+
+- New: the README now describes Paint and how to start it.
+
 ## 0.1.17 (2026-11-24)
 
 - New: Paint > History, with branching undo. Go back a few steps and paint something new, and the old steps are kept as a branch instead of being lost; click any step on any branch to go back to it, so two ideas can be kept and compared.
