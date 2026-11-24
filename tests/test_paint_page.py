@@ -211,3 +211,168 @@ def test_mypaint_brush_loads_and_paints(page, tmp_path):
     c = page.canvas.doc.layer.read(300, 200, 1, 1)[0, 0]
     assert c[3] > 0.5 and c[2] > c[0]
     assert page._saved_mypaint()                               # kept beside the app for next time
+
+
+def test_brush_editor_live_preview_texture_and_saving(page):
+    i = next(k for k, b in enumerate(page.brushes) if b.name == "Round brush")
+    page.select_brush(i)
+    ed = page.open_brush_editor(show=False)
+    before = ed.render_preview().copy()
+    ed.grain_cb.setCurrentIndex(ed.grain_cb.findData("rough"))
+    ed._grain_chosen(ed.grain_cb.currentIndex())             # a grain with no strength is given some
+    assert page.brushes[i].grain == "rough" and page.brushes[i].grain_strength > 0
+    after = ed.render_preview()
+    assert np.abs(after.astype(int) - before.astype(int)).max() > 30       # the preview shows the grain
+    ed.sliders["size"][0].setValue(60)
+    assert page.brushes[i].size == 60 and page.s_size.value() == 60        # the Brush tab follows
+    ed.dyn_boxes[("opacity", "tilt")].setChecked(True)
+    assert "tilt" in page.brushes[i].dynamics["opacity"]
+    ed.save_as_new("Rough round")
+    assert page.brushes[-1].name == "Rough round" and page.brushes[i].grain == ""   # the original is untouched
+    from studio.engine.paint import brushfile
+    assert "Rough round" in [b.name for b in brushfile.saved()]
+    ed.sliders["size"][0].setValue(5)
+    ed.revert()
+    assert page.brushes[-1].size == 60
+    page2 = type(page)()                                     # a new start brings the saved brush back
+    assert any(b.name == "Rough round" and b.grain == "rough" for b in page2.brushes)
+    page2.deleteLater()
+
+
+def test_brush_list_filter_search_and_import(page, tmp_path):
+    import struct
+    assert len(page.brushes) >= 100
+    page.brush_cat.setCurrentIndex(page.brush_cat.findData("Ink and pens"))
+    shown = [page.brushes[i].name for i in range(len(page.brushes)) if not page.brush_list.item(i).isHidden()]
+    assert "Dip pen (G nib)" in shown and "Mop" not in shown
+    page.brush_cat.setCurrentIndex(0)
+    page.brush_find.setText("charcoal")
+    shown = [page.brushes[i].name for i in range(len(page.brushes)) if not page.brush_list.item(i).isHidden()]
+    assert "Vine charcoal" in shown and "Highlighter" not in shown
+    page.brush_find.setText("")
+    tip = (np.ones((16, 16)) * 255).astype(np.uint8)
+    nb = b"Square\0"
+    gbr = struct.pack(">IIIII", 28 + len(nb), 2, 16, 16, 1) + b"GIMP" + struct.pack(">I", 15) + nb + tip.tobytes()
+    (tmp_path / "sq.gbr").write_bytes(gbr)
+    (tmp_path / "bad.abr").write_bytes(b"\0\x09")
+    n = len(page.brushes)
+    assert page.import_brushes([str(tmp_path / "sq.gbr"), str(tmp_path / "bad.abr")]) == 1
+    assert page.brushes[-1].name == "Square" and len(page.brushes) == n + 1 and page.brush_i == n
+    page.canvas.stroke_from(_line(200))
+    assert page.canvas.doc.layer.tiles
+
+
+def test_watercolour_dries_in_the_window_and_relief_light(page):
+    c = page.canvas
+    page.add_layer()
+    i = next(k for k, b in enumerate(page.brushes) if b.name == "Wet round (flows and dries)")
+    page.select_brush(i)
+    page.set_colour((0.2, 0.3, 0.7))
+    c.stroke_from(_line(200))
+    lay = c.doc.layer
+    assert lay.medium == "watercolour" and lay.wet is not None
+    for _ in range(400):
+        if lay.wet is None:
+            break
+        c.dry_tick()
+    assert lay.wet is None and c._img[200, 300, 2] > c._img[200, 300, 0] + 30     # dried, blue on screen
+    page.undo()
+    assert not any(t[..., 3].any() for t in lay.tiles.values())
+    page.redo()
+    j = next(k for k, b in enumerate(page.brushes) if b.name == "Impasto round")
+    page.select_brush(page.brushes.index(page.brushes[j]))
+    page.canvas.doc.active = 0                                # back to the ordinary layer for thick paint
+    c.stroke_from(_line(120))
+    before = c._img[110, 300].copy()
+    page.relief_cb.setChecked(True)
+    assert c.light is not None and np.abs(c._img[110, 300].astype(int) - before.astype(int)).max() > 3
+    ed = page.open_brush_editor(show=False)
+    assert "impasto" in ed.sliders and "water" in ed.sliders
+
+
+def test_select_edit_transform_mask_adjust_in_the_window(page):
+    from studio.engine.paint.smoothing import Sample
+    c = page.canvas
+    page.set_colour((1, 0, 0))
+    page.fill_sel()                                           # nothing selected: fills the whole layer
+    assert c.doc.layer.read(10, 10, 1, 1)[0, 0, 3] > 0.99
+    page.set_tool("rect")
+    c.stroke_from([Sample(100, 100, 1, 0), Sample(200, 150, 1, 0.1), Sample(300, 200, 1, 0.2)])
+    assert c.doc.selection is not None and c.doc.selection[150, 200] == 1 and c.doc.selection[50, 50] == 0
+    assert "Selected" in page.sel_note.text()
+    page.copy_sel()
+    page.paste()
+    assert len(c.doc.layers) == 2 and c.doc.layer.read(150, 150, 1, 1)[0, 0, 3] > 0.99
+    page.select_none()
+    page.tf["tx"].setValue(50)                               # move the pasted piece 50 px right
+    page.transform_apply()
+    assert c.doc.layer.read(320, 150, 1, 1)[0, 0, 3] > 0.99 and c.doc.layer.read(120, 150, 1, 1)[0, 0, 3] == 0
+    page.undo()
+    assert c.doc.layer.read(120, 150, 1, 1)[0, 0, 3] > 0.99
+    page.add_mask()
+    page.mask_cb.setChecked(True)
+    page.set_tool("brush")
+    page.set_colour((0, 0, 0))                               # black on the mask hides
+    c.stroke_from([Sample(150 + k, 150, 1, k / 100) for k in range(60)])
+    assert c.doc.layer.mask_values(170, 150, 1, 1)[0, 0] < 0.3
+    page.mask_cb.setChecked(False)
+    page.adj_cb.setCurrentIndex(page.adj_cb.findData("invert"))
+    page.add_adjustment()
+    assert c.doc.layer.is_adjust and c.doc.composite()[10, 10, 1] > 0.99   # red inverted to cyan
+    page.set_tool("wand")
+    c.doc.active = 0
+    c.stroke_from([Sample(10, 10, 1, 0)])
+    assert c.doc.selection is not None
+
+
+def test_save_and_open_psd(page, tmp_path):
+    page.set_colour((0, 0.5, 0))
+    page.canvas.stroke_from(_line(200))
+    page.add_layer()
+    p = str(tmp_path / "work.psd")
+    assert page._write(p)
+    assert page.open_path(p)
+    assert len(page.canvas.doc.layers) == 2 and page.canvas.doc.layers[0].tiles and page.canvas.doc.path == p
+
+
+def test_transform_handles_special_layers_and_working_space(page, tmp_path):
+    from studio.engine.paint.smoothing import Sample
+    c = page.canvas
+    page.set_colour((1, 0, 0))
+    page.select_all()
+    page.fill_sel()
+    page.select_none()
+    from studio.engine.paint import select
+    c.set_selection(select.rect(600, 400, 100, 100, 200, 200))
+    page.copy_sel()
+    page.paste()
+    page.select_none()
+    page.start_transform("free")
+    assert c.tool == "transform" and len(c._tf_handles()) == 4
+    c.stroke_from([Sample(150, 150, 1, 0), Sample(200, 150, 1, 0.1), Sample(250, 150, 1, 0.2)])  # drag inside: move
+    page.transform_apply()
+    assert c.doc.layer.read(280, 150, 1, 1)[0, 0, 3] > 0.99 and c.doc.layer.read(120, 150, 1, 1)[0, 0, 3] == 0
+    page.start_transform("perspective")
+    x0, y0 = c._tf_handles()[0]
+    c.stroke_from([Sample(x0, y0, 1, 0), Sample(x0 - 30, y0 - 30, 1, 0.1)])  # pull one corner out
+    page.transform_apply()
+    page.undo()
+    page.start_transform("cage")
+    for x, y in ((190, 90), (310, 90), (310, 210), (190, 210)):
+        c.stroke_from([Sample(x, y, 1, 0)])
+    assert len(c.tf_src) == 4
+    page.transform_cancel()
+    page.add_fill_layer()
+    assert c.doc.layer.kind == "fill"
+    page.add_filter_layer()
+    assert c.doc.layer.kind == "filter"
+    page.convert_space("displayp3")
+    assert c.doc.space == "displayp3" and "Display P3" in page.space_lbl.text()
+    page.set_colour((1, 0, 0))
+    assert c.colour[0] < 0.95                                  # sRGB red in P3 numbers
+    page.undo()
+    assert c.doc.space == "srgb" and "sRGB" in page.space_lbl.text()   # undo brings the space back too
+    c.doc.path = str(tmp_path / "w.ora")
+    t = page.export({"fmt": "exr", "space": "srgb", "bits": 8, "quality": 90, "lossless": False})
+    assert t and t.endswith("w_Studio.exr")
+    assert page.open_path(t) and c.doc.space == "linear"

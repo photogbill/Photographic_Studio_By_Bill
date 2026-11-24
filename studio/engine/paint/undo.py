@@ -61,8 +61,23 @@ def _snapshot_layers(doc: Document) -> list:
     for lay in doc.layers:
         c = copy.copy(lay)
         c.tiles = dict(lay.tiles)
+        c.height = dict(lay.height)
+        c.mask = None if lay.mask is None else dict(lay.mask)
+        c.adj = None if lay.adj is None else copy.deepcopy(lay.adj)
+        c.wet = None
         out.append(c)
     return out
+
+
+def _slot(lay: Layer, key):
+    """Undo keys are (tx, ty) for colour tiles and ("h", tx, ty) for thickness (impasto) tiles."""
+    if len(key) == 3 and key[0] == "h":
+        return lay.height, key[1:]
+    if len(key) == 3 and key[0] == "m":
+        if lay.mask is None:
+            lay.mask = {}
+        return lay.mask, key[1:]
+    return lay.tiles, key
 
 
 def _find(doc: Document, uid: int) -> Layer | None:
@@ -83,6 +98,8 @@ class UndoStack:
 
     # ---- strokes
     def begin(self, name: str = "Stroke") -> None:
+        if isinstance(self.current.step, _TileStep):
+            self._settle(self.current.step)
         self._open = _TileStep(name)
 
     def touch(self, layer: Layer, key) -> None:
@@ -92,7 +109,8 @@ class UndoStack:
             return
         k = (layer.uid, key)
         if k not in st.before:
-            t = layer.tiles.get(key)
+            d, kk = _slot(layer, key)
+            t = d.get(kk)
             st.before[k] = None if t is None else t.copy()
 
     def end(self) -> None:
@@ -101,20 +119,52 @@ class UndoStack:
             return
         for (uid, key) in st.before:
             lay = _find(self.doc, uid)
-            t = lay.tiles.get(key) if lay else None
+            t = _slot(lay, key)[0].get(_slot(lay, key)[1]) if lay else None
             st.after[(uid, key)] = None if t is None else t.copy()
+        st.wet = any(l.wet is not None for l in self.doc.layers)
         self._push(st)
+
+    def amend(self, layer: Layer, key, old) -> None:
+        """Watercolour drying after a stroke ended: changes go into the latest stroke's step, so undoing that stroke
+        takes back the drying too. ``old`` is the tile before this change (None: there was none)."""
+        st = self._open if self._open is not None else self.current.step
+        if not isinstance(st, _TileStep):
+            return
+        k = (layer.uid, key)
+        if k not in st.before:
+            st.before[k] = None if old is None else old.copy()
+        if st is not self._open:
+            st.__dict__.setdefault("stale", set()).add(k)     # its "after" is copied when it is needed
+
+    def _settle(self, st) -> None:
+        """Copy the current tiles as the "after" of a step whose tiles drying changed after it ended."""
+        stale = getattr(st, "stale", None)
+        if not stale:
+            return
+        for (uid, key) in stale:
+            lay = _find(self.doc, uid)
+            if lay is None:
+                continue
+            d, kk = _slot(lay, key)
+            t = d.get(kk)
+            st.after[(uid, key)] = None if t is None else t.copy()
+        stale.clear()
 
     # ---- layer changes
     def layers_changing(self, name: str):
         """Call before changing the layer list or a layer's properties; then ``layers_changed()`` after."""
+        self.doc.dry_all()
+        if isinstance(self.current.step, _TileStep):
+            self._settle(self.current.step)
         self._pending = _LayersStep(name, _snapshot_layers(self.doc), self.doc.active)
+        self._pending.doc_before = (self.doc.space, self.doc.background)
 
     def layers_changed(self) -> None:
         st, self._pending = self._pending, None
         if st is None:
             return
         st.after, st.active_after = _snapshot_layers(self.doc), self.doc.active
+        st.doc_after = (self.doc.space, self.doc.background)
         self._push(st)
 
     # ---- undo / redo / jump
@@ -125,6 +175,11 @@ class UndoStack:
         return self.current.last_child is not None
 
     def undo(self) -> str | None:
+        self.doc.dry_all()
+        for l in self.doc.layers:
+            l.wet = None
+        if isinstance(self.current.step, _TileStep):
+            self._settle(self.current.step)
         if self.current is self.root:
             return None
         n = self.current
@@ -135,6 +190,7 @@ class UndoStack:
         return n.name
 
     def redo(self) -> str | None:
+        self.doc.dry_all()
         n = self.current.last_child
         if n is None:
             return None
@@ -172,13 +228,17 @@ class UndoStack:
                 lay = _find(self.doc, uid)
                 if lay is None:
                     continue
+                d, kk = _slot(lay, key)
                 if t is None:
-                    lay.tiles.pop(key, None)
+                    d.pop(kk, None)
                 else:
-                    lay.tiles[key] = t.copy()
+                    d[kk] = t.copy()
         else:
             layers = st.before if back else st.after
             self.doc.layers = _snapshot_layers(Document(layers=layers))
+            state = getattr(st, "doc_before" if back else "doc_after", None)
+            if state is not None:                              # the working space and paper go back too
+                self.doc.space, self.doc.background = state
             self.doc.active = min(st.active_before if back else st.active_after, len(self.doc.layers) - 1)
 
     def _push(self, st) -> None:

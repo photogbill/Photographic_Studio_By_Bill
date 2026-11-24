@@ -134,6 +134,8 @@ def save(doc: Document, path: str, bits: int | None = None) -> str:
                                 "xres": "72", "yres": "72"})
     if doc.background is not None:
         root.set("studio-background", ",".join(f"{c:.6f}" for c in doc.background))
+    if doc.space != "srgb":
+        root.set("studio-space", doc.space)
     stack = ET.SubElement(root, "stack")
     files = []
     kids = doc._kids()
@@ -156,12 +158,44 @@ def save(doc: Document, path: str, bits: int | None = None) -> str:
             for j in reversed(kids.get(lay.uid, [])):         # top first
                 put(el, j)
             return
-        x0, y0, px = _cropped(lay)
+        if lay.is_generated:                            # fill / file layers: their pixels, for other programs
+            full = lay.generated(0, 0, doc.width, doc.height, doc.width, doc.height)
+            tmp = Layer("x")
+            tmp.write(0, 0, full)
+            x0, y0, px = _cropped(tmp)
+        else:
+            x0, y0, px = _cropped(lay)
         src = f"data/layer{i:03d}.png"
         files.append((src, enc(px)))
-        ET.SubElement(parent_el, "layer", {
+        el = ET.SubElement(parent_el, "layer", {
             **common, "src": src, "x": str(x0), "y": str(y0), "composite-op": OPS.get(lay.blend, "svg:src-over"),
             "alpha-preserve": "true" if lay.alpha_lock else "false"})
+        if lay.medium:
+            el.set("studio-medium", lay.medium)
+        if lay.clip:
+            el.set("studio-clip", "true")
+        if lay.kind in ("adjust", "filter", "fill", "file") and lay.adj:
+            import json
+            el.set("studio-adjust", json.dumps(lay.adj))
+            el.set("studio-kind", lay.kind)
+        if lay.mask is not None:                           # layer mask: a 16-bit grey picture over the canvas
+            mv = lay.mask_values(0, 0, doc.width, doc.height)
+            mpx = np.concatenate([np.repeat(mv[..., None], 3, -1), np.ones_like(mv[..., None])], -1)
+            msrc = f"data/mask{i:03d}.png"
+            files.append((msrc, _to_png16(mpx)))
+            el.set("studio-mask", msrc)
+        if lay.height:                                     # impasto: thickness 0..4 as a 16-bit grey picture
+            ks = list(lay.height)
+            hx0, hy0 = min(k[0] for k in ks) * TILE, min(k[1] for k in ks) * TILE
+            hx1, hy1 = (max(k[0] for k in ks) + 1) * TILE, (max(k[1] for k in ks) + 1) * TILE
+            from .tiles import read_tiles
+            hv = read_tiles(lay.height, hx0, hy0, hx1 - hx0, hy1 - hy0, 1)[..., 0] / 4.0
+            hpx = np.concatenate([np.repeat(hv[..., None], 3, -1), np.ones_like(hv[..., None])], -1)
+            hsrc = f"data/height{i:03d}.png"
+            files.append((hsrc, _to_png16(hpx)))
+            el.set("studio-height", hsrc)
+            el.set("studio-height-x", str(hx0))
+            el.set("studio-height-y", str(hy0))
 
     for i in reversed(kids.get(None, [])):                    # stack.xml lists the top layer first
         put(stack, i)
@@ -233,6 +267,35 @@ def load(path: str) -> Document:
                     common(el, lay)
                     lay.blend = OPS_BACK.get(el.get("composite-op", "svg:src-over"), "normal")
                     lay.alpha_lock = el.get("alpha-preserve", "false") == "true"
+                    lay.medium = el.get("studio-medium", "")
+                    lay.clip = el.get("studio-clip") == "true"
+                    if el.get("studio-adjust"):
+                        import json
+                        lay.kind, lay.adj = el.get("studio-kind", "adjust"), json.loads(el.get("studio-adjust"))
+                        if lay.is_generated or lay.is_adjust:
+                            lay.tiles = {}                     # made again from the setting, not the stored pixels
+                    ms = el.get("studio-mask")
+                    if ms and ms in z.namelist():
+                        mv = _from_png(z.read(ms))[..., 0]
+                        lay.mask = {}
+                        for ty in range(0, mv.shape[0], TILE):
+                            for tx in range(0, mv.shape[1], TILE):
+                                t = np.ones((TILE, TILE), np.float32)
+                                sub = mv[ty:ty + TILE, tx:tx + TILE]
+                                t[:sub.shape[0], :sub.shape[1]] = sub
+                                if (t < 0.9999).any():
+                                    lay.mask[(tx // TILE, ty // TILE)] = t
+                    hs = el.get("studio-height")
+                    if hs and hs in z.namelist():
+                        hv = _from_png(z.read(hs))[..., 0] * 4.0
+                        hx0, hy0 = int(el.get("studio-height-x", 0)), int(el.get("studio-height-y", 0))
+                        for ty in range(0, hv.shape[0], TILE):
+                            for tx in range(0, hv.shape[1], TILE):
+                                t = np.zeros((TILE, TILE), np.float32)
+                                sub = hv[ty:ty + TILE, tx:tx + TILE]
+                                t[:sub.shape[0], :sub.shape[1]] = sub
+                                if t.any():
+                                    lay.height[((hx0 + tx) // TILE, (hy0 + ty) // TILE)] = t
                     src = el.get("src")
                     if src and src in z.namelist():
                         data = z.read(src)
@@ -252,6 +315,7 @@ def load(path: str) -> Document:
         background = (1.0, 1.0, 1.0) if not _opaque_bottom(layers[0], w, h) else None
     doc = Document(w, h, background, layers, active, path)
     doc.bits = 16 if depth[0] == 16 else 8
+    doc.space = root.get("studio-space", "srgb")
     doc.check()
     return doc
 

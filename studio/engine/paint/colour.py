@@ -188,23 +188,46 @@ def srgb_to_oklch(rgb):
     return lab[..., 0], np.hypot(lab[..., 1], lab[..., 2]), np.degrees(np.arctan2(lab[..., 2], lab[..., 1])) % 360
 
 
-def in_gamut(L, C, h_deg, gamut: str = "srgb", eps: float = 1e-4):
-    """True where an OKLCH colour fits in sRGB or Display P3 (arrays broadcast)."""
-    lin = oklab_to_linear_srgb(oklch_to_oklab(L, C, h_deg))
+def _lin_srgb_to(gamut):
     if gamut == "p3":
-        lin = lin @ _LIN_SRGB_TO_P3.T
+        return _LIN_SRGB_TO_P3
+    from ..color import spaces as S
+    key = {"displayp3": "displayp3", "adobergb": "adobergb", "prophoto": "prophoto"}.get(gamut)
+    return None if key is None else S.conversion_matrix(S.SRGB, S.SPACES[key]).astype(np.float64)
+
+
+def in_gamut(L, C, h_deg, gamut: str = "srgb", eps: float = 1e-4):
+    """True where an OKLCH colour fits in sRGB, Display P3 ("p3" / "displayp3"), Adobe RGB or ProPhoto."""
+    lin = oklab_to_linear_srgb(oklch_to_oklab(L, C, h_deg))
+    M = _lin_srgb_to(gamut)
+    if M is not None:
+        lin = lin @ M.T
     return np.all((lin >= -eps) & (lin <= 1 + eps), axis=-1)
 
 
 def max_chroma(L, h_deg, gamut: str = "srgb", iters: int = 18):
     """The largest chroma at this lightness and hue that still fits the gamut (bisection)."""
     lo = np.zeros(np.broadcast(np.asarray(L), np.asarray(h_deg)).shape)
-    hi = np.full_like(lo, 0.5)
+    hi = np.full_like(lo, 0.9)
     for _ in range(iters):
         mid = (lo + hi) / 2
         ok = in_gamut(L, mid, h_deg, gamut)
         lo, hi = np.where(ok, mid, lo), np.where(ok, hi, mid)
     return lo
+
+
+def oklch_to_space(L, C, h_deg, space: str):
+    """An OKLCH colour as stored values of a working space, chroma lowered to fit that space (linear: sRGB's
+    primaries, so chroma is limited to sRGB's, but values above 1 are not clipped)."""
+    if space in ("srgb", "linear"):
+        if space == "srgb":
+            return oklch_to_srgb(L, C, h_deg)
+        C = np.minimum(C, max_chroma(L, h_deg, "srgb"))
+        return tuple(float(v) for v in np.clip(oklab_to_linear_srgb(oklch_to_oklab(L, C, h_deg)), 0, None))
+    C = np.minimum(C, max_chroma(L, h_deg, space))
+    lin = oklab_to_linear_srgb(oklch_to_oklab(L, C, h_deg)) @ _lin_srgb_to(space).T
+    from ..color import spaces as S
+    return tuple(float(v) for v in np.clip(S.SPACES[space].encode(np.clip(lin, 0, 1)), 0, 1))
 
 
 def oklch_to_srgb(L, C, h_deg):

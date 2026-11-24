@@ -11,6 +11,16 @@ filter); side by side of two undo branches. P2: smudge (smear, dull, colour rate
 the MyPaint engine and .myb brushes (libmypaint port; what is not ported is listed in mypaint.py). Quick synthetic
 tests only, as Bill asked: tests/test_paint_engine.py (27) and tests/test_paint_page.py (12) pass on the Linux copy.
 Not run on Windows; no real pen; no real MyPaint pack tried.
+Then (02:50): the brush editor with a live preview stroke, paper grain, a second tip, count and colour jitter, five
+new textured presets; 43 quick tests pass. Then (03:00): seven new engines, brush imports (.abr, .sut/.sutg, .kpp,
+.gbr/.gih) and the 122-brush pack with categories and search; 47 quick tests pass. Then (03:41) P3: watercolour
+that flows and dries, impasto with a movable light, the bristle engine, 13 more presets (135); 52 quick tests pass.
+Then (04:05, "build the rest"): P4 core (selections, transforms from the original, liquify, masks, clipping,
+adjustment layers, filters) and P5's file part (PSD open/save, KRA open); 60 quick tests pass. Still to build: see
+the plan's Status ("Still to build"): P5 colour, P6, P7, P8, P9, P10 and the listed gaps.
+Then (11:39): P4 finished (on-canvas transform handles, perspective / warp / mesh / cage, filter / fill / file
+layers, the Studio's Natural curve and Clean, subject select by SAM) and P5 built (working colour spaces, linear HDR
+canvas, soft proof on any screen, EXR, PSD profiles / ZIP / .psb); 64 quick tests pass. Next: P6.
 
 ## Paint, P0 and most of P1 (2026-11-23 night, chat session with Bill)
 

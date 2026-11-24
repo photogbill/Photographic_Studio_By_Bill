@@ -28,6 +28,8 @@ FORMATS = {
              "white, fills it) and a little loss"),
     "webp": ("WebP", ".webp", "the web: smaller than JPEG at the same look, and keeps see-through areas",
              "some older programs and printers cannot open it; 8-bit only"),
+    "exr": ("OpenEXR", ".exr", "3D, games and HDR: floating point, linear light, values above white kept",
+            "photo programs and the web do not show it; big files"),
 }
 # key -> (name, best for, weak at)
 PROFILES = {
@@ -39,11 +41,15 @@ PROFILES = {
 }
 
 
-def flat_pixels(doc: Document, space: str = "srgb", alpha: bool = True) -> np.ndarray:
-    """The picture as straight (not premultiplied) float RGBA 0..1 encoded in ``space``."""
-    px = doc.composite(background=True)
+def flat_pixels(doc: Document, space: str = "srgb", alpha: bool = True, light=None) -> np.ndarray:
+    """The picture as straight (not premultiplied) float RGBA 0..1 encoded in ``space``; ``light`` lights the paint's
+    relief (impasto) as the canvas does."""
+    px = doc.composite(background=True, light=light)
     a = px[..., 3:4]
     rgb = np.where(a > 0, px[..., :3] / np.maximum(a, 1e-8), 0).astype(np.float32)
+    if doc.space != "srgb":                                  # the painting's own working space -> sRGB first
+        from .space import convert
+        rgb = np.clip(convert(rgb, doc.space, "srgb"), 0, 1)
     if not alpha:                                       # see-through areas over white (JPEG)
         rgb = rgb * a + (1 - a)
         a = np.ones_like(a)
@@ -62,17 +68,25 @@ def _quant(f, bits):
 
 
 def export(doc: Document, path: str, fmt: str = "png", space: str = "srgb", bits: int = 8, quality: int = 92,
-           lossless: bool = False) -> str:
+           lossless: bool = False, light=None) -> str:
     """Write the flat picture to ``path`` (written through ``.partial`` then swapped in). Returns the path."""
     if fmt not in FORMATS:
         raise ValueError(f"format must be one of {tuple(FORMATS)}")
     if space not in PROFILES:
         raise ValueError(f"profile must be one of {tuple(PROFILES)}")
+    if fmt == "exr":
+        from . import exr
+        from .space import convert
+        px = doc.composite(background=True, light=light)
+        a = px[..., 3:4]
+        rgb = np.where(a > 0, px[..., :3] / np.maximum(a, 1e-8), 0)
+        lin = convert(rgb, doc.space, "linear")             # linear sRGB primaries, values above 1 kept
+        return exr.save(path, np.concatenate([lin * a, a], -1).astype(np.float32))
     if fmt in ("jpeg", "webp"):
         bits = 8
     prof = icc.profile_bytes(space)
     keep_alpha = fmt != "jpeg"
-    f = flat_pixels(doc, space, keep_alpha)
+    f = flat_pixels(doc, space, keep_alpha, light)
     if not keep_alpha or f[..., 3].min() >= 1.0:
         f = f[..., :3]                                   # fully opaque: no alpha channel needed
     arr = _quant(f, bits)

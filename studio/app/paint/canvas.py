@@ -14,7 +14,7 @@ import math
 import time
 
 import numpy as np
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPointingDevice, QTransform
 from PySide6.QtWidgets import QWidget
 
@@ -34,6 +34,7 @@ class PaintCanvas(QWidget):
     changed = Signal()               # the painting changed (autosave, title)
     view_changed = Signal(str)       # zoom / rotation text
     message = Signal(str)
+    selection_changed = Signal()
     popup_requested = Signal(object)   # global QPoint: right click / pen barrel button opens the pop-up palette
 
     def __init__(self, parent=None):
@@ -50,6 +51,16 @@ class PaintCanvas(QWidget):
         self.smoothing, self.smooth_strength = "basic", 0.3
         self.pen_curve = Curve()          # the person's own pressure curve, before any brush
         self.value_view = False           # greyscale view to check values
+        self.light = None                 # impasto: (azimuth, elevation, strength) lighting the paint's relief
+        self.sel_mode = "replace"         # how a new selection combines with the old one
+        self.exposure = 0.0               # linear (HDR) paintings: viewing exposure in stops
+        self._sel = None                  # points of the selection being drawn
+        self._sel_img = None              # the shade outside the selection, made when the selection changes
+        self._sel_for = None
+        self.mask_mode = False            # paint on the selected layer's mask instead of its paint
+        self.transform_session = None     # liquify (and other transforms) in progress
+        self._wet_timer = QTimer(self, interval=40, timeout=self.dry_tick)
+        self._wet_timer.start()
         self.tool = "brush"               # brush, fill, gradient
         self.second_colour = (1.0, 1.0, 1.0)
         self.fill_opts = {"tolerance": 0.1, "gap": 0, "grow": 1, "source": "picture", "reference": None}
@@ -74,6 +85,38 @@ class PaintCanvas(QWidget):
         self.refresh()
         self.fit()
 
+    def dry_tick(self):
+        """Watercolour: a few steps of flow and drying for every wet layer, then show what changed."""
+        doc = getattr(self, "doc", None)
+        if doc is None:
+            return
+        import time as _t
+        t0 = _t.perf_counter()
+        changed = False
+        for lay in doc.layers:
+            sim = lay.wet
+            if sim is None:
+                continue
+            if not sim.active:
+                lay.wet = None
+                continue
+            try:
+                rect = sim.step(1)
+            except Exception as err:                         # noqa: BLE001
+                from ..common import report_problem
+                report_problem("Paint: watercolour drying", err)
+                sim.force_dry()
+                lay.wet = None
+                continue
+            if rect is not None:
+                self.refresh(rect)
+                changed = True
+        if changed:
+            doc.dirty = True
+        # keep the window responsive: a big wash that takes long to step is stepped less often
+        cost = (_t.perf_counter() - t0) * 1000
+        self._wet_timer.setInterval(int(min(400, max(40, 2.0 * cost))))
+
     def refresh(self, rect=None):
         """Composite again (the whole picture, or one rectangle) into the display copy."""
         d = self.doc
@@ -84,7 +127,7 @@ class PaintCanvas(QWidget):
             x1, y1 = min(d.width, rect[2]), min(d.height, rect[3])
             if x1 <= x0 or y1 <= y0:
                 return
-        px = d.composite(x0, y0, x1 - x0, y1 - y0)
+        px = d.composite(x0, y0, x1 - x0, y1 - y0, light=self.light)
         if self.value_view:
             v = px[..., 0] * 0.2126 + px[..., 1] * 0.7152 + px[..., 2] * 0.0722
             px = np.dstack([v, v, v, px[..., 3]])
@@ -97,25 +140,31 @@ class PaintCanvas(QWidget):
         in Paint, in Develop and in print; without one, sRGB is shown as it is."""
         out = np.empty(px.shape, np.uint8)
         out[..., 3] = (np.clip(px[..., 3], 0, 1) * 255 + 0.5).astype(np.uint8)
+        space = getattr(self.doc, "space", "srgb")
         d = None
-        if self.managed:
-            try:
-                from ...engine.color import display
+        try:
+            from ...engine.color import display
+            proof = bool(display.proof_state().get("path"))
+            if self.managed or proof:
                 d = display.current()
-                d = d if d.managed else None
-            except Exception:                                       # noqa: BLE001  (show unmanaged, never fail)
-                log.debug("screen profile not available", exc_info=True)
-                d = None
-        if d is None:
+                d = d if (d.managed or proof) else None
+        except Exception:                                       # noqa: BLE001  (show unmanaged, never fail)
+            log.debug("screen profile not available", exc_info=True)
+            d = None
+        a = np.clip(px[..., 3:4], 0, 1)
+        straight = px[..., :3] / np.maximum(a, 1e-8)
+        if space == "linear" and self.exposure:
+            straight = straight * (2.0 ** self.exposure)          # viewing exposure for HDR paintings
+        if d is None and space == "srgb":
             out[..., :3] = (np.clip(px[..., :3], 0, 1) * 255 + 0.5).astype(np.uint8)
             return out
-        from ...engine.color import spaces
-        from ...engine.paint.colour import srgb_to_linear
-        a = np.clip(px[..., 3:4], 0, 1)
-        straight = np.clip(px[..., :3] / np.maximum(a, 1e-8), 0, 1)
-        pp = spaces.apply_matrix(np.ascontiguousarray(srgb_to_linear(straight)),
-                                 spaces.conversion_matrix(spaces.SRGB, spaces.PROPHOTO).astype(np.float32))
-        rgb8 = d.to8(pp).astype(np.float32)
+        from ...engine.paint import space as WS
+        if d is None:                                           # unmanaged screen: show as sRGB
+            rgb = np.clip(WS.convert(straight, space, "srgb"), 0, 1)
+            out[..., :3] = (rgb * a * 255 + 0.5).astype(np.uint8)
+            return out
+        pp = WS.to_prophoto_linear(np.clip(straight, 0, None), space)
+        rgb8 = d.to8(np.ascontiguousarray(pp, np.float32)).astype(np.float32)
         out[..., :3] = (rgb8 * a + 0.5).astype(np.uint8)           # back to premultiplied for the QImage
         return out
 
@@ -176,6 +225,24 @@ class PaintCanvas(QWidget):
         p.drawImage(r, self._qimg)
         p.setPen(QPen(QColor(0, 0, 0, 90), 0))
         p.drawRect(r)
+        sel = self.doc.selection
+        if sel is not None:                                    # shade outside the selection
+            if self._sel_for is not sel:
+                a = np.ascontiguousarray(((1 - sel) * 110).astype(np.uint8))
+                img = np.zeros(sel.shape + (4,), np.uint8)
+                img[..., 3] = a
+                img[..., 2] = (a > 0) * 40
+                self._sel_img = QImage(img.data, sel.shape[1], sel.shape[0], 4 * sel.shape[1],
+                                       QImage.Format.Format_RGBA8888).copy()
+                self._sel_for = sel
+            p.drawImage(r, self._sel_img)
+        if self._sel:                                          # the outline being drawn
+            p.setPen(QPen(QColor(34, 211, 238, 230), 0))
+            pts = self._sel_outline()
+            for a_, b_ in zip(pts, pts[1:]):
+                p.drawLine(QPointF(*a_), QPointF(*b_))
+        if self.tool == "transform" and self.transform_session is not None:
+            self._draw_handles(p)
         if self._grad is not None:                             # the gradient being dragged
             p.setPen(QPen(QColor(255, 255, 255, 220), 0))
             p.drawLine(self._grad[0], self._grad[1])
@@ -200,7 +267,266 @@ class PaintCanvas(QWidget):
         t = (ts_ms / 1000.0) if ts_ms else (time.perf_counter() - self._t0)
         return Sample(d.x(), d.y(), float(self.pen_curve(pressure)), t, tilt_x, tilt_y, rotation)
 
+    def _is_clone(self):
+        return self.brush is not None and self.brush.mode == "clone"
+
+    def set_clone_source(self, x, y):
+        """Clone: Ctrl+click sets where to copy from; the next stroke fixes the offset, and later strokes keep it
+        (aligned cloning) until a new Ctrl+click."""
+        self.clone_source = (x, y)
+        self.clone_offset = None
+        self.message.emit("Copying from here. Now paint where the copy should go.")
+
+    SEL_TOOLS = ("rect", "ellipse", "lasso", "polygon", "wand", "colour")
+
+    def _sel_outline(self):
+        pts = self._sel or []
+        if self.tool in ("rect", "ellipse") and len(pts) >= 2:
+            (x0, y0), (x1, y1) = pts[0], pts[-1]
+            if self.tool == "rect":
+                return [(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)]
+            t = np.linspace(0, 2 * np.pi, 64)
+            cx, cy, rx, ry = (x0 + x1) / 2, (y0 + y1) / 2, abs(x1 - x0) / 2, abs(y1 - y0) / 2
+            return list(zip(cx + rx * np.cos(t), cy + ry * np.sin(t)))
+        return list(pts)
+
+    # ---- transforms with handles on the canvas
+    def start_transform(self, kind: str):
+        """Free, perspective, warp (4 x 4), mesh (8 x 8) or cage, on the selection or the whole layer."""
+        from ...engine.paint import edit
+        if self.transform_session is not None:
+            self.transform_session.cancel()
+        try:
+            lay = self.doc.paint_layer()
+        except LayerLocked as err:
+            self.message.emit(str(err))
+            return False
+        ts = self.transform_session = edit.TransformSession(self.doc, lay, self.doc.selection)
+        self.tf_kind, self.tool = kind, "transform"
+        self.tf = dict(tx=0.0, ty=0.0, sx=1.0, sy=1.0, angle=0.0, shx=0.0)
+        self.tf_pts = list(ts.corners()) if kind == "perspective" else []
+        self.tf_src = []
+        if kind in ("warp", "mesh"):
+            n = 4 if kind == "warp" else 8
+            gx, gy = np.linspace(0, self.doc.width, n), np.linspace(0, self.doc.height, n)
+            self.tf_grid0 = np.stack(np.meshgrid(gx, gy), -1)
+            self.tf_grid = self.tf_grid0.copy()
+        self._tf_drag = None
+        self.update()
+        return True
+
+    def _tf_handles(self):
+        ts = self.transform_session
+        k = self.tf_kind
+        if k == "free":
+            M = getattr(self, "tf_M", None)
+            pts = ts.corners()
+            if M is None:
+                return pts
+            out = []
+            for x, y in pts:
+                v = M @ np.array([x, y, 1.0])
+                out.append((v[0] / v[2], v[1] / v[2]))
+            return out
+        if k == "perspective":
+            return self.tf_pts
+        if k in ("warp", "mesh"):
+            return [tuple(p) for p in self.tf_grid.reshape(-1, 2)]
+        return self.tf_pts
+
+    def _draw_handles(self, p):
+        pts = self._tf_handles()
+        p.setPen(QPen(QColor(34, 211, 238, 230), 0))
+        if self.tf_kind in ("free", "perspective", "cage") and len(pts) >= 2:
+            ring = list(pts) + [pts[0]]
+            for a_, b_ in zip(ring, ring[1:]):
+                p.drawLine(QPointF(*a_), QPointF(*b_))
+        if self.tf_kind in ("warp", "mesh"):
+            g = self.tf_grid
+            for i in range(g.shape[0]):
+                for j in range(g.shape[1] - 1):
+                    p.drawLine(QPointF(*g[i, j]), QPointF(*g[i, j + 1]))
+                    p.drawLine(QPointF(*g[j, i]), QPointF(*g[j + 1, i]))
+        r = 5 / max(self.zoom, 1e-3)
+        for x, y in pts:
+            p.drawRect(QRectF(x - r, y - r, 2 * r, 2 * r))
+
+    def _tf_hit(self, x, y):
+        best, bi = 12 / max(self.zoom, 1e-3), None
+        for i, (hx, hy) in enumerate(self._tf_handles()):
+            d = math.hypot(hx - x, hy - y)
+            if d < best:
+                best, bi = d, i
+        return bi
+
+    def _tf_press(self, s):
+        k = self.tf_kind
+        i = self._tf_hit(s.x, s.y)
+        if k == "cage" and i is None:
+            self.tf_src.append((s.x, s.y))                 # a new cage point
+            self.tf_pts.append((s.x, s.y))
+            self.update()
+            return
+        if k == "free" and i is None:
+            pts = self._tf_handles()
+            from ...engine.paint.select import polygon
+            inside = polygon(self.doc.width, self.doc.height, pts)[int(min(max(s.y, 0), self.doc.height - 1)),
+                                                                   int(min(max(s.x, 0), self.doc.width - 1))] > 0.5
+            self._tf_drag = ("move" if inside else "rotate", (s.x, s.y), dict(self.tf))
+            return
+        self._tf_drag = ("handle", i, (s.x, s.y), dict(self.tf))
+
+    def _tf_move(self, s):
+        d = self._tf_drag
+        if d is None:
+            return
+        ts, k = self.transform_session, self.tf_kind
+        x0, y0, x1, y1 = ts.box
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        if d[0] == "move":
+            sx_, sy_ = d[1]
+            self.tf.update(tx=d[2]["tx"] + s.x - sx_, ty=d[2]["ty"] + s.y - sy_)
+        elif d[0] == "rotate":
+            c = (cx + self.tf["tx"], cy + self.tf["ty"])
+            a0 = math.degrees(math.atan2(d[1][1] - c[1], d[1][0] - c[0]))
+            a1 = math.degrees(math.atan2(s.y - c[1], s.x - c[0]))
+            self.tf["angle"] = d[2]["angle"] + a1 - a0
+        else:
+            i = d[1]
+            if k == "free":                                # a corner scales about the centre
+                c = (cx + self.tf["tx"], cy + self.tf["ty"])
+                hx, hy = ts.corners()[i]
+                d0 = max(math.hypot(hx - cx, hy - cy), 1e-6)
+                f = math.hypot(s.x - c[0], s.y - c[1]) / d0
+                self.tf.update(sx=f * (1 if d[3]["sx"] >= 0 else -1), sy=f)
+            elif k in ("perspective", "cage"):
+                self.tf_pts[i] = (s.x, s.y)
+            else:
+                n = self.tf_grid.shape[0]
+                self.tf_grid[i // n, i % n] = (s.x, s.y)
+        self.apply_transform()
+
+    def apply_transform(self):
+        ts, k = self.transform_session, self.tf_kind
+        if ts is None:
+            return
+        if k == "free":
+            self.tf_M = ts.free(**self.tf)
+        elif k == "perspective":
+            ts.perspective(self.tf_pts)
+        elif k in ("warp", "mesh"):
+            ts.warp(self.tf_grid - self.tf_grid0, n=self.tf_grid.shape[0])
+        elif k == "cage" and len(self.tf_src) >= 3:
+            ts.cage(self.tf_src, self.tf_pts)
+        self.refresh()
+
+    def finish_transform(self, keep: bool = True):
+        ts = self.transform_session
+        if ts is None:
+            return
+        if keep:
+            ts.commit(self.undo, {"free": "Transform", "perspective": "Perspective", "warp": "Warp",
+                                  "mesh": "Mesh", "cage": "Cage"}.get(getattr(self, "tf_kind", ""), "Transform"))
+            self.doc.dirty = True
+        else:
+            ts.cancel()
+        self.transform_session = None
+        self.tf_M = None
+        self.tool = "brush"
+        self.refresh()
+        self.changed.emit()
+
+    def _mask_proxy(self):
+        """Painting on a mask: the mask shown as grey paint (white shows, black hides), painted, then read back."""
+        from ...engine.paint.tiles import Layer
+        lay = self.doc.layer
+        if lay.mask is None:
+            raise LayerLocked(f"\"{lay.name}\" has no mask. Add one in the Layers tab first.")
+        proxy = Layer("mask")
+        for k, t in lay.mask.items():
+            proxy.tiles[k] = np.concatenate([np.repeat(t[..., None], 3, -1), np.ones_like(t[..., None])], -1)
+        self._mask_layer = lay
+        self._proxy = proxy
+        return proxy
+
+    def _mask_back(self):
+        lay, proxy = self._mask_layer, self._proxy
+        for k in self._stroke.orig:
+            t = proxy.tiles.get(k)
+            if t is None:
+                continue
+            self.undo.touch(lay, ("m",) + tuple(k))
+            v = t[..., :3].mean(-1) + (1 - t[..., 3])         # over white: untouched areas stay shown
+            lay.mask[k] = np.clip(v, 0, 1).astype(np.float32)
+        self._mask_layer = None
+
+    def set_selection(self, m):
+        from ...engine.paint import select
+        d = self.doc
+        d.selection = None if m is None else select.combine(d.selection, m, self.sel_mode)
+        if d.selection is not None and float(d.selection.max()) <= 0:
+            d.selection = None
+        self.selection_changed.emit()
+        self.update()
+
+    def _finish_selection(self):
+        from ...engine.paint import select
+        d, pts, tool = self.doc, self._sel, self.tool
+        self._sel = None
+        if tool == "rect" and len(pts) >= 2:
+            m = select.rect(d.width, d.height, *pts[0], *pts[-1])
+        elif tool == "ellipse" and len(pts) >= 2:
+            m = select.ellipse(d.width, d.height, *pts[0], *pts[-1])
+        elif tool in ("lasso", "polygon") and len(pts) >= 3:
+            m = select.polygon(d.width, d.height, pts)
+        else:
+            self.update()
+            return
+        self.set_selection(m)
+
     def _begin(self, s: Sample, eraser: bool):
+        if self.tool == "transform" and self.transform_session is not None:
+            self._tf_press(s)
+            return
+        if self.tool == "subject":
+            from ...engine.paint import select
+            try:
+                self.set_selection(select.subject(self.doc, s.x, s.y, key=id(self.undo.current)))
+            except select.SelectProblem as err:
+                self.message.emit(str(err))
+            except Exception as err:                         # noqa: BLE001
+                from ..common import report_problem
+                report_problem("Paint: subject select", err)
+                self.message.emit("Subject select failed; an error report was saved.")
+            return
+        if self.tool in self.SEL_TOOLS:
+            from ...engine.paint import select
+            if self.tool == "wand":
+                self.set_selection(select.wand(self.doc, s.x, s.y, getattr(self, "wand_tolerance", 0.1)))
+            elif self.tool == "colour":
+                c = pick(self.doc, s.x, s.y, 1)
+                if c is not None:
+                    self.set_selection(select.colour_range(self.doc, c, getattr(self, "colour_fuzz", 0.08)))
+            elif self.tool == "polygon":
+                pts = self._sel or []
+                if len(pts) >= 3 and math.hypot(s.x - pts[0][0], s.y - pts[0][1]) * self.zoom < 10:
+                    self._finish_selection()                  # clicked back on the first point: closed
+                else:
+                    self._sel = pts + [(s.x, s.y)]
+                    self.update()
+            else:
+                self._sel = [(s.x, s.y)]
+            return
+        if self.tool == "liquify":
+            from ...engine.paint import edit
+            try:
+                lay = self.doc.paint_layer()
+            except LayerLocked as err:
+                self.message.emit(str(err))
+                return
+            self.transform_session = edit.TransformSession(self.doc, lay, self.doc.selection)
+            self._liq_last = (s.x, s.y)
+            return
         if self.tool == "fill":
             self._fill(s)
             return
@@ -209,11 +535,21 @@ class PaintCanvas(QWidget):
             return
         if self.brush is None:
             return
+        if self._is_clone() and getattr(self, "clone_source", None) is None:
+            self.message.emit("Clone: Ctrl+click where to copy from first, then paint where the copy should go.")
+            return
         try:
             self.undo.begin("Erase" if (eraser or self.brush.eraser) else "Stroke")
-            self._stroke = make_stroke(self.doc.paint_layer(), self.brush, self.colour, self.undo,
-                                       eraser=True if eraser else None,
-                                  sample=lambda x0, y0, w, h: self.doc.composite(x0, y0, w, h, background=False))
+            clone = None
+            if self._is_clone() and getattr(self, "clone_source", None) is not None:
+                if getattr(self, "clone_offset", None) is None:
+                    self.clone_offset = (self.clone_source[0] - s.x, self.clone_source[1] - s.y)
+                clone = self.clone_offset
+            target = self._mask_proxy() if self.mask_mode else self.doc.paint_layer()
+            self._stroke = make_stroke(target, self.brush, self.colour, None if self.mask_mode else self.undo,
+                                       eraser=True if eraser else None, clone=clone, clip=self.doc.selection,
+                                       sample=lambda x0, y0, w, h: self.doc.composite(x0, y0, w, h,
+                                                                                      background=False))
         except LayerLocked as err:
             self.undo.end()
             self.message.emit(str(err))
@@ -223,6 +559,21 @@ class PaintCanvas(QWidget):
         self._feed(s)
 
     def _feed(self, s: Sample):
+        if self.tool == "transform" and self.transform_session is not None:
+            self._tf_move(s)
+            return
+        if self._sel is not None and self.tool in ("rect", "ellipse", "lasso"):
+            self._sel.append((s.x, s.y))
+            self.update()
+            return
+        if self.tool == "liquify" and self.transform_session is not None:
+            lx, ly = self._liq_last
+            r = self.transform_session.liquify_push(s.x, s.y, s.x - lx, s.y - ly,
+                                                    self.brush.size / 2 if self.brush else 40)
+            self._liq_last = (s.x, s.y)
+            if r:
+                self.refresh(r)
+            return
         if self._grad is not None:
             self._grad = (self._grad[0], QPointF(s.x, s.y))
             self.update()
@@ -237,6 +588,19 @@ class PaintCanvas(QWidget):
             self.refresh(rect)
 
     def _end(self):
+        if self.tool == "transform":
+            self._tf_drag = None
+            return
+        if self._sel is not None and self.tool in ("rect", "ellipse", "lasso"):
+            self._finish_selection()
+            return
+        if self.tool == "liquify" and self.transform_session is not None:
+            self.transform_session.commit(self.undo, "Liquify")
+            self.transform_session = None
+            self.doc.dirty = True
+            self.refresh()
+            self.changed.emit()
+            return
         if self._grad is not None:
             self._gradient(*self._grad)
             self._grad = None
@@ -247,6 +611,8 @@ class PaintCanvas(QWidget):
         for o in self._smoother.finish():
             rect = _union(rect, self._stroke.add(o))
         rect = _union(rect, self._stroke.finish())
+        if self.mask_mode and getattr(self, "_mask_layer", None) is not None:
+            self._mask_back()
         self.undo.end()
         self._stroke = None
         if rect:
@@ -271,6 +637,8 @@ class PaintCanvas(QWidget):
                 self.popup_requested.emit(self.mapToGlobal(pos.toPoint()))
             elif e.modifiers() & Qt.KeyboardModifier.AltModifier:
                 self._pick(s)
+            elif (e.modifiers() & Qt.KeyboardModifier.ControlModifier) and self._is_clone():
+                self.set_clone_source(s.x, s.y)
             elif self._space or e.button() == Qt.MouseButton.MiddleButton:
                 self._pan_from = pos
             else:
@@ -299,6 +667,8 @@ class PaintCanvas(QWidget):
             s = self._sample(pos, 1.0, None)
             if e.modifiers() & Qt.KeyboardModifier.AltModifier:
                 self._pick(s)
+            elif (e.modifiers() & Qt.KeyboardModifier.ControlModifier) and self._is_clone():
+                self.set_clone_source(s.x, s.y)
             else:
                 self._begin(s, self.eraser_mode)
 
@@ -376,7 +746,8 @@ class PaintCanvas(QWidget):
     def _pick(self, s: Sample):
         c = pick(self.doc, s.x, s.y, 1)
         if c is not None:
-            self.colour_picked.emit(c)
+            from ...engine.paint.space import to_srgb
+            self.colour_picked.emit(to_srgb(c, self.doc.space))      # the pickers work in sRGB
 
     # ---- for scripts and tests
     def stroke_from(self, samples, eraser=None):

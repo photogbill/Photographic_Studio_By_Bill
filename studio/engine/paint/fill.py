@@ -74,6 +74,8 @@ def fill(doc: Document, x: float, y: float, colour, tolerance: float = 0.1, gap:
     ys, xs = np.nonzero(reg)
     x0, x1, y0, y1 = int(xs.min()), int(xs.max()) + 1, int(ys.min()), int(ys.max()) + 1
     m = reg[y0:y1, x0:x1, None].astype(np.float32) * opacity
+    if doc.selection is not None:                     # only inside the selection
+        m = m * doc.selection[y0:y1, x0:x1, None]
     base = lay.read(x0, y0, x1 - x0, y1 - y0)
     src = np.concatenate([np.asarray(colour[:3], np.float32) * m, m], -1)
     out = src + base * (1 - m)
@@ -118,6 +120,8 @@ def gradient(doc: Document, p0, p1, c0, c1, kind: str = "linear", space: str = "
     """Lay a gradient over the whole active layer (painted on top of what is there)."""
     lay: Layer = doc.paint_layer()
     g = gradient_pixels(doc.width, doc.height, p0, p1, c0, c1, kind, space)
+    if doc.selection is not None:                     # only inside the selection
+        g = g * doc.selection[..., None]
     base = lay.read(0, 0, doc.width, doc.height)
     out = g + base * (1 - g[..., 3:4])
     if lay.alpha_lock:

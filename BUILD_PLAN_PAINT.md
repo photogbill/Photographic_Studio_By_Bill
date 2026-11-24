@@ -471,7 +471,102 @@ line for each part, a Status note here.
   (WGM), smudge buckets, gridmap, directional offsets, colorize, posterize, snap to pixel. `brush.make_stroke` picks
   the engine; "Load MyPaint brushes" in the Brush tab, kept in `paint/brushes`. Speed gate passes (p95 13-16 ms at
   60 px). Not yet tried on real MyPaint packs (none in the workspace). Tests: 39 quick ones pass.
-- **Not built yet:** history kept on disk (P1); from P2: texture / grain, dual brush, scatter and colour jitter
-  options, the other engines (spray, chalk, sketch, hatching, ...), the brush editor with a live preview stroke,
-  brush tags, imports (.abr, .sut, .kpp, .gbr / .gih), the 100-preset pack; a native C pigment kernel (**Bill, 2026-11-24 01:38: leave pigment mixing as it is for now, write the C code
-  later down the line**; Numba not used).
+- 2026-11-24, 02:50 (Bill: "build 1 and 2 together"): **the brush editor with a live preview stroke**
+  (`app/paint/brusheditor.py`; `engine/paint/brushfile.py`: the preview is the real engine on a small strip, an S-curve
+  from a light touch to full pressure and back, smudge brushes given colour bands and erasers paint to remove; brushes
+  saved as JSON with tip / grain PNGs in `paint/brushes`, a saved brush replacing the preset of the same name at
+  start; Save, Save as new brush, Back to how it came; Dynamics as a grid of targets by pen inputs with a curve per
+  ticked box). **Texture** (`engine/paint/texture.py`): five procedural tileable paper grains plus any picture, fixed to
+  the canvas, paper tooth by pressure (light touch: ridges only, full pressure: most valleys); dual tip (second round
+  tip marks scattered in each dab); count with scatter; colour jitter in HSV per dab or per stroke. New presets:
+  Charcoal (rough paper), Soft pastel, Dry brush (canvas), Spray, Leaves (colour jitter). Speed gate passes (p95 3-7 ms
+  at 60 px). Tests: 43 quick ones pass (grain coverage by pressure and fixed to the paper, dual tip coverage, count,
+  jitter per dab vs. per stroke, brush files, preview, the editor end to end).
+- 2026-11-24, 03:00 (Bill: "build 3, 4 and 5"): **seven engines** as modes of the pixel brush (`brush.py`): spray
+  (particles in the disc, denser in the middle), chalk (random dropout by pressure), sketch (lines to earlier points
+  sampled from the whole stroke; the first version joined only the nearest points, so no web lines showed: found by
+  the test and fixed), hatching (lines fixed to the canvas, thickness by pressure, cross-hatch above a pressure),
+  shape (the outline filled at pen-up, 4x supersampled), clone (Ctrl+click source, aligned offset kept until a new
+  source; this layer or every layer), tangent normal (from tilt, or the stroke direction at a set tilt). Picture-tip
+  sets (`tips`, random per dab). **Imports** (`imports.py`): GIMP .gbr / .gih, Photoshop .abr v1-2 and v6-10 (samp
+  section, raw and RLE, GIMP's layout), Krita .kpp (preset XML: engine, size, ratio, fade, spacing, opacity, flow,
+  pressure flags), Clip Studio .sut / .sutg (tip PNGs found in the SQLite blobs; thumbnails skipped); checked on
+  synthetic files only, no real files from those programs yet. **The pack** (`pack.py`): 122 brushes (said as 127 at first: a miscount, corrected 03:41) from the Brush
+  Atlas in 15 categories, each with best for / weak at; not yet tuned with the brushwork meter. The brush list has a
+  category filter and a search box. Tests: 47 quick ones pass (every engine with known geometry, every import format,
+  every pack brush paints).
+- 2026-11-24, 03:41 (Bill: "Continue with P3"): **watercolour** (`watercolour.py`, Curtis 1997 grid method, no
+  polygons): water and suspended pigment at half resolution, settled pigment and paper at full; water evens out only
+  inside the wet area; pigment drifts outwards in the edge band (dark edges) and away from fresh water (back-runs);
+  settling grows as water thins, weighted to the paper's valleys and normalised per block (granulation moves pigment,
+  never makes it); evaporation fastest at edges; a stroke lays its colour once (wash cap; the first version piled up
+  pigment per dab and dried nearly black, found by the test); lifting carries most loosened pigment away. Shown as
+  exp(-density) through Multiply (so Krita and GIMP see the same); a layer becomes a watercolour layer with its first
+  wet stroke, other paint is refused there with a reason. Drying runs on the canvas timer, one step per tick, slowed
+  when a big wash makes a step expensive; undo, layer changes and saving finish it; drying is recorded in the stroke's
+  undo step (tiles noted once, "after" copied only when needed). Speed: a very large wash (1386 x 490 px) costs about
+  73 ms a step on 2 cores, smaller washes far less. **Impasto**: thickness tiles per layer (`Layer.height`, undone with
+  the stroke, saved in .ora as a 16-bit picture with `studio-height`), a stroke raises paint once with a rounded
+  ridge, knives and smudges carry thickness, the eraser removes it; `Document.composite(light=...)` lights it
+  (normals from the relief); Layers > Paint relief; exports with or without it. **Bristle engine** (mode
+  "bristle"): per-bristle offsets, colour and paint left; splay with pressure; bristles across the stroke; pick-up
+  in one batched mix per dab; all bristles gathered into one stamp per dab (p95 12 ms at 60 px; the first version
+  took 60 ms). 13 new presets (135 in all); the brush editor's Media tab. Pencil and charcoal tooth was done in P2 (grain).
+  Tests: 52 quick ones pass. Not yet: the side-by-side judging against Krita and Moko pictures (the acceptance test).
+- 2026-11-24, 04:05 (Bill: "build the rest of it, all remaining items"): **P4** built in its core:
+  `select.py` (canvas-sized soft mask; rect, ellipse, lasso, polygon, wand, colour range in Oklab; replace / add /
+  subtract / intersect; grow, shrink, feather, invert, from layer), every stamp, fill and gradient clipped by
+  `doc.selection`; `transform.py` (affine, homography, grid warp, liquify field) and `edit.TransformSession` (always
+  from the original pixels, resampled once; commit is one undo step); `edit.py` (cut / copy / paste as a layer /
+  delete / fill selection, filters on a layer inside the selection); layer masks (`Layer.mask`, undo keys
+  ("m", tx, ty), painting on the mask through a grey proxy), clipping masks (`Layer.clip`), adjustment layers (kind
+  "adjust", `adjust.py`: curves, levels, hue/sat in OKLCH, brightness/contrast, colour balance, B&W, invert,
+  posterize); all in .ora as `studio-*` attributes. Window: the Select tab (tools, modes, edit, numeric free
+  transform with live preview, filters), liquify as a canvas tool, the shade outside the selection, mask / clip /
+  adjustment controls in Layers. **Not in P4 yet:** on-canvas transform handles (transform is numeric for now),
+  perspective / warp / cage / mesh in the window (in the engine only), filter and fill layers, file layers,
+  adjustment layers from the Studio's photo engine (our own adjustments instead), Clean as a filter, subject select.
+- Same session, **P5 begun:** `psd.py` (open and save RGB 8-bit, open 16-bit; layers, names, opacity, visibility,
+  blend modes, clipping, groups as section dividers, layer masks; raw and RLE; the flattened picture; a bug where
+  `r.p += r.u(...)` lost the 4-byte length was found by the round-trip test and fixed), `kra.py` (open: maindoc.xml,
+  paint and group layers, Krita's tiled LZF format, offsets; other layer kinds and masks left out and said;
+  mergedimage.png as the fallback; checked on a synthetic .kra only). Open reads .ora / .psd / .kra; Save as writes
+  .ora or .psd. A flaky bristle test (random bristle positions) was made deterministic. Tests: 60 quick ones pass.
+- 2026-11-24, 11:39 (Bill: "finish P4 and build P5"): **P4 finished**: transforms with handles on the canvas
+  (free: move / scale / rotate, perspective corners, warp 4 x 4 and mesh 8 x 8 grids, cage by mean-value coordinates
+  on a coarse grid: `transform.mean_value_coords`, `cage_warp`, `TransformSession.cage` / `mesh`), Enter / Esc;
+  filter layers (kind "filter": the filter applied to what lies below, worked out with a 32 px margin through
+  `Document._backdrop` so parts match the whole; inside pass-through groups on the shown part only), fill layers
+  (colour or gradient), file layers (a linked picture, cached, Reload; their pixels written into .ora / .psd for other
+  programs); the Studio's Natural curve as an adjustment (`color/tone.apply_curve_rgb`, natural=True, in linear
+  ProPhoto) and the Studio's Clean as a filter (`local/scanclean`); Subject select by SAM 2.1 (`select.subject`,
+  the embedding kept per undo position). Not done from P4: relight as an adjustment (it needs the depth model; later
+  with P10). **P5 built**: working colour spaces (`space.py`: sRGB, Display P3, Adobe RGB, ProPhoto, linear HDR;
+  convert a painting as one undo step that also restores the space; pickers stay sRGB and the brush gets the working
+  value, the OKLCH picker gives full wide-gamut values in wide spaces), the canvas shows every space through the
+  display path, soft proof works on unprofiled screens too (any printer ICC, CMYK included, gamut mark), HDR view
+  exposure; `exr.py` (write float uncompressed with the Studio's mark, read none / ZIP / ZIPS, half or float);
+  exports convert from the working space, EXR as an export format; .psd keeps the ICC profile both ways
+  (`space_from_icc`), reads ZIP and ZIP-with-prediction channels, opens .psb (8-byte lengths); linear paintings are
+  written to .psd as sRGB. Known limits: .ora stores 8/16-bit so values above 1 are clipped there (export EXR to keep
+  them); the Classic / Light / Pigment / LPM blend maths treat stored values as sRGB-encoded in every space (close in
+  P3 / Adobe RGB, less so in ProPhoto and linear); EXR PIZ / DWA / tiled files are not read. Tests: 64 quick ones pass.
+- **Still to build:** **P6** (perspective and other assistants with snapping, symmetry and wrap-around, reference
+  images, grid and guides, colour harmonies, gamut masks, colour-blindness preview); **P7** (vector layers, text,
+  comic panels and bubbles, print with bleed); **P8** (animation); **P9** (workspaces, timelapse, snapshots, Paint in
+  the CLI / MCP, resource manager, GPU canvas and 20k canvases); **P10** (photo as a paint layer and back to Develop,
+  photo to underpainting, depth and light from the Studio, relight); history on disk (P1); filter / deform brush
+  engines, bundles and the brushwork meter (P2); the C pigment kernel (later, Bill's call). Order: P6 → P10 → P7 →
+  P8 → P9.
+- **Older list (kept for the record):** P5 colour-managed
+  painting in any ICC working space, CMYK soft proof, float / HDR / EXR canvases, ZIP-compressed PSD layers and .psb;
+  the P4 gaps listed above; **P6** (perspective and other assistants with snapping, symmetry and wrap-around,
+  reference images, grid and guides, colour harmonies, gamut masks, colour-blindness preview); **P7** (vector layers,
+  text, comic panels and bubbles, print with bleed); **P8** (animation: timeline, onion skin, tweening, video and
+  sprite-sheet export); **P9** (workspaces, timelapse, snapshots, Paint in the CLI / MCP, resource manager, GPU canvas
+  and 20k canvases); **P10** (photo as a paint layer and back to Develop, photo to underpainting, depth and light from
+  the Studio, print soft proof); history on disk (P1); filter / deform brush engines, bundles and the brushwork meter
+  (P2); the C pigment kernel (later, Bill's call). Order stays P5 rest → P6 → P10 → P7 → P8 → P9.
+- **Not built yet (older list):** history kept on disk (P1); from P2: filter and deform engines, brush bundles, the brushwork meter
+  to tune the pack; a native C pigment kernel (**Bill, 2026-11-24 01:38: leave pigment mixing as it is for now, write
+  the C code later down the line**; Numba not used). Next: P4 (editing, selecting and transforming).

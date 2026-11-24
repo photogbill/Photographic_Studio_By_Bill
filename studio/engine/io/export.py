@@ -370,6 +370,10 @@ def is_own_export(path: str) -> bool:
             from PIL import Image
             with Image.open(path) as im:
                 return str(im.getexif().get(305) or "").startswith(OWN_MARK)
+        if low.endswith(".exr"):                  # Paint's EXR: a "software" header attribute
+            with open(path, "rb") as fh:
+                head = fh.read(4096)
+            return head[:4] == b"\x76\x2f\x31\x01" and OWN_MARK.encode() in head
         if low.endswith((".fits", ".fit", ".fts")):
             from . import fits as fx
             return fx.is_own(path)

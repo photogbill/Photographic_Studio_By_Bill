@@ -76,10 +76,79 @@ class Layer:
     kind: str = "paint"           # "paint" or "group"
     parent: int | None = None     # uid of the group this layer is in; None = top level
     collapsed: bool = False       # groups: contents hidden in the Layers panel (a view setting, not undone)
+    height: dict = field(default_factory=dict)   # impasto: paint thickness tiles (256 x 256 float32), sparse
+    medium: str = ""              # "watercolour": a wet-media layer (watercolour.py); "" ordinary paint
+    wet: object = None            # watercolour: the running simulation while the paint is wet (not saved, not undone)
+    mask: dict | None = None      # layer mask: 2-D tiles 0..1 (a missing tile = 1, shown); None = no mask
+    clip: bool = False            # clipping mask: shows only where the layer below (in its group) has paint
+    adj: dict | None = None       # kind "adjust": {"kind": adjust.ADJUSTMENTS key, "params": {...}}
+                                  # kind "filter": {"kind": adjust.FILTERS key, "amount": float}
+                                  # kind "fill": {"colour": (r, g, b)} or {"gradient": {p0, p1, c0, c1, kind}}
+                                  # kind "file": {"path": str, "x": int, "y": int}
+    _file_px: object = None       # file layers: the picture, loaded once (not saved, not undone)
 
     @property
     def is_group(self) -> bool:
         return self.kind == "group"
+
+    @property
+    def is_adjust(self) -> bool:
+        return self.kind in ("adjust", "filter")
+
+    @property
+    def is_generated(self) -> bool:
+        """Fill and file layers: pixels made from a setting or a linked picture, not painted."""
+        return self.kind in ("fill", "file")
+
+    def generated(self, x0, y0, w, h, doc_w, doc_h):
+        """Fill and file layers: their pixels in a rectangle (premultiplied RGBA)."""
+        a = self.adj or {}
+        if self.kind == "fill":
+            if "gradient" in a:
+                from .fill import gradient_pixels
+                g = a["gradient"]
+                full = gradient_pixels(doc_w, doc_h, g["p0"], g["p1"], g["c0"], g["c1"], g.get("kind", "linear"),
+                                       g.get("space", "oklab"))
+                out = np.zeros((h, w, 4), np.float32)
+                sx0, sy0, sx1, sy1 = max(0, x0), max(0, y0), min(doc_w, x0 + w), min(doc_h, y0 + h)
+                if sx1 > sx0 and sy1 > sy0:
+                    out[sy0 - y0:sy1 - y0, sx0 - x0:sx1 - x0] = full[sy0:sy1, sx0:sx1]
+                return out
+            c = np.asarray(a.get("colour", (0.5, 0.5, 0.5)), np.float32)
+            out = np.empty((h, w, 4), np.float32)
+            out[..., :3], out[..., 3] = c, 1.0
+            return out
+        if self.kind == "file":
+            px = self._file_px
+            if px is None:
+                px = self._file_px = load_picture(a.get("path", ""))
+            out = np.zeros((h, w, 4), np.float32)
+            if px is None:
+                return out
+            fx, fy = int(a.get("x", 0)), int(a.get("y", 0))
+            ph, pw = px.shape[:2]
+            sx0, sy0 = max(x0, fx), max(y0, fy)
+            sx1, sy1 = min(x0 + w, fx + pw), min(y0 + h, fy + ph)
+            if sx1 > sx0 and sy1 > sy0:
+                out[sy0 - y0:sy1 - y0, sx0 - x0:sx1 - x0] = px[sy0 - fy:sy1 - fy, sx0 - fx:sx1 - fx]
+            return out
+        return np.zeros((h, w, 4), np.float32)
+
+    def mask_values(self, x0, y0, w, h):
+        """The mask in a rectangle (1 where it has no tile)."""
+        m = np.ones((h, w), np.float32)
+        if not self.mask:
+            return m
+        for ty in range(int(np.floor(y0 / TILE)), int(np.floor((y0 + h - 1) / TILE)) + 1):
+            for tx in range(int(np.floor(x0 / TILE)), int(np.floor((x0 + w - 1) / TILE)) + 1):
+                t = self.mask.get((tx, ty))
+                if t is None:
+                    continue
+                ox, oy = tx * TILE, ty * TILE
+                ax0, ay0 = max(x0, ox), max(y0, oy)
+                ax1, ay1 = min(x0 + w, ox + TILE), min(y0 + h, oy + TILE)
+                m[ay0 - y0:ay1 - y0, ax0 - x0:ax1 - x0] = t[ay0 - oy:ay1 - oy, ax0 - ox:ax1 - ox]
+        return m
 
     def tile(self, key, create: bool = False):
         t = self.tiles.get(key)
@@ -145,6 +214,8 @@ class Document:
     path: str | None = None                   # the artist's own file (NAME.ora), when saved
     dirty: bool = False
     bits: int = 8                             # layer depth in the .ora: 8 (every reader) or 16 (smoother glazes)
+    selection: object = None                  # select.py: a canvas-sized soft mask, or None (everything)
+    space: str = "srgb"                       # space.py: the working colour space the pixels are stored in
 
     def __post_init__(self):
         if not self.layers:
@@ -214,6 +285,13 @@ class Document:
             pick = next((j for j in inside if self.locked_by(self.layers[j]) is None), inside[0])
             self.active = pick
             lay = self.layers[pick]
+        if lay.is_generated:
+            raise LayerLocked(f"\"{lay.name}\" is a {'fill' if lay.kind == 'fill' else 'file'} layer: its pixels "
+                              "come from its setting or its linked picture. Pick a paint layer, or paint on its mask.")
+        if lay.is_adjust:
+            raise LayerLocked(f"\"{lay.name}\" is an adjustment layer: it changes the layers below it and has no "
+                              "paint of its own. Pick a paint layer, or paint on its mask (Layers > Paint on the "
+                              "mask).")
         by = self.locked_by(lay)
         if by is lay:
             raise LayerLocked(f"The layer \"{lay.name}\" is locked. Unlock it in the Layers panel to paint on it.")
@@ -252,6 +330,19 @@ class Document:
         n_paint = sum(1 for l in self.layers if not l.is_group)
         lay = Layer(name or f"Layer {n_paint + 1}")
         self._insert(lay, index)
+        return lay
+
+    def add_special(self, kind: str, setting: dict, name: str) -> Layer:
+        """A filter layer (kind "filter"), fill layer ("fill") or file layer ("file") above the selected layer."""
+        lay = Layer(name, kind=kind, adj=setting)
+        self._insert(lay, None)
+        return lay
+
+    def add_adjustment(self, kind: str, params: dict | None = None) -> Layer:
+        """An adjustment layer above the selected layer: it changes everything below it in its group."""
+        from .adjust import ADJUSTMENTS, defaults
+        lay = Layer(ADJUSTMENTS[kind][0], kind="adjust", adj={"kind": kind, "params": params or defaults(kind)})
+        self._insert(lay, None)
         return lay
 
     def add_group(self, name: str | None = None, wrap: bool = True) -> Layer:
@@ -421,9 +512,34 @@ class Document:
         return kids
 
     def _level(self, out, parent, x0, y0, w, h, kids, force_visible=False):
+        clip_base = None                                      # alpha of the last unclipped layer (clipping masks)
         for i in kids.get(parent, ()):
             lay = self.layers[i]
             if (not lay.visible and not force_visible) or lay.opacity <= 0:
+                if not lay.clip:
+                    clip_base = np.zeros((h, w, 1), np.float32)
+                continue
+            if lay.kind == "filter" and lay.adj:
+                from .adjust import FILTER_MARGIN, filter_pixels
+                pad = FILTER_MARGIN
+                if parent is None or self.by_uid(parent) is None or self.by_uid(parent).blend != "pass":
+                    big = self._backdrop(parent, x0 - pad, y0 - pad, w + 2 * pad, h + 2 * pad, kids, i)
+                    f = filter_pixels(lay.adj["kind"], big, lay.adj.get("amount", 1.0))[pad:pad + h, pad:pad + w]
+                else:                                         # inside a pass-through group: this rectangle only
+                    f = filter_pixels(lay.adj["kind"], out, lay.adj.get("amount", 1.0))
+                k = lay.opacity * (lay.mask_values(x0, y0, w, h)[..., None] if lay.mask is not None else 1.0)
+                out = out + (f - out) * k
+                continue
+            if lay.is_adjust and lay.adj:
+                from .adjust import apply
+                a = out[..., 3:4]
+                straight = np.where(a > 0, out[..., :3] / np.maximum(a, 1e-8), 0)
+                new = apply(lay.adj["kind"], lay.adj.get("params", {}), straight) * a
+                k = lay.opacity * (lay.mask_values(x0, y0, w, h)[..., None] if lay.mask is not None else 1.0)
+                if lay.clip and clip_base is not None:
+                    k = k * clip_base
+                out = out.copy()
+                out[..., :3] = out[..., :3] + (new - out[..., :3]) * k
                 continue
             if lay.is_group:
                 if lay.uid not in kids:
@@ -437,24 +553,110 @@ class Document:
                         g = g * lay.opacity
                     out = blend(out, g, lay.blend)
                 continue
-            if not lay.tiles:
+            if lay.is_generated:
+                src = lay.generated(x0, y0, w, h, self.width, self.height)
+            elif not lay.tiles:
+                if not lay.clip:
+                    clip_base = np.zeros((h, w, 1), np.float32)
                 continue
-            src = lay.read(x0, y0, w, h)
+            else:
+                src = lay.read(x0, y0, w, h)
+            if lay.mask is not None:
+                src = src * lay.mask_values(x0, y0, w, h)[..., None]
+            if lay.clip and clip_base is not None:
+                src = src * clip_base
+            elif not lay.clip:
+                clip_base = src[..., 3:4].copy()
             if lay.opacity < 1:
                 src = src * lay.opacity
             out = blend(out, src, lay.blend)
         return out
 
+    def _backdrop(self, parent, x0, y0, w, h, kids, upto):
+        """What lies under list index ``upto`` inside ``parent``, in a larger rectangle (filter layers need room
+        around the part shown)."""
+        out = np.zeros((h, w, 4), np.float32)
+        if parent is None and self.background is not None:
+            out[..., :3], out[..., 3] = self.background, 1.0
+        sub = {k: v for k, v in kids.items()}
+        sub[parent] = [j for j in kids.get(parent, ()) if j < upto]
+        return self._level(out, parent, x0, y0, w, h, sub)
+
     def composite(self, x0: int = 0, y0: int = 0, w: int | None = None, h: int | None = None,
-                  background: bool = True) -> np.ndarray:
-        """The visible picture in a rectangle: premultiplied RGBA float32 (opaque where there is paper)."""
+                  background: bool = True, light=None) -> np.ndarray:
+        """The visible picture in a rectangle: premultiplied RGBA float32 (opaque where there is paper). ``light``
+        (azimuth degrees, elevation degrees, strength) lights the paint's relief (impasto)."""
         w = self.width if w is None else w
         h = self.height if h is None else h
         out = np.zeros((h, w, 4), np.float32)
         if background and self.background is not None:
             out[..., :3] = self.background
             out[..., 3] = 1.0
-        return self._level(out, None, x0, y0, w, h, self._kids())
+        out = self._level(out, None, x0, y0, w, h, self._kids())
+        if light is not None and any(l.height for l in self.layers if not l.is_group):
+            shade = self.relief_shade(x0, y0, w, h, light)
+            out[..., :3] = np.clip(out[..., :3] * shade[..., None], 0, out[..., 3:4])
+        return out
+
+    def relief(self, x0, y0, w, h) -> np.ndarray:
+        """Total paint thickness of the visible layers in a rectangle."""
+        hgt = np.zeros((h, w), np.float32)
+        for l in self.layers:
+            if l.height and not l.is_group and self.shown(l):
+                hgt += read_tiles(l.height, x0, y0, w, h, 1)[..., 0]
+        return hgt
+
+    def relief_shade(self, x0, y0, w, h, light, scale: float = 6.0) -> np.ndarray:
+        """Brightness factor from the relief under a light (1 = flat paint, as it is without relief)."""
+        az, el, strength = light
+        hgt = self.relief(x0 - 1, y0 - 1, w + 2, h + 2)
+        gx = (hgt[1:-1, 2:] - hgt[1:-1, :-2]) * 0.5 * scale
+        gy = (hgt[2:, 1:-1] - hgt[:-2, 1:-1]) * 0.5 * scale
+        n = 1.0 / np.sqrt(gx * gx + gy * gy + 1.0)
+        a, e = np.radians(az), np.radians(el)
+        L = (np.cos(e) * np.cos(a), -np.cos(e) * np.sin(a), np.sin(e))   # azimuth 0 = from the right, 90 = from above
+        dot = (-gx * L[0] - gy * L[1] + L[2]) * n
+        return np.clip(1.0 + strength * (dot - L[2]) / max(L[2], 0.2), 0.25, 2.0).astype(np.float32)
+
+    def dry_all(self) -> None:
+        """Watercolour: finish drying every wet layer now (before undo, layer changes and saving)."""
+        for l in self.layers:
+            if l.wet is not None:
+                l.wet.force_dry()
+
+
+def load_picture(path: str):
+    """A picture file as premultiplied RGBA float (file layers); None when it cannot be read (said by the caller)."""
+    import os
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        if path.lower().endswith(".ora"):
+            from . import ora
+            return ora.load(path).composite(background=False)
+        from PIL import Image
+        with Image.open(path) as im:
+            a = np.asarray(im.convert("RGBA"), np.float32) / 255.0
+        a[..., :3] *= a[..., 3:4]
+        return a
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def read_tiles(tiles: dict, x0: int, y0: int, w: int, h: int, ch: int = 4) -> np.ndarray:
+    """A rectangle out of a sparse dict of tiles (``ch`` channels; 2-D tiles read as one channel)."""
+    out = np.zeros((h, w, ch), np.float32)
+    for ty in range(int(np.floor(y0 / TILE)), int(np.floor((y0 + h - 1) / TILE)) + 1):
+        for tx in range(int(np.floor(x0 / TILE)), int(np.floor((x0 + w - 1) / TILE)) + 1):
+            t = tiles.get((tx, ty))
+            if t is None:
+                continue
+            ox, oy = tx * TILE, ty * TILE
+            ax0, ay0 = max(x0, ox), max(y0, oy)
+            ax1, ay1 = min(x0 + w, ox + TILE), min(y0 + h, oy + TILE)
+            sub = t[ay0 - oy:ay1 - oy, ax0 - ox:ax1 - ox]
+            out[ay0 - y0:ay1 - y0, ax0 - x0:ax1 - x0] = sub if sub.ndim == 3 else sub[..., None]
+    return out
 
 
 def blend(dst: np.ndarray, src: np.ndarray, mode: str = "normal") -> np.ndarray:
