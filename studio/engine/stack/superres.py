@@ -357,15 +357,31 @@ def analyse(paths, params: SuperParams | None = None, progress=None, cancel=None
         # which would make a blurred frame look sharp
         common = (float(np.median([z[0] for z in noise])), float(np.median([z[1] for z in noise])))
         sharp = [_sharpness(L, common, mode) for L in lum]
+        quality = None
+        if mode == "sky":                            # stars say it better: the tightest stars are the sharpest frame
+            quality = [astro.star_quality(L) for L in lum]
+            if sum(q["n"] >= 3 for q in quality) >= 2:
+                sharp = [1.0 / q["fwhm"] if q["n"] >= 3 and q["fwhm"] > 0 else 0.0 for q in quality]
+            else:
+                quality = None
         ref = int(np.argmax(sharp))
         med = float(np.median(sharp))
         order = sorted(range(n), key=lambda i: -sharp[i])
         reports = [FrameReport(f.name, f.path, sharpness=float(sharp[i]), rank=order.index(i) + 1)
                    for i, f in enumerate(keep)]
+        el_med = float(np.median([q["elongation"] for q in quality if q["n"] >= 3])) if quality else 0.0
         for i in range(n):
-            if i != ref and sharp[i] < 0.6 * med:
+            if i == ref:
+                continue
+            q = quality[i] if quality is not None else None
+            if q is not None and q["n"] >= 3 and q["elongation"] > max(1.5, 1.3 * el_med):
                 reports[i].status, reports[i].used = "dropped", False
-                reports[i].reason = "blurred (hand shake or the air) compared with the others"
+                reports[i].reason = f"stars trailed ({q['elongation']:.1f}x longer than wide): the camera or " \
+                                    f"the mount moved during this frame"
+            elif sharp[i] < 0.6 * med:
+                reports[i].status, reports[i].used = "dropped", False
+                reports[i].reason = "blurred (hand shake or the air) compared with the others" if q is None \
+                    else f"stars {med / max(sharp[i], 1e-9):.1f}x wider than the others (shake, focus or the air)"
         if raw:
             mult0 = rinfo[ref].wb / rinfo[ref].wb.min()
             if any(abs(np.log(ri.wb / ri.wb.min() / mult0)).max() > 0.02 for ri in rinfo):

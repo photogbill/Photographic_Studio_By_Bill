@@ -1,7 +1,7 @@
 """Photographic Studio By Bill - the desktop app (Phase 4 shell, Phase 5 lens and shape, Phase 6 develop panels).
 
 One window, a sidebar of workspaces (section 1, rule 0.3.12): Library, Develop, Dual Pixel Lab, Focus Stack,
-Card to Stacks, 3D Scan, Super-Res Stack, Infrared, Panorama, Lenses, Cameras, Export, Help. The interface talks to the engine only through its API
+Card to Stacks, 3D Scan, Super-Res Stack, Infrared, Panorama, Paint, Lenses, Cameras, Export, Help. The interface talks to the engine only through its API
 (studio.engine) and never blocks: every render, thumbnail and export runs in the background.
 """
 from __future__ import annotations
@@ -15,7 +15,7 @@ import time
 import traceback
 
 import numpy as np
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QObject, QPointF, QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QImage, QKeySequence,
                            QLinearGradient, QPainter, QPainterPath, QPainterPathStroker, QPen,
                            QShortcut)
@@ -43,6 +43,7 @@ from .scan import ScanPage  # noqa: E402  (3D Scan: BUILD_PLAN_DP3D H)
 from .superres import SuperResPage  # noqa: E402
 from .infrared import InfraredPage  # noqa: E402  (BUILD_PLAN_PANO_IR: the Infrared tab)
 from .panorama import PanoramaPage  # noqa: E402  (BUILD_PLAN_PANO_IR: the Panorama tab)
+from .paint import PaintPage  # noqa: E402  (BUILD_PLAN_PAINT: digital painting)
 from .cameras import CamerasPage  # noqa: E402  (the drop-everything calibration, 2026-11-18)
 
 log = slog.get("app")
@@ -89,7 +90,7 @@ RANGE_DEFAULT = {"hue": 25.0, "width": 40.0, "falloff": 25.0, "shift": 0.0, "sat
 
 
 class ValueSlider(QWidget):
-    """Label, slider, value. Double-click resets. Scroll nudges. Tooltip explains in plain English."""
+    """Label, slider, value. Double-click resets. Scroll nudges once clicked (_WheelGuard). Tooltip explains in plain English."""
     changed = Signal(float)
 
     def __init__(self, name, lo, hi, default, step=0.01, fmt="{:+.2f}", tip=""):
@@ -1343,6 +1344,7 @@ class Viewer(QWidget):
 class DevelopPage(QWidget):
     status = Signal(str)
     export_requested = Signal(list)
+    web_requested = Signal(list)                 # Save for web: [(path, version)]
 
     def __init__(self, settings: Settings):
         super().__init__()
@@ -1395,6 +1397,11 @@ class DevelopPage(QWidget):
         exp = QPushButton("Export...")
         exp.setToolTip("Export the version you are looking at (Ctrl+E)")
         exp.clicked.connect(lambda: self.path and self.export_requested.emit([(self.path, self.version)]))
+        self.web_b = QPushButton("Save for web")
+        self.web_b.setToolTip("A small sRGB JPEG for the internet (2048 px long edge, sharpened for screens): the "
+                              "smallest file that still looks the same as the best-quality one. Goes to your export "
+                              "folder as NAME_web_Studio.jpg.")
+        self.web_b.clicked.connect(lambda: self.path and self.web_requested.emit([(self.path, self.version)]))
         self.ver = QComboBox()
         self.ver.setToolTip("Virtual copies: several different edits of the same raw, all kept in its one sidecar")
         self.ver.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
@@ -1443,7 +1450,7 @@ class DevelopPage(QWidget):
                                (self.copy_b, fill_button(self.copy_b, "Copy settings...   Ctrl+Shift+C")),
                                (self.paste_b, fill_button(self.paste_b, "Paste settings   Ctrl+Shift+V")),
                                (self.ba, fill_button(self.ba, "Before / After   B"))],
-                  [self.undo_b, self.redo_b, self.zoom_b, exp, self.mig])
+                  [self.undo_b, self.redo_b, self.zoom_b, exp, self.web_b, self.mig])
         self.bar = bar
         centre.addWidget(bar)
         self.viewer = Viewer()
@@ -2043,6 +2050,15 @@ class DevelopPage(QWidget):
                              "Lightroom's profiles on this PC. Estimated: Lightroom's newest process may differ a "
                              "little; best with a Lightroom profile chosen below.")
         self.tone.activated.connect(self._tone_mode_note)
+        self.curve_col = g.add(QComboBox())
+        self.curve_col.addItems(["Curve colour: Natural", "Curve colour: Rich"])
+        self.curve_col.setToolTip("How contrast treats colour.\nNatural (default for new photos): the curve sets "
+                                  "brightness and every colour keeps its mix, so skin stays true; matches what "
+                                  "Lightroom shows and prints. Best for: portraits, printing, accuracy. Weak at: "
+                                  "nothing for accuracy; a little less punch.\nRich: the curve bends red, green and "
+                                  "blue separately, like slide film: warm colours get redder and more saturated. Best "
+                                  "for: bold landscapes. Weak at: skin, which goes red.")
+        self.curve_col.activated.connect(lambda _: self.controls_changed())
         self.mcb = g.add(QCheckBox("Match camera brightness (optional)"))
         self.mcb.setToolTip("Off by default. Shifts brightness per camera body to match the camera's JPEG.")
         self.hl_mode = g.add(QComboBox())
@@ -2171,6 +2187,25 @@ class DevelopPage(QWidget):
                                    "more saturated than Lightroom.")
         self.prof_combo.activated.connect(self._profile_picked)
         self._fill_profiles("")
+        self.sp_on = QCheckBox("Soft proof (show the print)")
+        self.sp_on.setToolTip("Pick the ICC profile of your printer and paper (from the paper maker or your lab). The "
+                              "preview then shows the print: duller blacks, paper white, colours the paper cannot "
+                              "reach. Your edit and exports are not changed.")
+        self.sp_pick = QPushButton("Printer / paper profile...")
+        self.sp_pick.clicked.connect(self._pick_proof_profile)
+        self.sp_intent = QComboBox()
+        self.sp_intent.addItems(["Perceptual", "Relative colorimetric"])
+        self.sp_intent.setToolTip("Perceptual: squeezes every colour onto the paper, keeping their relations (best "
+                                  "for vivid photos). Relative colorimetric: prints exactly what fits and clips the "
+                                  "rest (best for portraits and photos already within the paper's range).")
+        self.sp_gamut = QCheckBox("Mark unprintable colours (magenta)")
+        for w in (self.sp_on, self.sp_intent, self.sp_gamut):
+            (w.toggled if isinstance(w, QCheckBox) else w.currentIndexChanged).connect(lambda *_: self._proof_changed())
+        g.add(self.sp_on)
+        g.add(self.sp_pick)
+        g.add(self.sp_intent)
+        g.add(self.sp_gamut)
+        self.sp_info = g.add(chip("Soft proof: no printer profile chosen", T.DIM))
         self.lut_combo = g.add(QComboBox())
         self.lut_combo.setToolTip("A 3D look-up table (.cube) laid over your colour settings. Your own .cube files "
                                   "live in settings\\luts.")
@@ -2701,6 +2736,11 @@ class DevelopPage(QWidget):
         e.tone.contrast = round(self.con.value(), 3)
         e.tone.mode = ["standard", "camera_match", "linear", "lightroom"][self.tone.currentIndex()]
         e.tone.match_camera_brightness = self.mcb.isChecked()
+        from ..engine.pipeline.pipeline import natural_curve
+        want = "natural" if self.curve_col.currentIndex() == 0 else "rich"
+        e.tone.curve_colour = ""
+        implied = "natural" if natural_curve(e, self.image) else "rich"
+        e.tone.curve_colour = "" if want == implied else want      # untouched photos stay untouched
         e.white_balance.mode = ["as_shot", "daylight", "temp_tint", "multipliers"][self.wb.currentIndex()]
         if e.white_balance.mode == "multipliers" and not e.white_balance.multipliers:
             e.white_balance.mode = "as_shot"
@@ -2873,6 +2913,8 @@ class DevelopPage(QWidget):
         self.con.set_value(e.tone.contrast, emit=False)
         self.tone.setCurrentIndex({"standard": 0, "camera_match": 1, "linear": 2, "lightroom": 3}.get(e.tone.mode, 0))
         self.mcb.setChecked(e.tone.match_camera_brightness)
+        from ..engine.pipeline.pipeline import natural_curve
+        self.curve_col.setCurrentIndex(0 if natural_curve(e, self.image) else 1)
         self.wb.setCurrentIndex({"as_shot": 0, "daylight": 1, "temp_tint": 2, "multipliers": 3}.get(
             e.white_balance.mode, 0))
         self.temp.set_value(e.white_balance.temperature, emit=False)
@@ -4426,6 +4468,35 @@ class DevelopPage(QWidget):
         curve = ("the profile's own curve" if info["curve"] == "profile" else "Adobe's default curve")
         self.status.emit(f"Lightroom-like: {lift}; {curve}. Estimated, until checked against a Lightroom export.")
 
+    def _pick_proof_profile(self):
+        start = self.settings.get("proof_profile", "") or (r"C:\Windows\System32\spool\drivers\color"
+                                                           if os.name == "nt" else "")
+        f, _ = QFileDialog.getOpenFileName(self, "Printer / paper profile", start, "ICC profile (*.icc *.icm)")
+        if not f:
+            return
+        self.settings.set("proof_profile", f)
+        self.sp_on.setChecked(True)
+        self._proof_changed()
+
+    def _proof_changed(self):
+        from ..engine.color import display
+        prof = self.settings.get("proof_profile", "") or ""
+        on = self.sp_on.isChecked() and bool(prof) and os.path.isfile(prof)
+        if self.sp_on.isChecked() and not on:
+            self.sp_info.setText("Soft proof: choose the printer / paper profile first")
+            self.sp_info.setStyleSheet(f"color:{T.AMBER};")
+        elif on:
+            self.sp_info.setText(f"Soft proof: {os.path.basename(prof)}")
+            self.sp_info.setStyleSheet(f"color:{T.CYAN}; border-color:{T.alpha(T.CYAN, 0.4)};")
+        else:
+            self.sp_info.setText("Soft proof: off" if prof else "Soft proof: no printer profile chosen")
+            self.sp_info.setStyleSheet("")
+        display.set_proof(prof if on else None, ["perceptual", "relative"][self.sp_intent.currentIndex()],
+                          self.sp_gamut.isChecked())
+        self.before_img = None
+        if self.image is not None:
+            self.render_now()
+
     def _fill_profiles(self, current=None):
         from ..engine.color import dcp
         if current is None:
@@ -5742,7 +5813,8 @@ class DevelopPage(QWidget):
         ow, oh = E.output_size(img, edit)
         self.viewer.zs.set_photo(ow, oh)
         # "before" = as shot, but with the same straighten / perspective / crop, so the wipe lines up
-        bkey = (json.dumps(edit.geometry.__dict__, sort_keys=True, default=str), round(sc, 4), self.judge_bw)
+        bkey = (json.dumps(edit.geometry.__dict__, sort_keys=True, default=str), round(sc, 4), self.judge_bw,
+                json.dumps(edit.stage_versions, sort_keys=True))
         need_before = self.before_img is None or bkey != self.before_key
         self.viewer.busy = True
         self.viewer.update()
@@ -5757,6 +5829,7 @@ class DevelopPage(QWidget):
             if need_before:
                 b = E.Edit()
                 b.geometry = edit.geometry
+                b.stage_versions = dict(edit.stage_versions)    # the same rendering, so the wipe shows only the edit
                 b8 = display8(E.render(img, b, scale=sc))
                 if bw:
                     b8 = bw8(b8)
@@ -7245,11 +7318,19 @@ class DevelopPage(QWidget):
         if self.image is None:
             return
         from ..engine.presets.auto import make_it_good_settings
-        e, character = make_it_good_settings(self.image.meta, self.edit_from_controls())
-        self.commit(e, label="Make it good")
-        note = "character lens: sharpening left off" if character else "gentle capture sharpening"
-        self.status.emit(f"Make it good: noise set for {self.image.meta.iso_label}, {note}, fixing the lens...; "
-                         f"brightness untouched.")
+        before = self.edit_from_controls()
+        e, character = make_it_good_settings(self.image.meta, before)
+        if e.to_dict() != before.to_dict():
+            self.commit(e, label="Make it good")
+        noise = (f"noise reduction set for {self.image.meta.iso_label}" if e.denoise.enabled and not
+                 before.denoise.enabled else f"{self.image.meta.iso_label}: no noise reduction needed"
+                 if not e.denoise.enabled else "noise reduction already on")
+        sharp = ("character lens: sharpening left off" if character else
+                 "gentle capture sharpening added" if e.sharpen.enabled and not before.sharpen.enabled else
+                 "sharpening already on")
+        self.status.emit(f"Make it good: {noise}; {sharp}; checking the lens now (the Lens panel will say what it "
+                         f"found). It never changes brightness or colour, so on a clean, sharp photo the change is "
+                         f"small; that means the photo needed little.")
         self.fix_lens()
 
     def reset(self):
@@ -7705,7 +7786,7 @@ class HelpPage(InfoPage):
 # ============================================================================================ main window
 NAV = [("▦", "Library"), ("◐", "Develop"), ("◫", "Dual Pixel Lab"), ("≋", "Focus Stack"), ("☷", "Card to Stacks"),
        ("⬡", "3D Scan"), ("✦", "Super-Res Stack"),
-       ("◑", "Infrared"), ("⌒", "Panorama"), ("◎", "Lenses"), ("▣", "Cameras"), ("⇪", "Export"), ("?", "Help")]
+       ("◑", "Infrared"), ("⌒", "Panorama"), ("✎", "Paint"), ("◎", "Lenses"), ("▣", "Cameras"), ("⇪", "Export"), ("?", "Help")]
 ROW = {name: i for i, (_, name) in enumerate(NAV)}
 
 
@@ -7769,6 +7850,8 @@ class MainWindow(QMainWindow):
         self.infrared = InfraredPage(self.settings)
         self.infrared.sidecar_written.connect(self._ir_sidecar)
         self.panorama = PanoramaPage(self.settings)
+        self.paint = PaintPage(self.settings)
+        self.paint.status.connect(lambda t: self.statusBar().showMessage(t, 6000))
         for pg in (self.dualpixel, self.focus, self.cardstacks, self.scan, self.superres, self.infrared,
                    self.panorama):
             pg.open_result.connect(self.open_result)
@@ -7780,6 +7863,7 @@ class MainWindow(QMainWindow):
         pages = [
             self.library, self.develop,
             self.dualpixel, self.focus, self.cardstacks, self.scan, self.superres, self.infrared, self.panorama,
+            self.paint,
             self.lenses,
             self.cameras,
             InfoPage("Export", "Select photos in the Library and press Export, or use Export in Develop. 16-bit "
@@ -7810,6 +7894,7 @@ class MainWindow(QMainWindow):
         self.library.save_open_edit = self.develop.save_sidecar
         self.develop.status.connect(lambda t: self.statusBar().showMessage(t, 6000))
         self.develop.export_requested.connect(self.export)
+        self.develop.web_requested.connect(self.export_web)
         self.cameras.status.connect(lambda t: self.statusBar().showMessage(t, 6000))
         exp = QAction("Export", self)
         exp.setShortcut(QKeySequence("Ctrl+E"))
@@ -8098,6 +8183,53 @@ class MainWindow(QMainWindow):
         run_bg(work, dest, self._exported, lambda _, e: self.statusBar().showMessage(f"Export problem: {e}"),
                keep=True)
 
+    def export_web(self, files):
+        """Save for web: no dialog; the photo as a small sRGB JPEG in the export folder (io/export.web_jpeg_bytes)."""
+        from .. import engine as E
+        items = [(f, 0) if isinstance(f, str) else (f[0], int(f[1])) for f in files if f]
+        if not items:
+            return
+        self.develop.save_sidecar()
+        dest = self.settings.get("export_dir", str(paths.get("OUTPUTS") / "export"))
+        try:
+            os.makedirs(dest, exist_ok=True)
+        except OSError as err:
+            QMessageBox.warning(self, "Save for web", f"The export folder cannot be used:\n{dest}\n\n{err}\n\n"
+                                "Choose another folder once in Export..., then try again.")
+            return
+
+        def work():
+            out, failed, taken = [], [], set()
+            for f, v in items:
+                img = None
+                try:
+                    img = E.open(f)
+                    spec = E.ExportSpec(web=True)
+                    if v:
+                        p = version_export_path(f, v, spec, dest)
+                        out.append(E.export(img, E.load_version(f, v), spec, out_path=p, taken=taken))
+                    else:
+                        out.append(E.export(img, E.load_edit(f), spec, out_dir=dest, taken=taken))
+                except Exception as err:               # noqa: BLE001
+                    slog.log_exception(f"save for web failed: {f}", log)
+                    report_problem(f"Save for web could not save {os.path.basename(f)}", err)
+                    failed.append((os.path.basename(f), str(err)))
+                finally:
+                    if img is not None:
+                        img.drop_cache()
+            return out, failed
+
+        def done(_, res):
+            out, failed = res
+            if out:
+                kb = sum(os.path.getsize(p) for p in out if os.path.exists(p)) / 1024
+                self.statusBar().showMessage(f"Saved for web: {os.path.basename(out[0])} ({kb:.0f} KB, sRGB, 2048 px) "
+                                             f"in {dest}", 12000)
+            if failed:
+                self.statusBar().showMessage(f"Save for web problem: {failed[0][1]}", 12000)
+        self.statusBar().showMessage("Saving for web...")
+        run_bg(work, dest, done, lambda _, e: self.statusBar().showMessage(f"Save for web problem: {e}"), keep=True)
+
     def _exported(self, dest, res):
         out, failed = res
         msg = f"Exported {len(out)} file(s) to {dest}"
@@ -8205,13 +8337,39 @@ def show_error_box(text: str, report=None, parent=None) -> None:
         QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(str(report))))
 
 
+class _WheelGuard(QObject):
+    """The mouse wheel scrolls the panel; it moves a slider, list or number box only after that control was clicked
+    (has focus). Without this, scrolling down the controls nudged every slider passing under the pointer, so the
+    photo kept changing while someone was only reading the options (a tester, 2026-11-23)."""
+
+    def eventFilter(self, obj, ev):
+        from PySide6.QtCore import QEvent
+        from PySide6.QtWidgets import QAbstractScrollArea, QAbstractSlider, QAbstractSpinBox
+        if ev.type() == QEvent.Type.Wheel and isinstance(obj, (QAbstractSlider, QComboBox, QAbstractSpinBox)) \
+                and not obj.hasFocus():
+            w = obj.parentWidget()
+            while w is not None and not isinstance(w, QAbstractScrollArea):
+                w = w.parentWidget()
+            if w is not None and w.verticalScrollBar() is not obj:
+                sb = w.verticalScrollBar()
+                steps = ev.angleDelta().y() / 120.0
+                sb.setValue(sb.value() - int(round(steps * QApplication.wheelScrollLines() * sb.singleStep())))
+            return True
+        return False
+
+
 def run(argv=None) -> int:
     slog.setup(console_level=None)
     sys.excepthook = _excepthook
     crashed = slog.watch_for_crashes()             # a hard crash last time becomes an error report now
-    app = QApplication.instance() or QApplication(argv or sys.argv)
+    argv = list(argv or sys.argv)
+    # Paint needs every pen event as it happens (BUILD_PLAN_PAINT P0.2): no merging of tablet events.
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_CompressTabletEvents, False)
+    app = QApplication.instance() or QApplication(argv)
     app.setApplicationName("Photographic Studio By Bill")
     app.setStyleSheet(T.QSS)
+    app._wheel_guard = _WheelGuard(app)
+    app.installEventFilter(app._wheel_guard)
     lock = _single_instance(app)
     if lock is None:
         return 0
@@ -8222,6 +8380,20 @@ def run(argv=None) -> int:
     except Exception:                              # noqa: BLE001
         log.debug("Lightroom profile index not started", exc_info=True)
     w.show_as_last_time()
+    if "--paint" in argv:                          # Start Paint.bat / start-paint.sh open straight into Paint
+        w.nav.setCurrentRow(ROW["Paint"])
+
+    def _screen_note():
+        try:
+            from ..engine.color import display as _disp
+            d = _disp.current()
+            msg = (f"Screen: {d.name} - the preview is colour-managed (ProPhoto straight to your monitor's profile)."
+                   if d.managed else "Screen: this monitor has no colour profile, so Windows treats it as sRGB. "
+                   "Calibrate it (a colorimeter) so what you see is what you print.")
+            w.statusBar().showMessage(msg, 12000)
+        except Exception:                          # noqa: BLE001  (a note must never stop the Studio)
+            log.debug("screen note failed", exc_info=True)
+    QTimer.singleShot(2500, _screen_note)
     log.info("app started")
     if crashed:
         QTimer.singleShot(1200, lambda: w._report_saved(str(crashed), "The Studio stopped unexpectedly last time. "))

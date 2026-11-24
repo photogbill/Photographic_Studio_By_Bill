@@ -174,7 +174,7 @@ def test_studio_standard_darkens_extended_low_iso_for_new_edits_only():
     im = _image(*CAM)
     im.meta.iso = 50.0
     new, old = Edit(), Edit.from_dict({"stage_versions": {"tone": 1}})
-    assert new.stage_versions["tone"] == 2 and old.stage_versions["tone"] == 1
+    assert new.stage_versions["tone"] >= 2 and old.stage_versions["tone"] == 1
     assert pl._mid_in(im, new) == pytest.approx(2.0 * pl._mid_in(im, old))      # one stop darker
     im.meta.iso = 100.0
     assert pl._mid_in(im, new) == pytest.approx(pl._mid_in(im, old))

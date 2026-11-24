@@ -1874,6 +1874,20 @@ def tone_lut(image: Image, edit: Edit, lin_img: np.ndarray | None = None):
     raise ValueError(f"unknown tone mode {t.mode!r}")
 
 
+def natural_curve(edit: Edit, image: Image | None = None) -> bool:
+    """Curve colour: "natural" keeps each colour's mix through the tone curve, "rich" curves R, G, B separately (the
+    Studio's look before 2026-11-23). Unset ("") follows the tone stage: Natural from version 3 (new edits). Scans
+    and JPEGs stay Rich unless chosen: their colours are recovered by undoing that curve (scan_to_scene), so a
+    default edit shows the file exactly as it is."""
+    explicit = getattr(edit.tone, "curve_colour", "")
+    raw = getattr(image, "raw", None)
+    if (not explicit and image is not None and getattr(raw, "is_scan", False)
+            and not getattr(raw, "scene_linear", False)):
+        return False
+    c = explicit or ("natural" if edit.stage_versions.get("tone", 1) >= 3 else "rich")
+    return c == "natural"
+
+
 def spectral_key() -> str:
     from ..color.spectral import KEY
     return KEY
@@ -2203,7 +2217,8 @@ def _post(image: Image, edit: Edit, out: np.ndarray, frame: Frame, lut) -> np.nd
             if gain != 1:
                 s *= gain
             if lut is not None:
-                s[...] = tone_mod.apply_curve_rgb(s, *lut, compress=edit.gamut_compress)
+                s[...] = tone_mod.apply_curve_rgb(s, *lut, compress=edit.gamut_compress,
+                                                  natural=natural_curve(edit, image))
         if not tone_masks:
             _strips(out, st)
         else:                                               # local tone: blend the global and local curves
@@ -2213,7 +2228,8 @@ def _post(image: Image, edit: Edit, out: np.ndarray, frame: Frame, lut) -> np.nd
                 x = s.copy()
                 st(s)
                 for (m, a), lm in zip(tone_masks, luts):
-                    ym = tone_mod.apply_curve_rgb(x.copy(), *lm, compress=edit.gamut_compress)
+                    ym = tone_mod.apply_curve_rgb(x.copy(), *lm, compress=edit.gamut_compress,
+                                                  natural=natural_curve(edit, image))
                     s += a[y0:y0 + STRIP, :, None] * (ym - s)
     if not grade.is_identity(edit.colour):                  # stage 17 (per pixel, in OKLCh)
         c = edit.colour

@@ -9,3 +9,4 @@ exifread>=3.0
 pytest>=7.4
 PySide6-Essentials>=6.6
 # Optional (installed separately by tools\ensure_env.bat, never required): lensfunpy - modern-lens profiles
+# Optional (same way): astropy, photutils - FITS files and the star finder (BSD-3)

@@ -29,7 +29,7 @@ from .metadata import Metadata, read_metadata
 
 log = slog.get("engine.scanfile")
 
-SCAN_EXTENSIONS = (".tif", ".tiff", ".jpg", ".jpeg", ".png")
+SCAN_EXTENSIONS = (".tif", ".tiff", ".jpg", ".jpeg", ".png", ".fits", ".fit", ".fts")   # FITS: io/fits.py
 THUMB_LONG = 1600                       # long edge of the thumbnail the Library shows (the raws' embedded JPEG)
 
 
@@ -338,6 +338,9 @@ def open_scan(path: str) -> ScanImage:
     if not os.path.isfile(path):
         raise FileNotFoundError(path)
     low = path.lower()
+    from . import fits as fx
+    if fx.is_fits(path):
+        return _open_fits(path)
     with slog.stage("decode.scan", log, file=os.path.basename(path)):
         a, icc, orient = _read_tiff(path) if low.endswith((".tif", ".tiff")) else _read_pil(path)
         if a.ndim not in (2, 3) or (a.ndim == 3 and a.shape[2] != 3):
@@ -379,11 +382,40 @@ def open_scan(path: str) -> ScanImage:
     return img
 
 
+def _open_fits(path: str) -> ScanImage:
+    """A FITS file (io/fits.py) as a scan: scene-linear light, linear sRGB primaries for colour (what Siril and
+    PixInsight store), grey for one plane."""
+    from . import fits as fx
+    try:
+        a, cards, info = fx.read(path)
+    except fx.FitsProblem as e:
+        raise UnsupportedScan(str(e)) from None
+    grey = a.ndim == 2
+    prof = Profile("Linear sRGB primaries (FITS)" if not grey else "Linear grey (FITS)",
+                   [lambda v: v] * (1 if grey else 3), sp.SRGB.to_xyz_d50 if not grey else sp.PROPHOTO.to_xyz_d50,
+                   "assumed")
+    meta = fx.metadata(cards)
+    h, w = a.shape[:2]
+    img = ScanImage(path=path, meta=meta, data=a, profile=prof, height=h, width=w, crop=(0, 0, w, h), bits=32,
+                    grey=grey)
+    img.scene_linear = True
+    kind = "one-shot colour raw, demosaiced" if info["bayer"] is not None else ("colour" if not grey else "mono")
+    img.notes.append(f"FITS ({kind}): linear astronomy data, so it opens dark. Raise Exposure, or press Auto.")
+    log.info("scan %s: FITS %dx%d %s", os.path.basename(path), w, h, kind)
+    return img
+
+
 def scan_preview(path: str, max_side: int | None = None) -> np.ndarray:
     """An upright sRGB uint8 preview of a scan, reduced quickly (JPEG draft mode, strided TIFFs) and colour
     managed with the file's profile: the Library thumbnail and the Review view's "file preview"."""
     from PIL import Image as PI
     low = path.lower()
+    from . import fits as fx
+    if fx.is_fits(path):                            # linear astro data: the astronomy screen stretch
+        try:
+            return fx.preview(path, max_side)
+        except fx.FitsProblem as e:
+            raise UnsupportedScan(str(e)) from None
     if low.endswith((".tif", ".tiff")):
         from .intermediate import read_info, read_preview
         if read_info(path) is not None:             # a stack result: it carries its own small preview

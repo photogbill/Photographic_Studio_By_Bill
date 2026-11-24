@@ -144,8 +144,10 @@ def to_qimage(a: np.ndarray) -> QImage:
 
 
 def display8(arr_pp: np.ndarray) -> np.ndarray:
-    from ..engine.io.export import ExportSpec, to_output
-    return to_output(arr_pp, ExportSpec(format="jpeg", space="srgb", bits=8))
+    """Linear ProPhoto -> 8-bit RGB for this screen: straight into the monitor's own profile (color/display.py),
+    never through sRGB unless the screen has no profile (then Windows itself treats it as sRGB)."""
+    from ..engine.color import display
+    return display.current().to8(arr_pp)
 
 
 def load_thumb(path: str, size: int = 260) -> np.ndarray:

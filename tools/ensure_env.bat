@@ -75,9 +75,9 @@ echo  Packages installed.
 :optional
 rem  Optional extras: the Studio works without them. Tried once; a marker file
 rem  inside .venv (or python\) stops it retrying on every start (delete it to try again).
-if exist "%MARKDIR%\lensfun_tried.txt" exit /b 0
+if exist "%MARKDIR%\lensfun_tried.txt" goto :astro
 "%PY%" -c "import lensfunpy" >nul 2>nul
-if not errorlevel 1 exit /b 0
+if not errorlevel 1 goto :astro
 echo  Adding the lens database (lensfun, optional, one time only)...
 echo [%DATE% %TIME%] pip install lensfunpy (optional) >> "%SETUPLOG%"
 "%PY%" -m pip install lensfunpy >> "%SETUPLOG%" 2>&1
@@ -87,6 +87,22 @@ if errorlevel 1 (
   echo  The lens database could not be added. Everything else works; modern-lens profiles are unavailable.
 ) else (
   echo  Lens database added.
+)
+
+:astro
+rem  astropy + photutils (BSD-3): FITS files and the astronomers' star finder. Optional.
+if exist "%MARKDIR%\astro_tried.txt" exit /b 0
+"%PY%" -c "import astropy.io.fits, photutils.detection" >nul 2>nul
+if not errorlevel 1 exit /b 0
+echo  Adding the astronomy tools (astropy, optional, one time only)...
+echo [%DATE% %TIME%] pip install astropy photutils (optional) >> "%SETUPLOG%"
+"%PY%" -m pip install astropy photutils >> "%SETUPLOG%" 2>&1
+echo tried %DATE% %TIME% > "%MARKDIR%\astro_tried.txt"
+"%PY%" -c "import astropy.io.fits" >nul 2>nul
+if errorlevel 1 (
+  echo  The astronomy tools could not be added. Everything else works; FITS files are unavailable.
+) else (
+  echo  Astronomy tools added.
 )
 exit /b 0
 

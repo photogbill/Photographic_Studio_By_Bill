@@ -47,13 +47,15 @@ apply_update() {
 }
 
 main() {
-    local app rc
+    local app rc a
+    local args=()                                  # options for the Studio itself (e.g. --paint from start-paint.sh)
+    for a in "$@"; do [ "$a" = "--no-update" ] || args+=("$a"); done
     app="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
     cd "$app" || exit 1
     mkdir -p logs
     if [ "${1:-}" != "--no-update" ] && [ -f "$app/_update/ready.txt" ]; then
         apply_update "$app"
-        exec bash "$app/start-studio.sh" --no-update     # the new version of this script carries on
+        exec bash "$app/start-studio.sh" --no-update "${args[@]}"     # the new version of this script carries on
     fi
     {
         printf '[%s] start-studio.sh in %s (%s)\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$app" "$(uname -srm)"
@@ -75,7 +77,7 @@ main() {
         note "No desktop session was found (DISPLAY and WAYLAND_DISPLAY are empty): start the Studio from your desktop."
         exit 1
     fi
-    "$PY" -m studio.app >> logs/launcher.log 2>&1
+    "$PY" -m studio.app "${args[@]}" >> logs/launcher.log 2>&1
     rc=$?
     printf '[%s] the Studio closed (exit %s)\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$rc" >> logs/launcher.log
     if [ "$rc" -ne 0 ]; then

@@ -436,7 +436,7 @@ def build_parser() -> argparse.ArgumentParser:
     d = sub.add_parser("develop", help="develop raw files to TIFF/PNG/JPEG")
     d.add_argument("inputs", nargs="*")
     d.add_argument("--out", help="output folder (default: outputs\\develop beside the app)")
-    d.add_argument("--format", default="tiff", choices=["tiff", "png", "jpeg"])
+    d.add_argument("--format", default="tiff", choices=["tiff", "png", "jpeg", "fits"])
     d.add_argument("--space", default="adobergb", choices=["adobergb", "srgb", "prophoto", "displayp3"])
     d.add_argument("--bits", type=int, default=16, choices=[8, 16])
     d.add_argument("--quality", type=int, default=95)

@@ -28,6 +28,7 @@ def test_every_import_is_installed_by_requirements():
     names = {"numpy": "numpy", "scipy": "scipy", "rawpy": "rawpy", "tifffile": "tifffile", "PIL": "pillow",
              "exifread": "exifread", "PySide6": "pyside6", "pytest": "pytest"}
     optional = {"lensfunpy",                          # tried inside try/except; the Studio works without it
+                "astropy", "photutils",               # FITS and the star finder: optional, added by ensure_env
                 "bpy", "mathutils",                   # studio/blender/: scripts that run inside Blender, not the Studio
                 "torch", "onnx", "onnxruntime"}       # the Lab (training a camera's own Clean network): installed
     #                                                   only by Train Camera Model.bat, into lab_packages beside the

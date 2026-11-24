@@ -208,6 +208,13 @@ _studio_install_packages() {
 
 _studio_optional() {
     local mark="$1"
+    _studio_optional_lensfun "$mark"
+    _studio_optional_astro "$mark"
+    return 0
+}
+
+_studio_optional_lensfun() {
+    local mark="$1"
     [ -f "$mark/lensfun_tried.txt" ] && return 0
     "$PY" -c "import lensfunpy" >/dev/null 2>&1 && return 0
     _studio_say "Adding the lens database (lensfun, optional, one time only)..."
@@ -217,6 +224,22 @@ _studio_optional() {
         _studio_say "Lens database added."
     else
         _studio_say "The lens database could not be added. Everything else works; modern-lens profiles are unavailable."
+    fi
+    return 0
+}
+
+# astropy + photutils (BSD-3): FITS files and the astronomers' star finder. Optional, tried once.
+_studio_optional_astro() {
+    local mark="$1"
+    [ -f "$mark/astro_tried.txt" ] && return 0
+    "$PY" -c "import astropy.io.fits, photutils.detection" >/dev/null 2>&1 && return 0
+    _studio_say "Adding the astronomy tools (astropy, optional, one time only)..."
+    "$PY" -m pip install astropy photutils >> "$STUDIO_SETUPLOG" 2>&1
+    date > "$mark/astro_tried.txt"
+    if "$PY" -c "import astropy.io.fits" >/dev/null 2>&1; then
+        _studio_say "Astronomy tools added."
+    else
+        _studio_say "The astronomy tools could not be added. Everything else works; FITS files are unavailable."
     fi
     return 0
 }

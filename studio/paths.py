@@ -42,6 +42,7 @@ CALIBRATION_LOCAL = DATA_ROOT / "calibration_local"   # never shared: hot-pixel,
 PHOTOS = DATA_ROOT / "Photos"                         # the suggested Photos folder for card imports (section 24.3)
 JOBS = DATA_ROOT / "jobs"                             # the job queue (jobqueue.py): one folder per job
 ERROR_REPORTS = DATA_ROOT / "error_reports"           # one dated file per unexpected error, written by itself (log.py)
+PAINT = DATA_ROOT / "paint"                           # Paint: autosave / crash recovery, brushes (BUILD_PLAN_PAINT)
 
 # Environment overrides exist for tests and for users who move the cache; the defaults stay beside the app.
 _OVERRIDES = {
@@ -53,6 +54,7 @@ _OVERRIDES = {
     "PHOTOS": "STUDIO_PHOTOS_DIR",
     "ERROR_REPORTS": "STUDIO_ERROR_DIR",
     "JOBS": "STUDIO_JOBS_DIR",
+    "PAINT": "STUDIO_PAINT_DIR",
 }
 
 

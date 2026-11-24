@@ -83,8 +83,10 @@ def test_new_edits_get_the_two_light_colour_and_old_sidecars_keep_theirs():
     diffs = {}
     for name, m in (("warm", warm), ("day", day)):
         im = _raw_image("Canon", "Canon EOS R5", D, (float(m[0]), 1.0, float(m[2])))
-        v2 = pl.render(im, Edit(), scale=0.5)
-        v1 = pl.render(im, Edit.from_dict({"stage_versions": {"camera_matrix": 1}}), scale=0.5)
+        e2, e1 = Edit(), Edit.from_dict({"stage_versions": {"camera_matrix": 1}})
+        e2.tone.curve_colour = e1.tone.curve_colour = "rich"        # the matrix alone is compared
+        v2 = pl.render(im, e2, scale=0.5)
+        v1 = pl.render(im, e1, scale=0.5)
         diffs[name] = float(np.abs(v2 - v1).mean())
     assert diffs["warm"] > 4 * diffs["day"]               # warm light changes, daylight barely does
     sp_e = Edit()

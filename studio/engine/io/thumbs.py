@@ -36,8 +36,12 @@ def embedded_info(path: str) -> dict:
     from .scanfile import is_scan, scan_preview
     if is_scan(path):                            # a scan is its own preview
         h, w = scan_preview(path, 64).shape[:2]
-        with Image.open(path) as im:
-            W, H = im.size
+        from . import fits as fx
+        if fx.is_fits(path):
+            W, H = fx.size(path)
+        else:
+            with Image.open(path) as im:
+                W, H = im.size
         if (w > h) != (W > H):
             W, H = H, W
         return {"format": "scan", "width": int(W), "height": int(H), "flip": 0}

@@ -137,14 +137,33 @@ def apply_lut(v: np.ndarray, xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
     return out.reshape(v.shape)
 
 
-def apply_curve_rgb(img_pp: np.ndarray, xs: np.ndarray, ys: np.ndarray, compress: bool = True) -> np.ndarray:
-    """Apply a tone curve per channel in the render space; input and output are linear ProPhoto.
+REC2020_Y = np.array([0.2627, 0.6780, 0.0593], np.float32)
+
+
+def apply_curve_rgb(img_pp: np.ndarray, xs: np.ndarray, ys: np.ndarray, compress: bool = True,
+                    natural: bool = False) -> np.ndarray:
+    """Apply a tone curve in the render space; input and output are linear ProPhoto.
     Out-of-gamut colours are compressed into the render gamut first (gamut.py), so the curve never sees
-    negative channels. ``ys`` may be (3, N): one curve each for R, G, B (the point curves of the Light panel)."""
+    negative channels. ``ys`` may be (3, N): one curve each for R, G, B (the point curves of the Light panel).
+
+    ``natural`` (Tone > Curve colour "Natural", the default for new edits): the curve sets each pixel's brightness
+    and its colour mix is kept, so contrast does not push warm skin redder and more saturated (Rich, per channel,
+    did: a tester's skin read green/red 0.64 against Lightroom's 0.74; Natural 0.71). Where a bright colour would
+    no longer fit, it is eased toward white at the same brightness instead of clipping."""
     r = apply_matrix(img_pp, PP_TO_RENDER)
     if compress:
         r = gamut.compress(r)
     np.maximum(r, 0.0, out=r)
+    if natural and np.ndim(ys) == 1:
+        Y = np.maximum(r @ REC2020_Y, 1e-9)
+        Yc = apply_lut(np.ascontiguousarray(Y), xs, ys)
+        out = r * (Yc / Y)[..., None]
+        mx = out.max(axis=-1)
+        over = mx > 1.0
+        if over.any():
+            t = np.clip((1.0 - Yc[over]) / np.maximum(mx[over] - Yc[over], 1e-9), 0.0, 1.0)
+            out[over] = Yc[over][:, None] + t[:, None] * (out[over] - Yc[over][:, None])
+        return apply_matrix(np.clip(out, 0.0, 1.0).astype(np.float32), RENDER_TO_PP)
     if np.ndim(ys) == 2:
         for c in range(3):
             r[..., c] = apply_lut(np.ascontiguousarray(r[..., c]), xs, ys[c])

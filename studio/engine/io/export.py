@@ -22,14 +22,14 @@ from ..color.spaces import PROPHOTO, SPACES, apply_matrix, conversion_matrix
 
 log = slog.get("engine.export")
 
-FORMATS = ("tiff", "png", "jpeg")
-EXT = {"tiff": ".tif", "png": ".png", "jpeg": ".jpg"}
+FORMATS = ("tiff", "png", "jpeg", "fits")
+EXT = {"tiff": ".tif", "png": ".png", "jpeg": ".jpg", "fits": ".fits"}
 
 
 @dataclass
 class ExportSpec:
-    format: str = "tiff"            # tiff | png | jpeg
-    space: str = "adobergb"         # adobergb | srgb | prophoto | displayp3
+    format: str = "tiff"            # tiff | png | jpeg | fits (32-bit float, linear light: io/fits.py)
+    space: str = "srgb"             # srgb | adobergb | prophoto | displayp3 (sRGB the default: Bill, 2026-11-23)
     bits: int = 16                  # 16 or 8 (JPEG is always 8)
     quality: int = 95               # JPEG quality
     long_edge: int | None = None    # resize so the long edge is this many pixels
@@ -38,14 +38,23 @@ class ExportSpec:
     gamut_compress: bool = True     # compress out-of-gamut colours smoothly instead of hard clipping
     sharpen_for: str = "none"       # output sharpening: none | screen | glossy | matte (after any resize)
     sharpen_amount: str = "standard"   # low | standard | high
+    web: bool = False               # Save for web: sRGB JPEG, the smallest file that still looks the same (write_web_jpeg)
 
     def validate(self):
+        if self.web:                            # the web reads sRGB JPEGs everywhere, colour-managed or not
+            self.format, self.space = "jpeg", "srgb"
+            if not self.long_edge:
+                self.long_edge = WEB_LONG_EDGE
+            if self.sharpen_for == "none":
+                self.sharpen_for = "screen"
         if self.format not in FORMATS:
             raise ValueError(f"format must be one of {FORMATS}")
         if self.space not in SPACES or self.space == "rec2020":
             raise ValueError("space must be adobergb, srgb, prophoto or displayp3")
         if self.format == "jpeg":
             self.bits = 8
+        if self.format == "fits":
+            self.bits = 16                      # not used: FITS is written as 32-bit float
         if self.bits not in (8, 16):
             raise ValueError("bits must be 8 or 16")
         if self.sharpen_for not in OUTPUT_SHARPEN:
@@ -204,6 +213,105 @@ def write_png(path: str, arr: np.ndarray, icc_bytes: bytes, profile_name: str = 
         fh.write(_png_chunk(b"IEND", b""))
 
 
+WEB_LONG_EDGE = 2048          # what Facebook, Instagram and most sites show at full quality without recompressing hard
+WEB_SSIM = 0.990              # luminance SSIM to the best-quality JPEG that still reads as the same picture
+WEB_CHROMA = 0.012            # mean colour difference (OKLab) allowed for halving the colour resolution
+
+
+def _ssim_y(a: np.ndarray, b: np.ndarray) -> float:
+    """Mean structural similarity of the luminance of two 8-bit RGB arrays (Wang et al. 2004, Gaussian window)."""
+    from scipy.ndimage import gaussian_filter
+    w = np.array([0.299, 0.587, 0.114], np.float32)
+    x = a.astype(np.float32) @ w
+    y = b.astype(np.float32) @ w
+    c1, c2 = (0.01 * 255) ** 2, (0.03 * 255) ** 2
+    mx, my = gaussian_filter(x, 1.5), gaussian_filter(y, 1.5)
+    sx = gaussian_filter(x * x, 1.5) - mx * mx
+    sy = gaussian_filter(y * y, 1.5) - my * my
+    sxy = gaussian_filter(x * y, 1.5) - mx * my
+    m = ((2 * mx * my + c1) * (2 * sxy + c2)) / ((mx * mx + my * my + c1) * (sx + sy + c2))
+    return float(m.mean())
+
+
+def _chroma_diff(a: np.ndarray, b: np.ndarray) -> float:
+    from ..color.grade import to_oklab
+
+    def lab(u):
+        v = u.astype(np.float32) / 255.0
+        v = np.where(v <= 0.04045, v / 12.92, ((v + 0.055) / 1.055) ** 2.4)
+        return to_oklab(apply_matrix(v, conversion_matrix(SPACES["srgb"], PROPHOTO)).reshape(-1, 3))
+    la, lb = lab(a[::2, ::2]), lab(b[::2, ::2])
+    return float(np.hypot(la[:, 1] - lb[:, 1], la[:, 2] - lb[:, 2]).mean())
+
+
+def web_jpeg_bytes(arr: np.ndarray, icc_bytes: bytes, exif: bytes = b"") -> tuple[bytes, dict]:
+    """The smallest JPEG of ``arr`` that still looks the same: the lowest quality (searched 60-95) whose luminance
+    SSIM to the quality-95 file is at least WEB_SSIM, with the colour resolution halved (4:2:0) only where that adds
+    no visible colour change; progressive and with optimised tables. Returns (bytes, what was chosen)."""
+    import io
+    from PIL import Image
+    im = Image.fromarray(arr)
+
+    def enc(q, sub):
+        buf = io.BytesIO()
+        im.save(buf, "JPEG", quality=int(q), subsampling=sub, optimize=True, progressive=True, icc_profile=icc_bytes,
+                exif=exif)
+        return buf.getvalue()
+
+    def dec(b):
+        return np.asarray(Image.open(io.BytesIO(b)).convert("RGB"))
+    ref = dec(enc(95, 0))
+    best = None
+    for sub in (2, 0):                                  # 4:2:0 first (smaller), then full colour resolution
+        lo, hi, found = 60, 95, None
+        while lo <= hi:
+            q = (lo + hi) // 2
+            b = enc(q, sub)
+            d = dec(b)
+            ok = _ssim_y(ref, d) >= WEB_SSIM and (sub == 0 or _chroma_diff(ref, d) <= WEB_CHROMA)
+            if ok:
+                found, hi = (b, q), q - 1
+            else:
+                lo = q + 1
+        if found and (best is None or len(found[0]) < len(best[0])):
+            best = (found[0], found[1], sub)
+    if best is None:
+        b = enc(95, 0)
+        best = (b, 95, 0)
+    return best[0], {"quality": best[1], "subsampling": {0: "4:4:4", 2: "4:2:0"}[best[2]], "bytes": len(best[0])}
+
+
+def _exif_bytes(meta: dict) -> bytes:
+    from PIL import Image
+    exif = Image.Exif()
+    if meta.get("make"):
+        exif[271] = str(meta["make"])
+    if meta.get("model"):
+        exif[272] = str(meta["model"])
+    exif[305] = f"Photographic Studio By Bill {__version__}"
+    ex = exif.get_ifd(0x8769)
+    if meta.get("exposure_s"):
+        ex[0x829A] = _rational(meta["exposure_s"], 100000)
+    if meta.get("fnumber"):
+        ex[0x829D] = _rational(meta["fnumber"], 100)
+    if meta.get("focal_mm"):
+        ex[0x920A] = _rational(meta["focal_mm"], 100)
+    if meta.get("iso"):
+        ex[0x8827] = min(int(round(meta["iso"])), 65535)
+    if meta.get("lens"):
+        ex[0xA434] = str(meta["lens"])
+    return exif.tobytes()
+
+
+def write_web_jpeg(path: str, arr: np.ndarray, icc_bytes: bytes, meta: dict) -> dict:
+    data, info = web_jpeg_bytes(arr, icc_bytes, _exif_bytes(meta))
+    with open(path, "wb") as fh:
+        fh.write(data)
+    log.info("save for web: quality %d, %s colour, %.0f KB", info["quality"], info["subsampling"],
+             info["bytes"] / 1024)
+    return info
+
+
 def write_jpeg(path: str, arr: np.ndarray, icc_bytes: bytes, quality: int, meta: dict):
     from PIL import Image
     im = Image.fromarray(arr)
@@ -235,6 +343,19 @@ def write_jpeg(path: str, arr: np.ndarray, icc_bytes: bytes, quality: int, meta:
 OWN_MARK = "Photographic Studio By Bill"       # written into every export (TIFF/EXIF Software, XMP CreatorTool)
 
 
+def _write_fits(path: str, img_pp: np.ndarray, spec: "ExportSpec", meta: dict) -> str:
+    """FITS for astronomy programs (Siril, PixInsight): the finished picture as 32-bit float linear light in the
+    chosen space (no gamma, no 8/16-bit rounding; api.export has already resized and sharpened)."""
+    from . import fits as fx
+    img = np.asarray(img_pp, np.float32)
+    out = apply_matrix(np.ascontiguousarray(img), conversion_matrix(PROPHOTO, SPACES[spec.space]))
+    if spec.gamut_compress:
+        out = np.maximum(out, 0.0)
+    with slog.stage("output.write", log, format="fits", file=os.path.basename(path)):
+        fx.write(path, out, meta, {"COLORSPC": SPACES[spec.space].name[:68]})
+    return path
+
+
 def is_own_export(path: str) -> bool:
     """True when the file at ``path`` is one the Studio exported earlier (it carries the Studio's Software /
     CreatorTool mark). Anything unreadable or unmarked counts as somebody else's file."""
@@ -249,6 +370,9 @@ def is_own_export(path: str) -> bool:
             from PIL import Image
             with Image.open(path) as im:
                 return str(im.getexif().get(305) or "").startswith(OWN_MARK)
+        if low.endswith((".fits", ".fit", ".fts")):
+            from . import fits as fx
+            return fx.is_own(path)
         if low.endswith(".json"):                 # a data file the Studio wrote beside its pictures (surfaces)
             import json
             if os.path.getsize(path) > (8 << 20):
@@ -354,6 +478,8 @@ def write(path: str, img_pp: np.ndarray, spec: ExportSpec, meta: dict | None = N
     """Convert and write. ``img_pp`` is display-referred linear ProPhoto (from render()). Returns the path."""
     spec.validate()
     meta = slog.scrub(meta or {})
+    if spec.format == "fits":
+        return _write_fits(path, img_pp, spec, meta)
     with slog.stage("output.convert", log, space=spec.space, bits=spec.bits):
         arr = to_output(img_pp, spec)
     icc_bytes = icc.profile_bytes(spec.space)
@@ -363,6 +489,8 @@ def write(path: str, img_pp: np.ndarray, spec: ExportSpec, meta: dict | None = N
             write_tiff(tmp, arr, icc_bytes, meta, spec.compression)
         elif spec.format == "png":
             write_png(tmp, arr, icc_bytes, SPACES[spec.space].name, meta)
+        elif spec.web:
+            write_web_jpeg(tmp, arr, icc_bytes, meta)
         else:
             write_jpeg(tmp, arr, icc_bytes, spec.quality, meta)
         os.replace(tmp, path)                   # never leave a half-written file under the real name

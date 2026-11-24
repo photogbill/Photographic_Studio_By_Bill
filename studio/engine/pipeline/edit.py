@@ -25,8 +25,9 @@ STAGE_VERSIONS = {
     "camera_matrix": 2,              # 2: two-light (tungsten + daylight) matrices when the camera has them
     #                                  (color/spectral.py); version 1 sidecars keep the daylight-only matrix
     "exposure": 1,
-    "tone": 2,                       # 2: photos below the lowest native ISO (Sony ISO 50/64/80, Canon L, Nikon Lo)
+    "tone": 3,                       # 2: photos below the lowest native ISO (Sony ISO 50/64/80, Canon L, Nikon Lo)
     #                                  are darkened as the camera does (tone.extended_low_iso_ev)
+    #                                  3: curve colour "natural" by default (pipeline.natural_curve)
     "gamut": 1,
     "output": 1,
     "sharpen": 1,
@@ -76,6 +77,7 @@ class Tone:
     shoulder: float = 1.0
     white: float = 3.0               # stops above mid grey where the output reaches white
     toe: float = 0.0                 # -100..100 film toe: + opens the deepest shadows softly, - crushes them
+    curve_colour: str = ""           # "" = by tone stage version | "natural" (keeps colours) | "rich" (per channel)
     match_camera_brightness: bool = False   # OFF by default (Bill: no automatic brightness changes unless
                                             # turned on). On: per-body offset so mid grey matches the camera JPEG.
 

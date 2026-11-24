@@ -297,9 +297,10 @@ def make_spec(a, path: str, export: dict | None = None):
     of = getattr(a, "out_file", None)
     if of:
         ext = os.path.splitext(of)[1].lower()
-        fmt = {".tif": "tiff", ".tiff": "tiff", ".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg"}.get(ext)
+        fmt = {".tif": "tiff", ".tiff": "tiff", ".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg",
+               ".fits": "fits", ".fit": "fits"}.get(ext)
         if fmt is None:
-            raise Usage(f"--out-file: the name must end in .tif, .png or .jpg (got {of})")
+            raise Usage(f"--out-file: the name must end in .tif, .png, .jpg or .fits (got {of})")
         d["format"] = fmt
     for k in EXPORT_KEYS:
         if export.get(k) is not None:
@@ -1967,7 +1968,7 @@ def _parents():
     out = argparse.ArgumentParser(add_help=False)
     out.add_argument("--out", default=None, metavar="FOLDER", help="where results go (default: outputs/cli)")
     out.add_argument("--out-file", default=None, metavar="FILE", help="the result's exact name (one picture)")
-    out.add_argument("--format", default=None, choices=["tiff", "png", "jpeg"])
+    out.add_argument("--format", default=None, choices=["tiff", "png", "jpeg", "fits"])
     out.add_argument("--space", default=None, choices=["adobergb", "srgb", "prophoto", "displayp3"])
     out.add_argument("--bits", type=int, default=None, choices=[8, 16])
     out.add_argument("--quality", type=int, default=None, help="JPEG quality (default 95)")

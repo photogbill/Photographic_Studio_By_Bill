@@ -66,7 +66,7 @@ def test_every_command_is_a_tool_with_a_typed_schema():
     assert p["required"] == ["inputs"] and p["additionalProperties"] is False
     assert p["properties"]["inputs"]["type"] == "array" and p["properties"]["jpeg"]["type"] == "boolean"
     assert p["properties"]["scratches"]["type"] == ["number", "boolean"]
-    assert p["properties"]["format"]["enum"] == ["tiff", "png", "jpeg"] and "settings" in p["properties"]
+    assert p["properties"]["format"]["enum"] == ["tiff", "png", "jpeg", "fits"] and "settings" in p["properties"]
     assert by["studio_stack"]["inputSchema"]["required"] == ["kind", "inputs"]
     assert by["studio_look_profile"]["inputSchema"]["required"] == ["inputs", "save"]
     assert not ({"json", "result", "help"} & set(p["properties"]))

@@ -11,7 +11,7 @@ import subprocess
 import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SCRIPTS = ["install-linux.sh", "start-studio.sh", os.path.join("tools", "ensure_env.sh")]
+SCRIPTS = ["install-linux.sh", "start-studio.sh", "start-paint.sh", os.path.join("tools", "ensure_env.sh")]
 BASH = shutil.which("bash")
 
 

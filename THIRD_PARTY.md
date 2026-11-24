@@ -22,6 +22,8 @@ Optional (installed once by `tools\ensure_env.bat`; the Studio works without it)
 |---|---|---|---|
 | lensfunpy | Python binding to lensfun: distortion and vignetting numbers for modern lenses | MIT | yes |
 | lensfun (inside lensfunpy) | lens correction library | LGPL-3.0 | yes |
+| astropy (optional) | FITS files: reading and writing astronomy pictures (`studio/engine/io/fits.py`) | BSD-3-Clause | yes |
+| photutils (optional) | DAOStarFinder: finding and centring stars for night-sky stacks (`studio/engine/stack/astro.py`) | BSD-3-Clause | yes |
 | lensfun database (inside lensfunpy) | lens calibration data | CC BY-SA 3.0 | yes (data, read at run time; values used are frozen into the user's sidecar, not redistributed) |
 
 Shipped data with its own licence (no package to install):

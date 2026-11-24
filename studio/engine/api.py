@@ -117,13 +117,43 @@ def reload_central_sidecars() -> None:
     _CENTRAL = None
 
 
+def _untouched(edit_dict: dict | None) -> bool:
+    """True when a sidecar's edit holds nothing the person chose: every setting at its default, whichever version
+    wrote it (the Library writes a sidecar for a rating alone; opening a photo writes one too). The lens tag is a
+    fact about the photo, not an edit, so it does not count."""
+    if not edit_dict:
+        return True
+    try:
+        from .pipeline.edit import STAGE_VERSIONS
+        d = dict(edit_dict)
+        d["stage_versions"] = dict(STAGE_VERSIONS)      # judged as today's edit, so no old-version shim fires
+        d.setdefault("calibrated", Edit().calibrated)
+        a, b = Edit.from_dict(d).to_dict(), Edit().to_dict()
+        for x in (a, b):
+            x.pop("stage_versions", None)
+            (x.get("lens") or {}).pop("tag", None)
+        return a == b
+    except Exception:                                    # noqa: BLE001  (unreadable: treat as edited, leave it be)
+        return False
+
+
 def load_edit(raw_path: str, central_dir: str | None = None) -> Edit:
+    """The photo's master edit. A sidecar that holds no choices of the person's (only defaults, e.g. written for a
+    rating, or by opening the photo in an older version) gets today's rendering: freezing a photo's look is for
+    edits someone made, not for untouched photos (a tester saw new photos keep the old look, 2026-11-23)."""
     p = sidecar_path(raw_path, central_dir)
     if os.path.isfile(p):
         try:
             with open_text(p) as fh:
                 d = json.load(fh)
-            return Edit.from_dict(d.get("edit", {}))
+            ed = d.get("edit", {})
+            if ed and _untouched(ed):
+                e = Edit()
+                e.lens.tag = Edit.from_dict(ed).lens.tag
+                if e.to_dict() != Edit.from_dict(ed).to_dict():
+                    log.info("sidecar %s: untouched settings from an older version, rendered with today's", p)
+                return e
+            return Edit.from_dict(ed)
         except Exception:
             slog.log_exception(f"sidecar {p} unreadable; using defaults", log)
     return Edit()
@@ -148,12 +178,7 @@ def load_library_meta(raw_path: str, central_dir: str | None = None) -> dict:
 
 def edit_is_default(edit_dict: dict | None) -> bool:
     """True when a sidecar's edit is missing or holds only default settings (the photo has no edit yet)."""
-    if not edit_dict:
-        return True
-    try:
-        return Edit.from_dict(edit_dict).to_dict() == Edit().to_dict()
-    except Exception:                                    # noqa: BLE001  (unreadable: treat as edited, leave it be)
-        return False
+    return _untouched(edit_dict)
 
 
 def has_edit(raw_path: str, central_dir: str | None = None) -> bool:
@@ -299,7 +324,8 @@ def export(image: Image, edit: Edit | None, spec: ExportSpec, out_path: str | No
     edit = edit or Edit()
     spec.validate()
     if out_path is None:
-        out_path = os.path.join(out_dir or os.path.dirname(image.path), export_name(image.path, spec))
+        out_path = os.path.join(out_dir or os.path.dirname(image.path),
+                                export_name(image.path, spec, "web" if spec.web else ""))
     out_path = free_target(out_path, image.path, taken)
     arr = render(image, edit)
     if spec.long_edge:

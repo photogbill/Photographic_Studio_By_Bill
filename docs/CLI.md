@@ -31,11 +31,11 @@ and is built from the code, so it is never out of date. `schema light` or `schem
   never the picture's own name, and a file the Studio did not write is never replaced: the result goes beside it as
   `NAME_Studio-2.ext`. Always read the path from the JSON. Running a command again replaces its own earlier result.
 * **The same picture and recipe give the same pixels.**
-* Inputs: raws, TIFF, PNG, JPEG, and folders of them (`--recursive`). Points and boxes are fractions 0..1 of the
+* Inputs: raws, TIFF, PNG, JPEG, FITS (astronomy; needs the optional astropy), and folders of them (`--recursive`). Points and boxes are fractions 0..1 of the
   picture (u to the right, v down).
 * Default output: a raw becomes a 16-bit Adobe RGB TIFF; any other picture an 8-bit sRGB PNG; anything with
   transparency a PNG. Change with `--format --space --bits --quality --long-edge --sharpen-for`, or name the file
-  with `--out-file`. `--out FOLDER` says where (default `outputs\cli`).
+  with `--out-file`. `--format fits` writes 32-bit float linear light for Siril and PixInsight (needs astropy). `--out FOLDER` says where (default `outputs\cli`).
 * `--preview N`: a quick sRGB JPEG, long edge N, by the fast path. Use it to look before a full-size run.
 
 ## Settings and recipes

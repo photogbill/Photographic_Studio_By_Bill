@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import os
 
-from PySide6.QtWidgets import (QComboBox, QDialog, QFileDialog, QGridLayout, QHBoxLayout, QInputDialog, QPushButton,
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFileDialog, QGridLayout, QHBoxLayout, QInputDialog, QPushButton,
                                QSpinBox, QVBoxLayout)
 
 from .. import paths
@@ -30,9 +31,24 @@ class ExportDialog(QDialog):
         v.addLayout(prow)
         grid = QGridLayout()
         self.fmt = QComboBox()
-        self.fmt.addItems(["16-bit TIFF", "16-bit PNG", "8-bit PNG", "JPEG"])
+        self.fmt.addItems(["16-bit TIFF", "16-bit PNG", "8-bit PNG", "JPEG", "32-bit FITS (astronomy)"])
+        self.fmt.setItemData(4, "For Siril, PixInsight and other astronomy programs: 32-bit float, linear light "
+                                "(no gamma), nothing rounded. Weak at: photo programs and websites cannot open it.",
+                             Qt.ToolTipRole)
+        from ..engine.io import fits as _fx
+        if not _fx.available():                              # astropy missing: not offered rather than failing
+            self.fmt.model().item(4).setEnabled(False)
+            self.fmt.setItemData(4, _fx.MISSING, Qt.ToolTipRole)
         self.space = QComboBox()
         self.space.addItems(["Adobe RGB", "sRGB", "ProPhoto RGB", "Display P3"])
+        self.space.setCurrentIndex(1)                        # sRGB unless a preset says otherwise (Bill, 2026-11-23)
+        self.space.setToolTip("sRGB: what every screen, phone and website expects (the default). Adobe RGB and "
+                              "ProPhoto RGB keep more colour for printing and further editing; use them for prints "
+                              "and archives. Display P3: Apple screens.")
+        self.web = QCheckBox("Save for web: the smallest file at the best quality (sRGB JPEG, 2048 px)")
+        self.web.setToolTip("Tries JPEG qualities and picks the smallest file that still looks the same as the "
+                            "best-quality one (checked on detail and on colour), progressive, sharpened for screens. "
+                            "Named NAME_web_Studio.jpg so it never replaces a full-size export.")
         self.size = QSpinBox()
         self.size.setRange(0, 20000)
         self.size.setSpecialValueText("Full size")
@@ -52,6 +68,8 @@ class ExportDialog(QDialog):
         grid.addWidget(label("Sharpen for", "dim"), 3, 0)
         grid.addWidget(self.osh, 3, 1)
         grid.addWidget(self.osh_amt, 3, 2)
+        grid.addWidget(self.web, 5, 0, 1, 3)
+        self.web.toggled.connect(self._web_toggled)
         grid.addWidget(label("Folder", "dim"), 4, 0)
         grid.addWidget(self.dest, 4, 1)
         grid.addWidget(browse, 4, 2)
@@ -81,6 +99,7 @@ class ExportDialog(QDialog):
     PRESETS = {"Archive: 16-bit TIFF, Adobe RGB, full size": (0, 0, 0, 0, 1),
                "Print: 16-bit TIFF, ProPhoto RGB, full size": (0, 2, 0, 2, 1),
                "Web: JPEG, sRGB, 2048 px": (3, 1, 2048, 1, 1),
+               "Save for web: smallest file, best quality": (3, 1, 2048, 1, 1, 1),
                "Social: JPEG, sRGB, 1080 px": (3, 1, 1080, 1, 1)}
 
     def _fill_presets(self, current=""):
@@ -103,6 +122,7 @@ class ExportDialog(QDialog):
             self.osh.setCurrentIndex(int(val[3]))
             self.osh_amt.setCurrentIndex(int(val[4]))
             self._preset_size = int(val[2])
+            self.web.setChecked(len(val) > 5 and bool(val[5]))
 
     def _save_preset(self):
         name, ok = QInputDialog.getText(self, "Save export preset", "Name:",
@@ -116,6 +136,15 @@ class ExportDialog(QDialog):
         self._fill_presets(name.strip())
         self._preset_picked(self.preset.currentIndex())
 
+    def _web_toggled(self, on):
+        for w in (self.fmt, self.space):
+            w.setEnabled(not on)
+        if on:
+            self.fmt.setCurrentIndex(3)
+            self.space.setCurrentIndex(1)
+            if not self.size.value():
+                self.size.setValue(2048)
+
     def browse(self):
         d = QFileDialog.getExistingDirectory(self, "Export folder", self.dest.text())
         if d:
@@ -123,13 +152,14 @@ class ExportDialog(QDialog):
 
     def spec(self):
         from ..engine import ExportSpec
-        fmt, bits = [("tiff", 16), ("png", 16), ("png", 8), ("jpeg", 8)][self.fmt.currentIndex()]
+        fmt, bits = [("tiff", 16), ("png", 16), ("png", 8), ("jpeg", 8), ("fits", 16)][self.fmt.currentIndex()]
         space = ["adobergb", "srgb", "prophoto", "displayp3"][self.space.currentIndex()]
         self.settings.set("export_dir", self.dest.text())
         self.settings.set("export_preset", self.preset.currentText() if self.preset.currentIndex() > 0 else "")
         return ExportSpec(format=fmt, bits=bits, space=space, long_edge=self.size.value() or None,
                           sharpen_for=["none", "screen", "glossy", "matte"][self.osh.currentIndex()],
-                          sharpen_amount=["low", "standard", "high"][self.osh_amt.currentIndex()])
+                          sharpen_amount=["low", "standard", "high"][self.osh_amt.currentIndex()],
+                          web=self.web.isChecked())
 
 
 def QLineEdit_(text):
