@@ -2,6 +2,15 @@
 
 Newest first. Written by tools/whats_new.py from docs/NEXT_UPDATE.md each time Release.bat makes an update.
 
+## 0.1.20 (2026-11-24)
+
+- New: Paint has drawing assistants: rulers, vanishing points, 1, 2 and 3-point perspective, ellipses, fisheye and a curve. Strokes snap to them, with a strength slider.
+- New: Paint has symmetry: mirror left-right, top-bottom or both, radial and mandala with any number of spokes, and seamless tiles that wrap round the edges.
+- New: Paint has a grid and guide lines, with snapping for selections and assistant points.
+- New: Paint has a Reference tab: pin photos beside the canvas, click them to pick colours, see them in greys.
+- New: Paint's Colour tab has colour harmonies, gamut masks you can turn, and a palette from any photo.
+- New: Paint can show the painting as people with colour blindness see it.
+
 ## 0.1.19 (2026-11-24)
 
 - New: Paint > Brush > Edit brush: every setting of a brush with a live preview stroke that repaints as you move a slider (tip, opacity and flow, which pen inputs drive size, opacity and flow with a curve for each, texture and colour). Save keeps it for next time; Save as new brush makes your own copy; Back to how it came undoes everything since the window opened.
