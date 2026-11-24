@@ -473,4 +473,5 @@ line for each part, a Status note here.
   60 px). Not yet tried on real MyPaint packs (none in the workspace). Tests: 39 quick ones pass.
 - **Not built yet:** history kept on disk (P1); from P2: texture / grain, dual brush, scatter and colour jitter
   options, the other engines (spray, chalk, sketch, hatching, ...), the brush editor with a live preview stroke,
-  brush tags, imports (.abr, .sut, .kpp, .gbr / .gih), the 100-preset pack; the native pigment kernel if Bill agrees.
+  brush tags, imports (.abr, .sut, .kpp, .gbr / .gih), the 100-preset pack; a native C pigment kernel (**Bill, 2026-11-24 01:38: leave pigment mixing as it is for now, write the C code
+  later down the line**; Numba not used).
